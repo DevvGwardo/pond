@@ -124,15 +124,9 @@ export async function startDevServer(port: number): Promise<void> {
     )
 
     nextApp.post("/__pond/auth/guest", async (c) => {
-      const env = c.env as { incoming?: { socket?: { remoteAddress?: string } } } | undefined
-      const remote = env?.incoming?.socket?.remoteAddress
-      const isLoopback =
-        remote === "127.0.0.1" ||
-        remote === "::1" ||
-        remote === "::ffff:127.0.0.1"
-      if (!isLoopback) {
-        return c.json({ error: "guest auth restricted to loopback" }, 403)
-      }
+      // The dev server binds to 127.0.0.1 only (see serve() below), so this
+      // endpoint is only reachable from loopback. We still validate the name
+      // because it gets echoed into HTML in some dev tools.
       const body = (await c.req.json().catch(() => ({}))) as { name?: unknown }
       const raw = typeof body.name === "string" ? body.name.trim() : ""
       if (raw && !/^[A-Za-z0-9 _-]{1,32}$/.test(raw)) {
@@ -234,5 +228,5 @@ export async function startDevServer(port: number): Promise<void> {
 
   console.log(`\n  pond dev server running at http://localhost:${port}\n`)
 
-  serve({ fetch: app.fetch, port })
+  serve({ fetch: app.fetch, port, hostname: "127.0.0.1" })
 }
