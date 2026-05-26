@@ -46,11 +46,10 @@ export const loginCommand = defineCommand({
     }
 
     // Need to create a user. Use admin-token if given, otherwise POND_HOST_TOKEN (bootstrap).
-    const authToken =
-      adminToken || process.env.POND_HOST_TOKEN || ""
+    const authToken = adminToken || process.env.POND_HOST_TOKEN || ""
     if (!authToken) {
       console.error(
-        "Need credentials to create a user. Pass --admin-token <token> (admin user) or set POND_HOST_TOKEN (bootstrap first admin)."
+        "Need credentials to create a user. Pass --admin-token <token> (admin user) or set POND_HOST_TOKEN (bootstrap first admin).",
       )
       process.exit(1)
     }

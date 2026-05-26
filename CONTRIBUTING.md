@@ -59,7 +59,7 @@ For any control-plane change, add at least one happy-path and one rejection-path
 - [ ] `tsc --noEmit` is clean (covered by `npm run build`)
 - [ ] New CLI flags / endpoints / behavior are reflected in `README.md`
 - [ ] Mutation endpoints have audit log writes
-- [ ] Commit messages explain the *why*, not just the *what*
+- [ ] Commit messages explain the _why_, not just the _what_
 
 ## Coding style
 

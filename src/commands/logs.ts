@@ -63,9 +63,7 @@ export const logsCommand = defineCommand({
       const events = buffer.split("\n\n")
       buffer = events.pop() ?? ""
       for (const event of events) {
-        const dataLine = event
-          .split("\n")
-          .find((line) => line.startsWith("data: "))
+        const dataLine = event.split("\n").find((line) => line.startsWith("data: "))
         if (!dataLine) continue
         console.log(dataLine.slice(6))
       }

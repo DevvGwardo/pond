@@ -34,7 +34,7 @@ const OAUTH_VERIFIER_COOKIE = "pond_google_oauth_verifier"
 export async function createRuntime(
   serverFile: string,
   cwd: string,
-  options: RuntimeOptions = {}
+  options: RuntimeOptions = {},
 ): Promise<{ mount: (app: Hono) => void; db: Database.Database; def: CapsuleDefinition; env: Record<string, string> }> {
   const result = await esbuild.build({
     entryPoints: [serverFile],
@@ -62,7 +62,7 @@ export async function createRuntime(
 export async function createRuntimeFromDeployBundle(
   bundleFile: string,
   cwd: string,
-  options: RuntimeOptions = {}
+  options: RuntimeOptions = {},
 ): Promise<{ mount: (app: Hono) => void; db: Database.Database; def: CapsuleDefinition; env: Record<string, string> }> {
   const mod: ServerModule = await import(`${pathToFileURL(bundleFile).href}?t=${Date.now()}`)
   return createRuntimeFromDefinition(mod.default, cwd, options)
@@ -71,23 +71,20 @@ export async function createRuntimeFromDeployBundle(
 function createRuntimeFromDefinition(
   def: CapsuleDefinition,
   cwd: string,
-  options: RuntimeOptions = {}
+  options: RuntimeOptions = {},
 ): { mount: (app: Hono) => void; db: Database.Database; def: CapsuleDefinition; env: Record<string, string> } {
-
   const dbPath = path.join(cwd, ".pond", "data.db")
   fs.mkdirSync(path.dirname(dbPath), { recursive: true })
   const db = new Database(dbPath)
   db.pragma("journal_mode = WAL")
   db.exec("CREATE TABLE IF NOT EXISTS _pond_migrations (name TEXT PRIMARY KEY)")
   db.exec(
-    "CREATE TABLE IF NOT EXISTS _pond_users (id TEXT PRIMARY KEY, googleId TEXT UNIQUE, displayName TEXT, picture TEXT, email TEXT, createdAt TEXT DEFAULT (datetime('now')), updatedAt TEXT DEFAULT (datetime('now')))"
+    "CREATE TABLE IF NOT EXISTS _pond_users (id TEXT PRIMARY KEY, googleId TEXT UNIQUE, displayName TEXT, picture TEXT, email TEXT, createdAt TEXT DEFAULT (datetime('now')), updatedAt TEXT DEFAULT (datetime('now')))",
   )
 
   for (const [tableName, columns] of Object.entries(def.schema)) {
     assertIdent(tableName)
-    const exists = db
-      .prepare("SELECT name FROM _pond_migrations WHERE name = ?")
-      .get(`table_${tableName}`)
+    const exists = db.prepare("SELECT name FROM _pond_migrations WHERE name = ?").get(`table_${tableName}`)
 
     if (!exists) {
       const colDefs = Object.entries(columns).map(([col, type]) => {
@@ -109,7 +106,7 @@ function createRuntimeFromDefinition(
   if (!sessionSecretSource) {
     sessionSecretSource = randomBytes(32).toString("hex")
     console.warn(
-      "[pond] WARNING: no POND_SESSION_SECRET set — generated an ephemeral secret. Sessions will not survive restart. Set POND_SESSION_SECRET in .env.pond.server for production."
+      "[pond] WARNING: no POND_SESSION_SECRET set — generated an ephemeral secret. Sessions will not survive restart. Set POND_SESSION_SECRET in .env.pond.server for production.",
     )
   }
   const sessionSecret = new TextEncoder().encode(sessionSecretSource)
@@ -215,14 +212,8 @@ function createRuntimeFromDefinition(
       }
 
       db.prepare(
-        "INSERT INTO _pond_users (id, googleId, displayName, picture, email) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET googleId = excluded.googleId, displayName = excluded.displayName, picture = excluded.picture, email = excluded.email, updatedAt = datetime('now')"
-      ).run(
-        userInfo.sub,
-        userInfo.sub,
-        userInfo.name ?? null,
-        userInfo.picture ?? null,
-        userInfo.email ?? null
-      )
+        "INSERT INTO _pond_users (id, googleId, displayName, picture, email) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET googleId = excluded.googleId, displayName = excluded.displayName, picture = excluded.picture, email = excluded.email, updatedAt = datetime('now')",
+      ).run(userInfo.sub, userInfo.sub, userInfo.name ?? null, userInfo.picture ?? null, userInfo.email ?? null)
 
       const session = await new SignJWT({
         userId: userInfo.sub,
@@ -323,23 +314,150 @@ export async function buildForDeploy(serverFile: string, cwd: string): Promise<{
 // SQLite reserved words — using any of these unquoted as a table/column name
 // produces a syntax error at the next CREATE/SELECT. List from sqlite.org/lang_keywords.html.
 const SQLITE_RESERVED_WORDS = new Set([
-  "ABORT", "ACTION", "ADD", "AFTER", "ALL", "ALTER", "ANALYZE", "AND", "AS", "ASC",
-  "ATTACH", "AUTOINCREMENT", "BEFORE", "BEGIN", "BETWEEN", "BY", "CASCADE", "CASE", "CAST",
-  "CHECK", "COLLATE", "COLUMN", "COMMIT", "CONFLICT", "CONSTRAINT", "CREATE", "CROSS",
-  "CURRENT", "CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP", "DATABASE", "DEFAULT",
-  "DEFERRABLE", "DEFERRED", "DELETE", "DESC", "DETACH", "DISTINCT", "DO", "DROP", "EACH",
-  "ELSE", "END", "ESCAPE", "EXCEPT", "EXCLUDE", "EXCLUSIVE", "EXISTS", "EXPLAIN", "FAIL",
-  "FILTER", "FIRST", "FOLLOWING", "FOR", "FOREIGN", "FROM", "FULL", "GENERATED", "GLOB",
-  "GROUP", "GROUPS", "HAVING", "IF", "IGNORE", "IMMEDIATE", "IN", "INDEX", "INDEXED",
-  "INITIALLY", "INNER", "INSERT", "INSTEAD", "INTERSECT", "INTO", "IS", "ISNULL", "JOIN",
-  "KEY", "LAST", "LEFT", "LIKE", "LIMIT", "MATCH", "NATURAL", "NO", "NOT", "NOTHING",
-  "NOTNULL", "NULL", "NULLS", "OF", "OFFSET", "ON", "OR", "ORDER", "OTHERS", "OUTER",
-  "OVER", "PARTITION", "PLAN", "PRAGMA", "PRECEDING", "PRIMARY", "QUERY", "RAISE", "RANGE",
-  "RECURSIVE", "REFERENCES", "REGEXP", "REINDEX", "RELEASE", "RENAME", "REPLACE", "RESTRICT",
-  "RIGHT", "ROLLBACK", "ROW", "ROWS", "SAVEPOINT", "SELECT", "SET", "TABLE", "TEMP",
-  "TEMPORARY", "THEN", "TIES", "TO", "TRANSACTION", "TRIGGER", "UNBOUNDED", "UNION", "UNIQUE",
-  "UPDATE", "USING", "VACUUM", "VALUES", "VIEW", "VIRTUAL", "WHEN", "WHERE", "WINDOW",
-  "WITH", "WITHOUT",
+  "ABORT",
+  "ACTION",
+  "ADD",
+  "AFTER",
+  "ALL",
+  "ALTER",
+  "ANALYZE",
+  "AND",
+  "AS",
+  "ASC",
+  "ATTACH",
+  "AUTOINCREMENT",
+  "BEFORE",
+  "BEGIN",
+  "BETWEEN",
+  "BY",
+  "CASCADE",
+  "CASE",
+  "CAST",
+  "CHECK",
+  "COLLATE",
+  "COLUMN",
+  "COMMIT",
+  "CONFLICT",
+  "CONSTRAINT",
+  "CREATE",
+  "CROSS",
+  "CURRENT",
+  "CURRENT_DATE",
+  "CURRENT_TIME",
+  "CURRENT_TIMESTAMP",
+  "DATABASE",
+  "DEFAULT",
+  "DEFERRABLE",
+  "DEFERRED",
+  "DELETE",
+  "DESC",
+  "DETACH",
+  "DISTINCT",
+  "DO",
+  "DROP",
+  "EACH",
+  "ELSE",
+  "END",
+  "ESCAPE",
+  "EXCEPT",
+  "EXCLUDE",
+  "EXCLUSIVE",
+  "EXISTS",
+  "EXPLAIN",
+  "FAIL",
+  "FILTER",
+  "FIRST",
+  "FOLLOWING",
+  "FOR",
+  "FOREIGN",
+  "FROM",
+  "FULL",
+  "GENERATED",
+  "GLOB",
+  "GROUP",
+  "GROUPS",
+  "HAVING",
+  "IF",
+  "IGNORE",
+  "IMMEDIATE",
+  "IN",
+  "INDEX",
+  "INDEXED",
+  "INITIALLY",
+  "INNER",
+  "INSERT",
+  "INSTEAD",
+  "INTERSECT",
+  "INTO",
+  "IS",
+  "ISNULL",
+  "JOIN",
+  "KEY",
+  "LAST",
+  "LEFT",
+  "LIKE",
+  "LIMIT",
+  "MATCH",
+  "NATURAL",
+  "NO",
+  "NOT",
+  "NOTHING",
+  "NOTNULL",
+  "NULL",
+  "NULLS",
+  "OF",
+  "OFFSET",
+  "ON",
+  "OR",
+  "ORDER",
+  "OTHERS",
+  "OUTER",
+  "OVER",
+  "PARTITION",
+  "PLAN",
+  "PRAGMA",
+  "PRECEDING",
+  "PRIMARY",
+  "QUERY",
+  "RAISE",
+  "RANGE",
+  "RECURSIVE",
+  "REFERENCES",
+  "REGEXP",
+  "REINDEX",
+  "RELEASE",
+  "RENAME",
+  "REPLACE",
+  "RESTRICT",
+  "RIGHT",
+  "ROLLBACK",
+  "ROW",
+  "ROWS",
+  "SAVEPOINT",
+  "SELECT",
+  "SET",
+  "TABLE",
+  "TEMP",
+  "TEMPORARY",
+  "THEN",
+  "TIES",
+  "TO",
+  "TRANSACTION",
+  "TRIGGER",
+  "UNBOUNDED",
+  "UNION",
+  "UNIQUE",
+  "UPDATE",
+  "USING",
+  "VACUUM",
+  "VALUES",
+  "VIEW",
+  "VIRTUAL",
+  "WHEN",
+  "WHERE",
+  "WINDOW",
+  "WITH",
+  "WITHOUT",
 ])
 
 function assertIdent(name: string) {
@@ -358,7 +476,14 @@ function assertIdent(name: string) {
 }
 
 function buildDbProxy(db: Database.Database): CapsuleContext["db"] {
-  function createBuilder(tableName: string, parts: { where: Array<{ column: string; value: any }>; orderBy: Array<{ column: string; dir: "asc" | "desc" }>; limit?: number }) {
+  function createBuilder(
+    tableName: string,
+    parts: {
+      where: Array<{ column: string; value: any }>
+      orderBy: Array<{ column: string; dir: "asc" | "desc" }>
+      limit?: number
+    },
+  ) {
     return {
       where(column: string, value: any) {
         assertIdent(column)
@@ -383,9 +508,7 @@ function buildDbProxy(db: Database.Database): CapsuleContext["db"] {
       },
       all() {
         const whereSql =
-          parts.where.length > 0
-            ? ` WHERE ${parts.where.map(({ column }) => `${column} = ?`).join(" AND ")}`
-            : ""
+          parts.where.length > 0 ? ` WHERE ${parts.where.map(({ column }) => `${column} = ?`).join(" AND ")}` : ""
         const orderSql =
           parts.orderBy.length > 0
             ? ` ORDER BY ${parts.orderBy.map(({ column, dir }) => `${column} ${dir.toUpperCase()}`).join(", ")}`
@@ -416,7 +539,7 @@ function buildDbProxy(db: Database.Database): CapsuleContext["db"] {
           keys.forEach(assertIdent)
           const values = keys.map((key) => data[key])
           db.prepare(
-            `INSERT INTO ${tableName} (id, ${keys.join(", ")}) VALUES (?, ${keys.map(() => "?").join(", ")})`
+            `INSERT INTO ${tableName} (id, ${keys.join(", ")}) VALUES (?, ${keys.map(() => "?").join(", ")})`,
           ).run(id, ...values)
           return db.prepare(`SELECT * FROM ${tableName} WHERE id = ?`).get(id)
         },
@@ -426,7 +549,7 @@ function buildDbProxy(db: Database.Database): CapsuleContext["db"] {
           const sets = keys.map((key) => `${key} = ?`).join(", ")
           db.prepare(`UPDATE ${tableName} SET ${sets}, updatedAt = datetime('now') WHERE id = ?`).run(
             ...keys.map((key) => data[key]),
-            id
+            id,
           )
           return db.prepare(`SELECT * FROM ${tableName} WHERE id = ?`).get(id)
         },

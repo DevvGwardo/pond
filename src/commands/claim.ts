@@ -40,8 +40,7 @@ export const claimCommand = defineCommand({
       claimedAt?: string
     }
 
-    const apiUrl =
-      (typeof args.api === "string" && args.api ? args.api.replace(/\/$/, "") : undefined) ?? deploy.apiUrl
+    const apiUrl = (typeof args.api === "string" && args.api ? args.api.replace(/\/$/, "") : undefined) ?? deploy.apiUrl
 
     if (!deploy.deployId || !apiUrl || !deploy.claimToken) {
       console.error("This deploy does not have hosted claim metadata.")
@@ -64,7 +63,7 @@ export const claimCommand = defineCommand({
       const cred = loadCredentials(apiUrl)
       if (!cred) {
         console.error(
-          `No saved credentials for ${apiUrl}. Pass --signup <username> to create one, or run \`pond login --api ${apiUrl} --username <name>\` first.`
+          `No saved credentials for ${apiUrl}. Pass --signup <username> to create one, or run \`pond login --api ${apiUrl} --username <name>\` first.`,
         )
         process.exit(1)
       }
@@ -123,8 +122,8 @@ export const claimCommand = defineCommand({
           expiresAt: undefined,
         },
         null,
-        2
-      )
+        2,
+      ),
     )
 
     console.log(`Claimed deploy ${remote.deployId}${savedUsername ? ` for ${savedUsername}` : ""} at ${remote.url}`)

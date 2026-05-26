@@ -1,4 +1,4 @@
-export { capsule, query, mutation, endpoint, table, string, number, boolean } from "./server/index.js";
+export { capsule, query, mutation, endpoint, table, string, number, boolean } from "./server/index.js"
 export type {
   CapsuleDefinition,
   CapsuleContext,
@@ -12,4 +12,4 @@ export type {
   EndpointRequest,
   EndpointResponse,
   ColumnType,
-} from "./server/index.js";
+} from "./server/index.js"

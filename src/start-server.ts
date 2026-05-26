@@ -42,7 +42,7 @@ function originHost(originHeader: string): string | null {
 function corsHeadersFor(
   origin: string | undefined,
   host: string | undefined,
-  allowedOrigins: string[]
+  allowedOrigins: string[],
 ): Record<string, string> {
   if (!origin) return {}
   const oHost = originHost(origin)
@@ -54,7 +54,7 @@ function corsHeadersFor(
   if (!sameOrigin && !allowedSet.has(originNorm)) return {}
   return {
     "access-control-allow-origin": origin,
-    "vary": "Origin",
+    vary: "Origin",
     "access-control-allow-credentials": "true",
     "access-control-allow-headers": "content-type, authorization, x-pond-claim-token",
     "access-control-allow-methods": "GET, POST, PUT, DELETE, OPTIONS",
@@ -192,9 +192,7 @@ export async function createBundleServerApp(options: StartBundleServerOptions): 
       return c.json({ error: "Forbidden" }, 403)
     }
     const table = c.req.param("table")
-    const exists = runtime.db
-      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
-      .get(table)
+    const exists = runtime.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table)
     if (!exists) return c.json({ error: `Unknown table: ${table}` }, 404)
     return c.json(runtime.db.prepare(`SELECT * FROM ${table}`).all())
   })
@@ -209,9 +207,8 @@ export async function createBundleServerApp(options: StartBundleServerOptions): 
         start(controller) {
           streamController = controller
           logClients.add(controller)
-          const replay = recentLogs.length < RECENT_LOG_CAP
-            ? readRecentLogsFromDisk(logFile, RECENT_LOG_CAP)
-            : recentLogs
+          const replay =
+            recentLogs.length < RECENT_LOG_CAP ? readRecentLogsFromDisk(logFile, RECENT_LOG_CAP) : recentLogs
           for (const entry of replay) {
             controller.enqueue(encoder.encode(`data: ${JSON.stringify(entry)}\n\n`))
           }
@@ -228,7 +225,7 @@ export async function createBundleServerApp(options: StartBundleServerOptions): 
           "cache-control": "no-cache",
           connection: "keep-alive",
         },
-      }
+      },
     )
   })
 

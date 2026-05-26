@@ -85,7 +85,7 @@ export interface ControlDb {
     deployId: string,
     claimToken: string,
     gracePeriodMs: number,
-    retentionMs: number
+    retentionMs: number,
   ): { terminatesAt: string; expiresAt: string }
   findAnonymous(deployId: string): AnonymousDeployRow | null
   markTerminated(deployId: string): void
@@ -183,7 +183,7 @@ export function openControlDb(dataDir: string): ControlDb {
 
   // Lightweight migration for pre-Phase-5 DBs that only had (createdAt, expiresAt).
   const anonCols = (db.prepare("PRAGMA table_info(anonymous_deploys)").all() as Array<{ name: string }>).map(
-    (c) => c.name
+    (c) => c.name,
   )
   if (!anonCols.includes("terminatesAt")) {
     db.exec(`ALTER TABLE anonymous_deploys ADD COLUMN terminatesAt TEXT NOT NULL DEFAULT ''`)
@@ -208,80 +208,70 @@ export function openControlDb(dataDir: string): ControlDb {
     return createHash("sha256").update(token).digest("hex")
   }
 
-  const insertUser = db.prepare(
-    "INSERT INTO users (id, username, tokenHash, isAdmin) VALUES (?, ?, ?, ?)"
-  )
+  const insertUser = db.prepare("INSERT INTO users (id, username, tokenHash, isAdmin) VALUES (?, ?, ?, ?)")
   const updateUserToken = db.prepare(
-    "UPDATE users SET tokenHash = ?, previousTokenHash = ?, previousTokenExpiresAt = ? WHERE id = ?"
+    "UPDATE users SET tokenHash = ?, previousTokenHash = ?, previousTokenExpiresAt = ? WHERE id = ?",
   )
   const selectByCurrentHash = db.prepare(
-    "SELECT id, username, tokenHash, isAdmin, createdAt FROM users WHERE tokenHash = ?"
+    "SELECT id, username, tokenHash, isAdmin, createdAt FROM users WHERE tokenHash = ?",
   )
   const selectByPreviousHash = db.prepare(
-    "SELECT id, username, tokenHash, isAdmin, createdAt, previousTokenExpiresAt FROM users WHERE previousTokenHash = ?"
+    "SELECT id, username, tokenHash, isAdmin, createdAt, previousTokenExpiresAt FROM users WHERE previousTokenHash = ?",
   )
   const selectById = db.prepare("SELECT id, username, tokenHash, isAdmin, createdAt FROM users WHERE id = ?")
   const selectByUsername = db.prepare(
-    "SELECT id, username, tokenHash, isAdmin, createdAt FROM users WHERE username = ?"
+    "SELECT id, username, tokenHash, isAdmin, createdAt FROM users WHERE username = ?",
   )
   const countUsers = db.prepare("SELECT COUNT(*) AS n FROM users")
   const insertOwner = db.prepare(
-    "INSERT INTO deploy_owners (deployId, userId) VALUES (?, ?) ON CONFLICT(deployId) DO UPDATE SET userId = excluded.userId"
+    "INSERT INTO deploy_owners (deployId, userId) VALUES (?, ?) ON CONFLICT(deployId) DO UPDATE SET userId = excluded.userId",
   )
   const selectOwner = db.prepare("SELECT userId FROM deploy_owners WHERE deployId = ?")
   const selectDeploysForUser = db.prepare("SELECT deployId FROM deploy_owners WHERE userId = ?")
   const deleteOwner = db.prepare("DELETE FROM deploy_owners WHERE deployId = ?")
   const selectQuota = db.prepare(
-    "SELECT deployId, maxBundleBytes, maxDiskBytes, maxMemoryMb FROM deploy_quotas WHERE deployId = ?"
+    "SELECT deployId, maxBundleBytes, maxDiskBytes, maxMemoryMb FROM deploy_quotas WHERE deployId = ?",
   )
   const upsertQuota = db.prepare(
     "INSERT INTO deploy_quotas (deployId, maxBundleBytes, maxDiskBytes, maxMemoryMb) VALUES (?, ?, ?, ?) " +
       "ON CONFLICT(deployId) DO UPDATE SET maxBundleBytes = excluded.maxBundleBytes, " +
-      "maxDiskBytes = excluded.maxDiskBytes, maxMemoryMb = excluded.maxMemoryMb"
+      "maxDiskBytes = excluded.maxDiskBytes, maxMemoryMb = excluded.maxMemoryMb",
   )
   const deleteQuotaStmt = db.prepare("DELETE FROM deploy_quotas WHERE deployId = ?")
   const insertAnon = db.prepare(
-    "INSERT INTO anonymous_deploys (deployId, claimTokenHash, createdAt, terminatesAt, expiresAt, terminated) VALUES (?, ?, ?, ?, ?, 0)"
+    "INSERT INTO anonymous_deploys (deployId, claimTokenHash, createdAt, terminatesAt, expiresAt, terminated) VALUES (?, ?, ?, ?, ?, 0)",
   )
   const selectAnon = db.prepare(
-    "SELECT deployId, claimTokenHash, createdAt, terminatesAt, expiresAt, terminated FROM anonymous_deploys WHERE deployId = ?"
+    "SELECT deployId, claimTokenHash, createdAt, terminatesAt, expiresAt, terminated FROM anonymous_deploys WHERE deployId = ?",
   )
   const deleteAnon = db.prepare("DELETE FROM anonymous_deploys WHERE deployId = ?")
   const markTerminatedStmt = db.prepare("UPDATE anonymous_deploys SET terminated = 1 WHERE deployId = ?")
   const selectForTermination = db.prepare(
-    "SELECT deployId FROM anonymous_deploys WHERE terminated = 0 AND terminatesAt < ?"
+    "SELECT deployId FROM anonymous_deploys WHERE terminated = 0 AND terminatesAt < ?",
   )
   const selectForDeletion = db.prepare("SELECT deployId FROM anonymous_deploys WHERE expiresAt < ?")
   const promoteTxn = db.transaction((deployId: string, userId: string) => {
     deleteAnon.run(deployId)
     insertOwner.run(deployId, userId)
   })
-  const insertDomain = db.prepare(
-    "INSERT INTO custom_domains (subdomain, deployId) VALUES (?, ?)"
-  )
-  const selectDomain = db.prepare(
-    "SELECT subdomain, deployId, createdAt FROM custom_domains WHERE subdomain = ?"
-  )
+  const insertDomain = db.prepare("INSERT INTO custom_domains (subdomain, deployId) VALUES (?, ?)")
+  const selectDomain = db.prepare("SELECT subdomain, deployId, createdAt FROM custom_domains WHERE subdomain = ?")
   const selectDomainsForDeploy = db.prepare(
-    "SELECT subdomain, createdAt FROM custom_domains WHERE deployId = ? ORDER BY createdAt ASC"
+    "SELECT subdomain, createdAt FROM custom_domains WHERE deployId = ? ORDER BY createdAt ASC",
   )
   const selectDomainsForUser = db.prepare(
     "SELECT cd.subdomain AS subdomain, cd.deployId AS deployId, cd.createdAt AS createdAt " +
       "FROM custom_domains cd JOIN deploy_owners do ON do.deployId = cd.deployId " +
-      "WHERE do.userId = ? ORDER BY cd.createdAt ASC"
+      "WHERE do.userId = ? ORDER BY cd.createdAt ASC",
   )
   const countDomainsForUserStmt = db.prepare(
-    "SELECT COUNT(*) AS n FROM custom_domains cd JOIN deploy_owners do ON do.deployId = cd.deployId WHERE do.userId = ?"
+    "SELECT COUNT(*) AS n FROM custom_domains cd JOIN deploy_owners do ON do.deployId = cd.deployId WHERE do.userId = ?",
   )
   const deleteDomain = db.prepare("DELETE FROM custom_domains WHERE subdomain = ?")
   const deleteDomainsForDeployStmt = db.prepare("DELETE FROM custom_domains WHERE deployId = ?")
-  const pruneRateForKey = db.prepare(
-    "DELETE FROM rate_limits WHERE scope = ? AND key = ? AND ts < ?"
-  )
+  const pruneRateForKey = db.prepare("DELETE FROM rate_limits WHERE scope = ? AND key = ? AND ts < ?")
   const pruneRateAll = db.prepare("DELETE FROM rate_limits WHERE ts < ?")
-  const countRateForKey = db.prepare(
-    "SELECT COUNT(*) AS n FROM rate_limits WHERE scope = ? AND key = ? AND ts >= ?"
-  )
+  const countRateForKey = db.prepare("SELECT COUNT(*) AS n FROM rate_limits WHERE scope = ? AND key = ? AND ts >= ?")
   const insertRate = db.prepare("INSERT INTO rate_limits (scope, key, ts) VALUES (?, ?, ?)")
   const rateAllowTxn = db.transaction((scope: string, key: string, windowMs: number, limit: number) => {
     const now = Date.now()
@@ -294,13 +284,13 @@ export function openControlDb(dataDir: string): ControlDb {
   })
 
   const insertAudit = db.prepare(
-    "INSERT INTO audit_log (actor, action, targetDeployId, targetUserId, metadata) VALUES (?, ?, ?, ?, ?)"
+    "INSERT INTO audit_log (actor, action, targetDeployId, targetUserId, metadata) VALUES (?, ?, ?, ?, ?)",
   )
   const selectAuditRecent = db.prepare(
-    "SELECT id, ts, actor, action, targetDeployId, targetUserId, metadata FROM audit_log ORDER BY id DESC LIMIT ?"
+    "SELECT id, ts, actor, action, targetDeployId, targetUserId, metadata FROM audit_log ORDER BY id DESC LIMIT ?",
   )
   const selectAuditSince = db.prepare(
-    "SELECT id, ts, actor, action, targetDeployId, targetUserId, metadata FROM audit_log WHERE ts >= ? ORDER BY id DESC LIMIT ?"
+    "SELECT id, ts, actor, action, targetDeployId, targetUserId, metadata FROM audit_log WHERE ts >= ? ORDER BY id DESC LIMIT ?",
   )
 
   return {
@@ -444,7 +434,7 @@ export function openControlDb(dataDir: string): ControlDb {
         entry.action,
         entry.targetDeployId ?? null,
         entry.targetUserId ?? null,
-        entry.metadata ? JSON.stringify(entry.metadata) : null
+        entry.metadata ? JSON.stringify(entry.metadata) : null,
       )
     },
     rateAllow(scope, key, windowMs, limit) {
@@ -457,9 +447,9 @@ export function openControlDb(dataDir: string): ControlDb {
     },
     listAudit(opts) {
       const limit = Math.min(Math.max(opts?.limit ?? 100, 1), 1000)
-      const rows = (opts?.sinceTs
-        ? selectAuditSince.all(opts.sinceTs, limit)
-        : selectAuditRecent.all(limit)) as AuditLogRow[]
+      const rows = (
+        opts?.sinceTs ? selectAuditSince.all(opts.sinceTs, limit) : selectAuditRecent.all(limit)
+      ) as AuditLogRow[]
       return rows
     },
     close() {

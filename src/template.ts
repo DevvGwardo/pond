@@ -1,7 +1,7 @@
-import * as fs from "node:fs";
-import * as path from "node:path";
-import { execSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import * as fs from "node:fs"
+import * as path from "node:path"
+import { execSync } from "node:child_process"
+import { randomBytes } from "node:crypto"
 
 const TODO_SERVER_TS = `import { capsule, mutation, query, string, table } from "pond/server";
 
@@ -24,7 +24,7 @@ export default capsule({
     ),
   },
 });
-`;
+`
 
 const TODO_CLIENT_TSX = `import { useMutation, useQuery } from "pond/client";
 
@@ -79,7 +79,7 @@ export function App() {
     </main>
   );
 }
-`;
+`
 
 const TODO_ENV_TEMPLATE = `# Server-only environment variables
 # POND_SESSION_SECRET={{SESSION_SECRET}}
@@ -87,32 +87,27 @@ const TODO_ENV_TEMPLATE = `# Server-only environment variables
 # GOOGLE_CLIENT_ID=
 # GOOGLE_CLIENT_SECRET=
 # GOOGLE_REDIRECT_URI=http://localhost:3000/auth/google/callback
-`;
+`
 
 const TODO_GITIGNORE = `node_modules
 .pond
-`;
+`
 
-const POND_VERSION = JSON.parse(
-  fs.readFileSync(path.resolve(import.meta.dirname, "../package.json"), "utf-8")
-).version as string;
+const POND_VERSION = JSON.parse(fs.readFileSync(path.resolve(import.meta.dirname, "../package.json"), "utf-8"))
+  .version as string
 
-export async function copyTemplate(
-  name: string,
-  _template: string,
-  initGit: boolean
-): Promise<void> {
-  const dir = path.resolve(process.cwd(), name);
+export async function copyTemplate(name: string, _template: string, initGit: boolean): Promise<void> {
+  const dir = path.resolve(process.cwd(), name)
 
   if (fs.existsSync(dir)) {
-    console.error(`Directory ${name} already exists`);
-    process.exit(1);
+    console.error(`Directory ${name} already exists`)
+    process.exit(1)
   }
 
-  fs.mkdirSync(dir, { recursive: true });
-  fs.mkdirSync(path.join(dir, "server"), { recursive: true });
-  fs.mkdirSync(path.join(dir, "client"), { recursive: true });
-  fs.mkdirSync(path.join(dir, "shared"), { recursive: true });
+  fs.mkdirSync(dir, { recursive: true })
+  fs.mkdirSync(path.join(dir, "server"), { recursive: true })
+  fs.mkdirSync(path.join(dir, "client"), { recursive: true })
+  fs.mkdirSync(path.join(dir, "shared"), { recursive: true })
 
   fs.writeFileSync(
     path.join(dir, "package.json"),
@@ -135,19 +130,19 @@ export async function copyTemplate(
         },
       },
       null,
-      2
-    )
-  );
-  fs.writeFileSync(path.join(dir, "server", "index.ts"), TODO_SERVER_TS);
-  fs.writeFileSync(path.join(dir, "client", "index.tsx"), TODO_CLIENT_TSX);
-  fs.writeFileSync(path.join(dir, "shared", ".gitkeep"), "");
-  const envContents = TODO_ENV_TEMPLATE.replace("{{SESSION_SECRET}}", randomBytes(32).toString("hex"));
-  fs.writeFileSync(path.join(dir, ".env.pond.server"), envContents, { mode: 0o600 });
-  fs.writeFileSync(path.join(dir, ".gitignore"), TODO_GITIGNORE);
+      2,
+    ),
+  )
+  fs.writeFileSync(path.join(dir, "server", "index.ts"), TODO_SERVER_TS)
+  fs.writeFileSync(path.join(dir, "client", "index.tsx"), TODO_CLIENT_TSX)
+  fs.writeFileSync(path.join(dir, "shared", ".gitkeep"), "")
+  const envContents = TODO_ENV_TEMPLATE.replace("{{SESSION_SECRET}}", randomBytes(32).toString("hex"))
+  fs.writeFileSync(path.join(dir, ".env.pond.server"), envContents, { mode: 0o600 })
+  fs.writeFileSync(path.join(dir, ".gitignore"), TODO_GITIGNORE)
 
   if (initGit) {
-    execSync("git init", { cwd: dir, stdio: "ignore" });
-    execSync("git add -A", { cwd: dir, stdio: "ignore" });
-    execSync('git commit -m "init"', { cwd: dir, stdio: "ignore" });
+    execSync("git init", { cwd: dir, stdio: "ignore" })
+    execSync("git add -A", { cwd: dir, stdio: "ignore" })
+    execSync('git commit -m "init"', { cwd: dir, stdio: "ignore" })
   }
 }

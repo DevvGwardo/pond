@@ -95,7 +95,7 @@ test("`pond new` refuses to overwrite an existing directory", async () => {
         cwd: parent,
         timeout: 10000,
       }),
-    /already exists|process exited|code 1/i
+    /already exists|process exited|code 1/i,
   )
 })
 
@@ -201,7 +201,7 @@ test("`pond dev` boots, serves /api/query, and exits cleanly on SIGINT", async (
   // SIGINT should produce a clean exit (code 0 OR signal SIGINT)
   assert.ok(
     proc.exitCode === 0 || proc.signalCode === "SIGINT" || proc.exitCode === null,
-    `dev exited unexpectedly: code=${proc.exitCode}, signal=${proc.signalCode}, stderr=${stderrBuf.slice(-300)}`
+    `dev exited unexpectedly: code=${proc.exitCode}, signal=${proc.signalCode}, stderr=${stderrBuf.slice(-300)}`,
   )
 })
 

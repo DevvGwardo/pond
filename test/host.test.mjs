@@ -49,7 +49,7 @@ export default capsule({
   queries: { items: query((ctx) => ctx.db.items.all()) },
   mutations: { add: mutation((ctx, name) => ctx.db.items.insert({ name })) },
 })
-`
+`,
   )
   const { outfile } = await buildForDeploy(serverFile, workDir)
   return outfile
@@ -73,12 +73,25 @@ async function startHost() {
   dataDir = mkdtempSync(path.join(tmpdir(), "pond-host-test-"))
   hostProc = spawn(
     process.execPath,
-    [CLI_PATH, "host", "--port", String(port), "--host", "127.0.0.1", "--public-host", publicHost, "--data-dir", dataDir, "--anonymous-rate-per-hour", "100"],
+    [
+      CLI_PATH,
+      "host",
+      "--port",
+      String(port),
+      "--host",
+      "127.0.0.1",
+      "--public-host",
+      publicHost,
+      "--data-dir",
+      dataDir,
+      "--anonymous-rate-per-hour",
+      "100",
+    ],
     {
       env: { ...process.env, POND_HOST_TOKEN: hostToken },
       stdio: ["ignore", "pipe", "pipe"],
       cwd: REPO_ROOT,
-    }
+    },
   )
   hostProc.stdout.on("data", () => {})
   hostProc.stderr.on("data", () => {})
@@ -160,7 +173,7 @@ test("subdomain Host header reaches the deploy via proxy", async () => {
         let data = ""
         res.on("data", (c) => (data += c))
         res.on("end", () => resolve({ status: res.statusCode, body: data }))
-      }
+      },
     )
     req.on("error", reject)
     req.end()
@@ -258,12 +271,24 @@ async function startExtraHost({ extraArgs = [], env = {} } = {}) {
   const xToken = randomBytes(16).toString("hex")
   const proc = spawn(
     process.execPath,
-    [CLI_PATH, "host", "--port", String(xPort), "--host", "127.0.0.1", "--public-host", publicHost, "--data-dir", xData, ...extraArgs],
+    [
+      CLI_PATH,
+      "host",
+      "--port",
+      String(xPort),
+      "--host",
+      "127.0.0.1",
+      "--public-host",
+      publicHost,
+      "--data-dir",
+      xData,
+      ...extraArgs,
+    ],
     {
       env: { ...process.env, POND_HOST_TOKEN: xToken, ...env },
       stdio: ["ignore", "pipe", "pipe"],
       cwd: REPO_ROOT,
-    }
+    },
   )
   proc.stdout.on("data", () => {})
   proc.stderr.on("data", () => {})
@@ -452,12 +477,25 @@ test("anonymous rate limit survives host restart (persisted in control DB)", asy
   function spawnHost() {
     return spawn(
       process.execPath,
-      [CLI_PATH, "host", "--port", String(xPort), "--host", "127.0.0.1", "--public-host", publicHost, "--data-dir", xData, "--anonymous-rate-per-hour", "3"],
+      [
+        CLI_PATH,
+        "host",
+        "--port",
+        String(xPort),
+        "--host",
+        "127.0.0.1",
+        "--public-host",
+        publicHost,
+        "--data-dir",
+        xData,
+        "--anonymous-rate-per-hour",
+        "3",
+      ],
       {
         env: { ...process.env, POND_HOST_TOKEN: xToken },
         stdio: ["ignore", "pipe", "pipe"],
         cwd: REPO_ROOT,
-      }
+      },
     )
   }
   async function killHost(p) {
@@ -528,12 +566,28 @@ test("sweeper terminates anonymous deploy after grace (via host bounce)", async 
   function spawnTiny() {
     return spawn(
       process.execPath,
-      [CLI_PATH, "host", "--port", String(tinyPort), "--host", "127.0.0.1", "--public-host", publicHost, "--data-dir", tinyData],
+      [
+        CLI_PATH,
+        "host",
+        "--port",
+        String(tinyPort),
+        "--host",
+        "127.0.0.1",
+        "--public-host",
+        publicHost,
+        "--data-dir",
+        tinyData,
+      ],
       {
-        env: { ...process.env, POND_HOST_TOKEN: tinyToken, POND_ANONYMOUS_CLEANUP_GRACE: "1s", POND_ANONYMOUS_CLEANUP_RETENTION: "300s" },
+        env: {
+          ...process.env,
+          POND_HOST_TOKEN: tinyToken,
+          POND_ANONYMOUS_CLEANUP_GRACE: "1s",
+          POND_ANONYMOUS_CLEANUP_RETENTION: "300s",
+        },
         stdio: ["ignore", "pipe", "pipe"],
         cwd: REPO_ROOT,
-      }
+      },
     )
   }
   let p1 = spawnTiny()
@@ -584,7 +638,7 @@ test("sweeper terminates anonymous deploy after grace (via host bounce)", async 
           let data = ""
           rs.on("data", (c) => (data += c))
           rs.on("end", () => resolve({ status: rs.statusCode, body: data }))
-        }
+        },
       )
       req.on("error", () => resolve({ status: 0 }))
       req.end()
@@ -619,14 +673,17 @@ test("anonymous-deploys=false → anonymous POST returns 401", async () => {
   }
 })
 
-test("Node 22+ permission model: anonymous worker cannot write outside deploy dir", { skip: parseInt(process.versions.node.split(".")[0], 10) < 22 ? "requires Node 22+" : false }, async () => {
-  // Capsule whose mutation tries to write to /tmp/pond-escape-test.
-  const escapeWorkDir = mkdtempSync(path.join(tmpdir(), "pond-cap-escape-"))
-  const escapeFile = path.join(tmpdir(), `pond-escape-${randomBytes(4).toString("hex")}.txt`)
-  try {
-    const bundle = await buildBundleWith(
-      escapeWorkDir,
-      `import { capsule, mutation, query, string, table } from "pond/server"
+test(
+  "Node 22+ permission model: anonymous worker cannot write outside deploy dir",
+  { skip: parseInt(process.versions.node.split(".")[0], 10) < 22 ? "requires Node 22+" : false },
+  async () => {
+    // Capsule whose mutation tries to write to /tmp/pond-escape-test.
+    const escapeWorkDir = mkdtempSync(path.join(tmpdir(), "pond-cap-escape-"))
+    const escapeFile = path.join(tmpdir(), `pond-escape-${randomBytes(4).toString("hex")}.txt`)
+    try {
+      const bundle = await buildBundleWith(
+        escapeWorkDir,
+        `import { capsule, mutation, query, string, table } from "pond/server"
 import { writeFileSync } from "node:fs"
 export default capsule({
   schema: { items: table({ name: string() }) },
@@ -642,51 +699,52 @@ export default capsule({
     }),
   },
 })
-`
-    )
-    const fs = await import("node:fs")
-    const bundleBase64 = fs.readFileSync(bundle).toString("base64")
-    const create = await fetch(`${apiUrl}/api/deploys`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ bundleBase64 }),
-    })
-    assert.equal(create.status, 201)
-    const cb = await create.json()
-
-    const http = await import("node:http")
-    const result = await new Promise((resolve, reject) => {
-      const payload = JSON.stringify({ args: [escapeFile] })
-      const req = http.request(
-        {
-          host: "127.0.0.1",
-          port,
-          method: "POST",
-          path: "/api/mutation/escape",
-          headers: {
-            host: `${cb.deployId}.${publicHost}:${port}`,
-            "content-type": "application/json",
-            "content-length": Buffer.byteLength(payload),
-          },
-        },
-        (rs) => {
-          let data = ""
-          rs.on("data", (c) => (data += c))
-          rs.on("end", () => resolve({ status: rs.statusCode, body: data }))
-        }
+`,
       )
-      req.on("error", reject)
-      req.write(payload)
-      req.end()
-    })
-    // Either mutation reports ok:false with ERR_ACCESS_DENIED, or the file was never created.
-    const exists = fs.existsSync(escapeFile)
-    assert.equal(exists, false, `escape file should not exist: ${escapeFile} body=${result.body}`)
-  } finally {
-    if (existsSync(escapeFile)) rmSync(escapeFile, { force: true })
-    if (existsSync(escapeWorkDir)) rmSync(escapeWorkDir, { recursive: true, force: true })
-  }
-})
+      const fs = await import("node:fs")
+      const bundleBase64 = fs.readFileSync(bundle).toString("base64")
+      const create = await fetch(`${apiUrl}/api/deploys`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ bundleBase64 }),
+      })
+      assert.equal(create.status, 201)
+      const cb = await create.json()
+
+      const http = await import("node:http")
+      const result = await new Promise((resolve, reject) => {
+        const payload = JSON.stringify({ args: [escapeFile] })
+        const req = http.request(
+          {
+            host: "127.0.0.1",
+            port,
+            method: "POST",
+            path: "/api/mutation/escape",
+            headers: {
+              host: `${cb.deployId}.${publicHost}:${port}`,
+              "content-type": "application/json",
+              "content-length": Buffer.byteLength(payload),
+            },
+          },
+          (rs) => {
+            let data = ""
+            rs.on("data", (c) => (data += c))
+            rs.on("end", () => resolve({ status: rs.statusCode, body: data }))
+          },
+        )
+        req.on("error", reject)
+        req.write(payload)
+        req.end()
+      })
+      // Either mutation reports ok:false with ERR_ACCESS_DENIED, or the file was never created.
+      const exists = fs.existsSync(escapeFile)
+      assert.equal(exists, false, `escape file should not exist: ${escapeFile} body=${result.body}`)
+    } finally {
+      if (existsSync(escapeFile)) rmSync(escapeFile, { force: true })
+      if (existsSync(escapeWorkDir)) rmSync(escapeWorkDir, { recursive: true, force: true })
+    }
+  },
+)
 
 async function createOwnedDeploy() {
   const fs = await import("node:fs")
@@ -746,8 +804,14 @@ test("domains add allows short hex string (under deployId length) and it routes 
   assert.equal(add.status, 201)
   const routed = await new Promise((resolve, reject) => {
     const req = http.request(
-      { host: "127.0.0.1", port, method: "GET", path: "/api/query/items", headers: { host: `abcdef12.${publicHost}:${port}` } },
-      (res) => resolve({ status: res.statusCode })
+      {
+        host: "127.0.0.1",
+        port,
+        method: "GET",
+        path: "/api/query/items",
+        headers: { host: `abcdef12.${publicHost}:${port}` },
+      },
+      (res) => resolve({ status: res.statusCode }),
     )
     req.on("error", reject)
     req.end()
@@ -795,7 +859,7 @@ test("custom subdomain routes to the right deploy via proxy", async () => {
         let data = ""
         res.on("data", (c) => (data += c))
         res.on("end", () => resolve({ status: res.statusCode, body: data }))
-      }
+      },
     )
     req.on("error", reject)
     req.end()
@@ -885,7 +949,7 @@ test("domains remove succeeds for owner", async () => {
         let data = ""
         res2.on("data", (c) => (data += c))
         res2.on("end", () => resolve({ status: res2.statusCode, body: data }))
-      }
+      },
     )
     req.on("error", reject)
     req.end()
@@ -946,7 +1010,10 @@ test("malformed JSON on PUT /api/deploys/:id → 400 (not 500) [B1]", async () =
   })
   assert.equal(res.status, 400)
   // Cleanup
-  await fetch(`${apiUrl}/api/deploys/${cb.deployId}`, { method: "DELETE", headers: { authorization: `Bearer ${adminToken}` } })
+  await fetch(`${apiUrl}/api/deploys/${cb.deployId}`, {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${adminToken}` },
+  })
 })
 
 test("PUT /api/deploys/:id/quota with no fields → 400 (not silent 200) [B4]", async () => {
@@ -964,7 +1031,10 @@ test("PUT /api/deploys/:id/quota with no fields → 400 (not silent 200) [B4]", 
     body: JSON.stringify({}),
   })
   assert.equal(res.status, 400)
-  await fetch(`${apiUrl}/api/deploys/${cb.deployId}`, { method: "DELETE", headers: { authorization: `Bearer ${adminToken}` } })
+  await fetch(`${apiUrl}/api/deploys/${cb.deployId}`, {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${adminToken}` },
+  })
 })
 
 test("per-user domain quota: 51st domain for a non-admin user → 429 [B5]", async () => {
@@ -1070,7 +1140,7 @@ export default capsule({
   queries: { items: query((ctx) => ctx.db["select"].all()) },
   mutations: {},
 })
-`
+`,
     )
     const fs2 = await import("node:fs")
     const bundleBase64 = fs2.readFileSync(bundle).toString("base64")
@@ -1099,7 +1169,7 @@ export default capsule({
   queries: { items: query((ctx) => ctx.db._pond_secret.all()) },
   mutations: {},
 })
-`
+`,
     )
     const fs2 = await import("node:fs")
     const bundleBase64 = fs2.readFileSync(bundle).toString("base64")
@@ -1244,7 +1314,7 @@ test("rotate-token: previous token honored within 5min grace, then rejected", as
   const db = new Database(path.join(dataDir, "control.db"))
   db.prepare("UPDATE users SET previousTokenExpiresAt = ? WHERE id = ?").run(
     new Date(Date.now() - 1000).toISOString(),
-    u.userId
+    u.userId,
   )
   db.close()
 
@@ -1297,10 +1367,11 @@ test("audit log records deploy.create and is admin-only", async () => {
   assert.equal(ok.status, 200)
   const body = await ok.json()
   assert.ok(Array.isArray(body.entries))
-  const creation = body.entries.find(
-    (e) => e.action === "deploy.create" && e.targetDeployId === cb.deployId
+  const creation = body.entries.find((e) => e.action === "deploy.create" && e.targetDeployId === cb.deployId)
+  assert.ok(
+    creation,
+    `expected deploy.create entry for ${cb.deployId}, got ${JSON.stringify(body.entries.slice(0, 5))}`,
   )
-  assert.ok(creation, `expected deploy.create entry for ${cb.deployId}, got ${JSON.stringify(body.entries.slice(0, 5))}`)
   assert.equal(typeof creation.ts, "string")
   assert.ok(creation.metadata && typeof creation.metadata.bundleBytes === "number")
 
@@ -1337,9 +1408,7 @@ test("audit log records anonymous deploy.create with __anonymous__ actor", async
     })
     assert.equal(auditRes.status, 200)
     const body = await auditRes.json()
-    const entry = body.entries.find(
-      (e) => e.action === "deploy.create" && e.targetDeployId === cb.deployId
-    )
+    const entry = body.entries.find((e) => e.action === "deploy.create" && e.targetDeployId === cb.deployId)
     assert.ok(entry, "expected anon deploy.create audit entry")
     assert.equal(entry.actor, "__anonymous__")
     assert.equal(entry.metadata?.anonymous, true)
@@ -1348,47 +1417,51 @@ test("audit log records anonymous deploy.create with __anonymous__ actor", async
   }
 })
 
-test("pond deploy writes .pond/deploy.json with mode 0600 (hosted path)", { skip: process.platform === "win32" ? "POSIX modes only" : false }, async () => {
-  // Stage a capsule project in a tmpdir, then invoke the CLI to deploy
-  // anonymously against the running test host.
-  const projDir = mkdtempSync(path.join(tmpdir(), "pond-deploy-perm-"))
-  try {
-    mkdirSync(path.join(projDir, "server"), { recursive: true })
-    writeFileSync(
-      path.join(projDir, "server", "index.ts"),
-      `import { capsule, query, string, table } from "pond/server"
+test(
+  "pond deploy writes .pond/deploy.json with mode 0600 (hosted path)",
+  { skip: process.platform === "win32" ? "POSIX modes only" : false },
+  async () => {
+    // Stage a capsule project in a tmpdir, then invoke the CLI to deploy
+    // anonymously against the running test host.
+    const projDir = mkdtempSync(path.join(tmpdir(), "pond-deploy-perm-"))
+    try {
+      mkdirSync(path.join(projDir, "server"), { recursive: true })
+      writeFileSync(
+        path.join(projDir, "server", "index.ts"),
+        `import { capsule, query, string, table } from "pond/server"
 export default capsule({
   schema: { items: table({ name: string() }) },
   queries: { items: query((ctx) => ctx.db.items.all()) },
   mutations: {},
 })
-`
-    )
-    const { execFile } = await import("node:child_process")
-    const { promisify } = await import("node:util")
-    const execFileP = promisify(execFile)
-    await execFileP(process.execPath, [CLI_PATH, "deploy", "--api", apiUrl], {
-      cwd: projDir,
-      env: { ...process.env },
-      timeout: 30000,
-    })
-    const deployFile = path.join(projDir, ".pond", "deploy.json")
-    const { statSync, readFileSync } = await import("node:fs")
-    const st = statSync(deployFile)
-    // POSIX mode lower 9 bits — we want 0600 (rw-------).
-    assert.equal(st.mode & 0o777, 0o600, `expected 0600, got 0${(st.mode & 0o777).toString(8)}`)
-    // sanity: file contains a claimToken
-    const body = JSON.parse(readFileSync(deployFile, "utf-8"))
-    assert.ok(typeof body.claimToken === "string" && body.claimToken.length >= 32)
-    // Cleanup the host-side deploy
-    await fetch(`${apiUrl}/api/deploys/${body.deployId}`, {
-      method: "DELETE",
-      headers: { authorization: `Bearer ${adminToken}` },
-    })
-  } finally {
-    if (existsSync(projDir)) rmSync(projDir, { recursive: true, force: true })
-  }
-})
+`,
+      )
+      const { execFile } = await import("node:child_process")
+      const { promisify } = await import("node:util")
+      const execFileP = promisify(execFile)
+      await execFileP(process.execPath, [CLI_PATH, "deploy", "--api", apiUrl], {
+        cwd: projDir,
+        env: { ...process.env },
+        timeout: 30000,
+      })
+      const deployFile = path.join(projDir, ".pond", "deploy.json")
+      const { statSync, readFileSync } = await import("node:fs")
+      const st = statSync(deployFile)
+      // POSIX mode lower 9 bits — we want 0600 (rw-------).
+      assert.equal(st.mode & 0o777, 0o600, `expected 0600, got 0${(st.mode & 0o777).toString(8)}`)
+      // sanity: file contains a claimToken
+      const body = JSON.parse(readFileSync(deployFile, "utf-8"))
+      assert.ok(typeof body.claimToken === "string" && body.claimToken.length >= 32)
+      // Cleanup the host-side deploy
+      await fetch(`${apiUrl}/api/deploys/${body.deployId}`, {
+        method: "DELETE",
+        headers: { authorization: `Bearer ${adminToken}` },
+      })
+    } finally {
+      if (existsSync(projDir)) rmSync(projDir, { recursive: true, force: true })
+    }
+  },
+)
 
 test("SIGINT host leaves no orphan deploy-worker processes", async () => {
   await stopHost()

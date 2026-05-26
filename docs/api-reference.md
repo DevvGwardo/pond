@@ -99,16 +99,16 @@ ctx.db.messages.all()
 
 Each `CapsuleDbTable` exposes:
 
-| Method | Description |
-| --- | --- |
-| `where(column, value)` | Chainable WHERE clause. Multiple calls AND together. |
-| `orderBy(column, "asc" \| "desc")` | Chainable ORDER BY. Multiple calls compose. |
-| `limit(n)` | LIMIT clause. |
-| `all()` | Executes the query. Returns `any[]`. |
-| `get(id)` | SELECT by id. Returns the row or `undefined`. |
-| `insert(data)` | INSERT with a generated UUID. Returns the inserted row. |
-| `update(id, data)` | UPDATE by id; sets `updatedAt`. Returns the updated row. |
-| `delete(id)` | DELETE by id. |
+| Method                             | Description                                              |
+| ---------------------------------- | -------------------------------------------------------- |
+| `where(column, value)`             | Chainable WHERE clause. Multiple calls AND together.     |
+| `orderBy(column, "asc" \| "desc")` | Chainable ORDER BY. Multiple calls compose.              |
+| `limit(n)`                         | LIMIT clause.                                            |
+| `all()`                            | Executes the query. Returns `any[]`.                     |
+| `get(id)`                          | SELECT by id. Returns the row or `undefined`.            |
+| `insert(data)`                     | INSERT with a generated UUID. Returns the inserted row.  |
+| `update(id, data)`                 | UPDATE by id; sets `updatedAt`. Returns the updated row. |
+| `delete(id)`                       | DELETE by id.                                            |
 
 All column references go through the same identifier validation as schema definitions.
 

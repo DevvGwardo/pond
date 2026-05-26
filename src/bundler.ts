@@ -13,8 +13,14 @@ export async function buildClient(entry: string, options: { liveReload?: boolean
     jsxImportSource: "preact",
     alias: {
       "pond/client": path.resolve(import.meta.dirname, "../client/index.ts"),
-      "preact/jsx-runtime": path.resolve(import.meta.dirname, "../node_modules/preact/jsx-runtime/dist/jsxRuntime.module.js"),
-      "preact/jsx-dev-runtime": path.resolve(import.meta.dirname, "../node_modules/preact/jsx-runtime/dist/jsxRuntime.module.js"),
+      "preact/jsx-runtime": path.resolve(
+        import.meta.dirname,
+        "../node_modules/preact/jsx-runtime/dist/jsxRuntime.module.js",
+      ),
+      "preact/jsx-dev-runtime": path.resolve(
+        import.meta.dirname,
+        "../node_modules/preact/jsx-runtime/dist/jsxRuntime.module.js",
+      ),
       "preact/hooks": path.resolve(import.meta.dirname, "../node_modules/preact/hooks/dist/hooks.module.js"),
       preact: path.resolve(import.meta.dirname, "../node_modules/preact/dist/preact.module.js"),
     },
@@ -51,10 +57,14 @@ export async function buildClient(entry: string, options: { liveReload?: boolean
 </head>
 <body>
   <div id="root"></div>
-  ${options.liveReload ? `<script>
+  ${
+    options.liveReload
+      ? `<script>
     const es = new EventSource('/__pond_reload')
     es.onmessage = () => location.reload()
-  </script>` : ""}
+  </script>`
+      : ""
+  }
   <script type="module">
     import { render, h } from "https://esm.sh/preact@10.24.0";
     import { htm } from "https://esm.sh/htm@3.1.1";

@@ -1,5 +1,5 @@
-import { defineCommand } from "citty";
-import { copyTemplate } from "../template.js";
+import { defineCommand } from "citty"
+import { copyTemplate } from "../template.js"
 
 export const newCommand = defineCommand({
   meta: {
@@ -24,11 +24,11 @@ export const newCommand = defineCommand({
     },
   },
   async run({ args }) {
-    await copyTemplate(args.name, args.template, !args["no-git"]);
-    console.log(`\n  Created ${args.name}/\n`);
-    console.log(`  Next steps:`);
-    console.log(`    cd ${args.name}`);
-    console.log(`    npm install`);
-    console.log(`    npm run dev\n`);
+    await copyTemplate(args.name, args.template, !args["no-git"])
+    console.log(`\n  Created ${args.name}/\n`)
+    console.log(`  Next steps:`)
+    console.log(`    cd ${args.name}`)
+    console.log(`    npm install`)
+    console.log(`    npm run dev\n`)
   },
-});
+})

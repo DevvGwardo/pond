@@ -118,12 +118,18 @@ function parseDuration(s: string): number {
   if (!m) throw new Error(`invalid duration: ${s}`)
   const n = parseInt(m[1], 10)
   switch (m[2]) {
-    case "ms": return n
-    case "s": return n * 1000
-    case "m": return n * 60 * 1000
-    case "h": return n * 60 * 60 * 1000
-    case "d": return n * 24 * 60 * 60 * 1000
-    default: throw new Error(`invalid duration unit: ${m[2]}`)
+    case "ms":
+      return n
+    case "s":
+      return n * 1000
+    case "m":
+      return n * 60 * 1000
+    case "h":
+      return n * 60 * 60 * 1000
+    case "d":
+      return n * 24 * 60 * 60 * 1000
+    default:
+      throw new Error(`invalid duration unit: ${m[2]}`)
   }
 }
 
@@ -188,7 +194,8 @@ export const hostCommand = defineCommand({
   async run({ args }) {
     const port = parseInt(typeof args.port === "string" ? args.port : "8787", 10)
     const hostname = typeof args.host === "string" && args.host ? args.host : "127.0.0.1"
-    const publicHost = typeof args["public-host"] === "string" && args["public-host"] ? args["public-host"] : "localhost"
+    const publicHost =
+      typeof args["public-host"] === "string" && args["public-host"] ? args["public-host"] : "localhost"
     const dataDir = path.resolve(process.cwd(), typeof args["data-dir"] === "string" ? args["data-dir"] : ".pond-host")
     const deploysDir = path.join(dataDir, "deploys")
     const tokenFile = path.join(dataDir, "host-token")
@@ -199,18 +206,25 @@ export const hostCommand = defineCommand({
     const pondNodeModulesDir = path.resolve(import.meta.dirname, "../../node_modules")
 
     const anonymousEnabled = args["anonymous-deploys"] !== false
-    const graceStr = process.env.POND_ANONYMOUS_CLEANUP_GRACE ?? (typeof args["anonymous-grace"] === "string" ? args["anonymous-grace"] : "1h")
-    const retentionStr = process.env.POND_ANONYMOUS_CLEANUP_RETENTION ?? (typeof args["anonymous-retention"] === "string" ? args["anonymous-retention"] : "7d")
+    const graceStr =
+      process.env.POND_ANONYMOUS_CLEANUP_GRACE ??
+      (typeof args["anonymous-grace"] === "string" ? args["anonymous-grace"] : "1h")
+    const retentionStr =
+      process.env.POND_ANONYMOUS_CLEANUP_RETENTION ??
+      (typeof args["anonymous-retention"] === "string" ? args["anonymous-retention"] : "7d")
     const anonymousGraceMs = parseDuration(graceStr)
     const anonymousRetentionMs = parseDuration(retentionStr)
-    const anonymousRateLimit = parseInt(typeof args["anonymous-rate-per-hour"] === "string" ? args["anonymous-rate-per-hour"] : "5", 10)
+    const anonymousRateLimit = parseInt(
+      typeof args["anonymous-rate-per-hour"] === "string" ? args["anonymous-rate-per-hour"] : "5",
+      10,
+    )
     const trustProxy = process.env.POND_TRUST_PROXY_HEADERS === "1" || args["trust-proxy"] === true
 
     const nodeMajor = parseInt((process.versions.node ?? "0").split(".")[0], 10)
     const sandboxAvailable = nodeMajor >= 22 && fs.existsSync(pondSrcDir) && fs.existsSync(pondNodeModulesDir)
     if (!sandboxAvailable && anonymousEnabled) {
       console.log(
-        `[pond host] Node ${process.versions.node} — permission model disabled. Upgrade to Node 22+ for anonymous deploy sandboxing.`
+        `[pond host] Node ${process.versions.node} — permission model disabled. Upgrade to Node 22+ for anonymous deploy sandboxing.`,
       )
     }
 
@@ -305,7 +319,7 @@ export const hostCommand = defineCommand({
 
     async function forkDeploy(
       record: HostedDeployRecord,
-      opts: { restrictNetwork?: boolean; useSandbox?: boolean } = {}
+      opts: { restrictNetwork?: boolean; useSandbox?: boolean } = {},
     ): Promise<void> {
       const dir = deployDirFor(record.deployId)
       const bundlePath = path.join(dir, "deploy-bundle.mjs")
@@ -333,7 +347,7 @@ export const hostCommand = defineCommand({
           `--allow-fs-read=${fs.realpathSync(pondSrcDir)}`,
           `--allow-fs-read=${fs.realpathSync(pondNodeModulesDir)}`,
           `--allow-fs-write=${realDir}`,
-          "--allow-addons"
+          "--allow-addons",
         )
       }
       const child = fork(workerPath, [], {
@@ -541,7 +555,7 @@ export const hostCommand = defineCommand({
     function audit(
       actor: string,
       action: string,
-      opts: { targetDeployId?: string; targetUserId?: string; metadata?: Record<string, unknown> } = {}
+      opts: { targetDeployId?: string; targetUserId?: string; metadata?: Record<string, unknown> } = {},
     ) {
       try {
         controlDb.appendAudit({
@@ -558,7 +572,7 @@ export const hostCommand = defineCommand({
 
     function authorizeDeployMutation(
       c: any,
-      record: HostedDeployRecord
+      record: HostedDeployRecord,
     ): { kind: "claim" } | { kind: "user"; user: UserRow } | Response {
       const claim = c.req.header("x-pond-claim-token") ?? ""
       if (claim && safeEqual(claim, record.claimToken)) {
@@ -568,7 +582,10 @@ export const hostCommand = defineCommand({
       if (!provided) return c.json({ error: "Unauthorized" }, 401)
       if (isHostToken(provided)) {
         // host token gives admin powers
-        return { kind: "user", user: { id: "__host__", username: "__host__", tokenHash: "", isAdmin: 1, createdAt: "" } }
+        return {
+          kind: "user",
+          user: { id: "__host__", username: "__host__", tokenHash: "", isAdmin: 1, createdAt: "" },
+        }
       }
       const user = controlDb.findUserByTokenHash(controlDb.hashToken(provided))
       if (!user) return c.json({ error: "Unauthorized" }, 401)
@@ -727,8 +744,10 @@ export const hostCommand = defineCommand({
         const bundleBuf = Buffer.from(body.bundleBase64, "base64")
         if (bundleBuf.length > quotaTemplate.maxBundleBytes) {
           return c.json(
-            { error: `Bundle exceeds ${isAnonymous ? "anonymous" : "default"} per-deploy quota (${quotaTemplate.maxBundleBytes} bytes)` },
-            413
+            {
+              error: `Bundle exceeds ${isAnonymous ? "anonymous" : "default"} per-deploy quota (${quotaTemplate.maxBundleBytes} bytes)`,
+            },
+            413,
           )
         }
         const deployId = randomBytes(8).toString("hex")
@@ -762,7 +781,7 @@ export const hostCommand = defineCommand({
             deployId,
             claimToken,
             anonymousGraceMs,
-            anonymousRetentionMs
+            anonymousRetentionMs,
           )
           extra = { terminatesAt, expiresAt }
         } else {
@@ -774,7 +793,9 @@ export const hostCommand = defineCommand({
             restrictNetwork: isAnonymous,
           })
         } catch (err: any) {
-          try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+          try {
+            fs.rmSync(dir, { recursive: true, force: true })
+          } catch {}
           if (isAnonymous) {
             controlDb.deleteAnonymous(deployId)
           } else {
@@ -793,7 +814,7 @@ export const hostCommand = defineCommand({
           metadata: { anonymous: isAnonymous, bundleBytes: bundleBuf.length },
         })
         return c.json({ ...record, ...extra }, 201)
-      }
+      },
     )
 
     app.put(
@@ -851,7 +872,7 @@ export const hostCommand = defineCommand({
           metadata: { bundleBytes: bundleBuf.length, envChanged: typeof body.envText === "string" },
         })
         return c.json(record)
-      }
+      },
     )
 
     app.post("/api/deploys/:deployId/claim", async (c) => {
@@ -1167,7 +1188,7 @@ export const hostCommand = defineCommand({
               .flatMap((e) =>
                 controlDb
                   .listDomainsForDeploy(e.name)
-                  .map((d) => ({ subdomain: d.subdomain, deployId: e.name, createdAt: d.createdAt }))
+                  .map((d) => ({ subdomain: d.subdomain, deployId: e.name, createdAt: d.createdAt })),
               )
           : controlDb.listDomainsForUser(r.user.id)
       return c.json({ domains: rows })
@@ -1182,7 +1203,10 @@ export const hostCommand = defineCommand({
       }
       const sub = body.subdomain
       if (!SUBDOMAIN_LABEL_RE.test(sub) || sub.length > 63) {
-        return c.json({ error: "invalid subdomain (DNS label rules: a-z, 0-9, hyphens; max 63; no leading/trailing hyphen)" }, 400)
+        return c.json(
+          { error: "invalid subdomain (DNS label rules: a-z, 0-9, hyphens; max 63; no leading/trailing hyphen)" },
+          400,
+        )
       }
       if (RESERVED_SUBDOMAINS.has(sub)) {
         return c.json({ error: `subdomain "${sub}" is reserved` }, 400)
@@ -1212,7 +1236,15 @@ export const hostCommand = defineCommand({
         targetDeployId: body.deployId,
         metadata: { subdomain: sub },
       })
-      return c.json({ subdomain: sub, deployId: body.deployId, createdAt: row?.createdAt, url: `http://${sub}.${publicHost}:${port}` }, 201)
+      return c.json(
+        {
+          subdomain: sub,
+          deployId: body.deployId,
+          createdAt: row?.createdAt,
+          url: `http://${sub}.${publicHost}:${port}`,
+        },
+        201,
+      )
     })
 
     app.delete("/api/domains/:subdomain", (c) => {
@@ -1305,13 +1337,15 @@ export const hostCommand = defineCommand({
     console.log(`  bootstrap first admin: pond login --api ${apiUrl} --username <name>`)
     if (anonymousEnabled) {
       console.log(
-        `  anonymous deploys: enabled (grace=${formatHumanDuration(anonymousGraceMs)}, retention=${formatHumanDuration(anonymousRetentionMs)}, rate=${anonymousRateLimit}/h)\n`
+        `  anonymous deploys: enabled (grace=${formatHumanDuration(anonymousGraceMs)}, retention=${formatHumanDuration(anonymousRetentionMs)}, rate=${anonymousRateLimit}/h)\n`,
       )
     } else {
       console.log("  anonymous deploys: disabled\n")
     }
     if (hostname === "0.0.0.0" || hostname === "::") {
-      console.log("  ⚠ bound to all interfaces — deploying a bundle here gives the caller arbitrary code execution as this user.\n")
+      console.log(
+        "  ⚠ bound to all interfaces — deploying a bundle here gives the caller arbitrary code execution as this user.\n",
+      )
     }
   },
 })

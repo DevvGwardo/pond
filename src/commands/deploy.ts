@@ -69,12 +69,10 @@ export const deployCommand = defineCommand({
       try {
         const parsed = new URL(apiUrl)
         const isLoopback =
-          parsed.hostname === "localhost" ||
-          parsed.hostname === "127.0.0.1" ||
-          parsed.hostname === "::1"
+          parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1" || parsed.hostname === "::1"
         if (parsed.protocol === "http:" && !isLoopback) {
           console.error(
-            `⚠  --api ${apiUrl} uses plain http:// — credentials and claim tokens will be sent in clear. Use https:// for any non-loopback host.`
+            `⚠  --api ${apiUrl} uses plain http:// — credentials and claim tokens will be sent in clear. Use https:// for any non-loopback host.`,
           )
         }
       } catch {
@@ -109,16 +107,15 @@ export const deployCommand = defineCommand({
             port: parseInt(args.port, 10),
           },
           null,
-          2
-        )
+          2,
+        ),
       )
 
       console.log("Deployed! Run `pond start` to serve, or set PORT= env var")
       return
     }
 
-    const userToken =
-      (typeof args.token === "string" && args.token) || loadCredentials(apiUrl)?.token || ""
+    const userToken = (typeof args.token === "string" && args.token) || loadCredentials(apiUrl)?.token || ""
 
     const bundleBytes = fs.readFileSync(outfile)
     const shouldPushEnv = Boolean(args["push-env"])
@@ -126,7 +123,9 @@ export const deployCommand = defineCommand({
 
     const isAnonymous = !userToken && !localRecord?.claimToken
 
-    console.log(`→ Uploading bundle (${(bundleBytes.length / 1024).toFixed(1)} KB) to ${apiUrl}${isAnonymous ? " (anonymous)" : ""}`)
+    console.log(
+      `→ Uploading bundle (${(bundleBytes.length / 1024).toFixed(1)} KB) to ${apiUrl}${isAnonymous ? " (anonymous)" : ""}`,
+    )
     if (shouldPushEnv) {
       if (isAnonymous) {
         console.error("--push-env is not allowed for anonymous deploys; claim first.")
@@ -199,9 +198,9 @@ export const deployCommand = defineCommand({
           port: parseInt(args.port, 10),
         },
         null,
-        2
+        2,
       ),
-      { mode: 0o600 }
+      { mode: 0o600 },
     )
     try {
       fs.chmodSync(deployFile, 0o600)

@@ -12,9 +12,7 @@ interface BootOptions {
   restrictNetwork?: boolean
 }
 
-type ParentMessage =
-  | { type: "boot"; options: BootOptions }
-  | { type: "shutdown" }
+type ParentMessage = { type: "boot"; options: BootOptions } | { type: "shutdown" }
 
 let server: { close: (cb?: (err?: Error) => void) => void } | null = null
 

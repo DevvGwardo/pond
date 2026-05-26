@@ -1,19 +1,19 @@
-import { defineCommand, runMain } from "citty";
-import { newCommand } from "./commands/new.js";
-import { devCommand } from "./commands/dev.js";
-import { deployCommand } from "./commands/deploy.js";
-import { claimCommand } from "./commands/claim.js";
-import { startCommand } from "./commands/start.js";
-import { hostCommand } from "./commands/host.js";
-import { dbCommand } from "./commands/db.js";
-import { logsCommand } from "./commands/logs.js";
-import { inspectCommand } from "./commands/inspect.js";
-import { authCommand } from "./commands/auth.js";
-import { loginCommand } from "./commands/login.js";
-import { userCommand } from "./commands/user.js";
-import { envCommand } from "./commands/env.js";
-import { domainsCommand } from "./commands/domains.js";
-import { tokenCommand } from "./commands/token.js";
+import { defineCommand, runMain } from "citty"
+import { newCommand } from "./commands/new.js"
+import { devCommand } from "./commands/dev.js"
+import { deployCommand } from "./commands/deploy.js"
+import { claimCommand } from "./commands/claim.js"
+import { startCommand } from "./commands/start.js"
+import { hostCommand } from "./commands/host.js"
+import { dbCommand } from "./commands/db.js"
+import { logsCommand } from "./commands/logs.js"
+import { inspectCommand } from "./commands/inspect.js"
+import { authCommand } from "./commands/auth.js"
+import { loginCommand } from "./commands/login.js"
+import { userCommand } from "./commands/user.js"
+import { envCommand } from "./commands/env.js"
+import { domainsCommand } from "./commands/domains.js"
+import { tokenCommand } from "./commands/token.js"
 
 const main = defineCommand({
   meta: {
@@ -37,13 +37,13 @@ const main = defineCommand({
     domains: domainsCommand,
     token: tokenCommand,
   },
-});
+})
 
-export { runMain, main };
+export { runMain, main }
 
 // Self-run when executed directly
-const scriptPath = process.argv[1]?.replace(/\.(js|ts)$/, "");
-const thisPath = import.meta.url.replace(/^file:\/\//, "").replace(/\.(js|ts)$/, "");
+const scriptPath = process.argv[1]?.replace(/\.(js|ts)$/, "")
+const thisPath = import.meta.url.replace(/^file:\/\//, "").replace(/\.(js|ts)$/, "")
 if (scriptPath && thisPath.endsWith(scriptPath)) {
-  runMain(main);
+  runMain(main)
 }

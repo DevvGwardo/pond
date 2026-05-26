@@ -20,19 +20,23 @@ function MessageList() {
   if (isLoading) return <div>loading…</div>
   if (error) return <div>error: {error.message}</div>
   return (
-    <ul>{data?.map((m) => <li key={m.id}>{m.body}</li>)}</ul>
+    <ul>
+      {data?.map((m) => (
+        <li key={m.id}>{m.body}</li>
+      ))}
+    </ul>
   )
 }
 ```
 
 ### Return shape
 
-| Field | Type | Meaning |
-| --- | --- | --- |
-| `data` | `T \| undefined` | The most recent successful response, or undefined before first load. |
-| `isLoading` | `boolean` | True during the first load and during any refetch. |
-| `error` | `Error \| null` | Set if the last fetch threw. Cleared on next successful refetch. |
-| `refetch` | `() => Promise<void>` | Manually re-runs the query. |
+| Field       | Type                  | Meaning                                                              |
+| ----------- | --------------------- | -------------------------------------------------------------------- |
+| `data`      | `T \| undefined`      | The most recent successful response, or undefined before first load. |
+| `isLoading` | `boolean`             | True during the first load and during any refetch.                   |
+| `error`     | `Error \| null`       | Set if the last fetch threw. Cleared on next successful refetch.     |
+| `refetch`   | `() => Promise<void>` | Manually re-runs the query.                                          |
 
 ### Auto-refetch
 
@@ -56,7 +60,9 @@ function SendMessage() {
       }}
     >
       <input name="body" />
-      <button type="submit" disabled={isLoading}>send</button>
+      <button type="submit" disabled={isLoading}>
+        send
+      </button>
       {error && <div>{error.message}</div>}
     </form>
   )
@@ -87,7 +93,11 @@ function Header() {
   const auth = useAuth()
   if (auth.isLoading) return null
   if (auth.isGuest) return <SignInWithGoogle />
-  return <div>{auth.displayName} <button onClick={signOut}>sign out</button></div>
+  return (
+    <div>
+      {auth.displayName} <button onClick={signOut}>sign out</button>
+    </div>
+  )
 }
 ```
 

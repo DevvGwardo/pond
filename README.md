@@ -45,15 +45,11 @@ export default capsule({
   },
 
   queries: {
-    messages: query((ctx) =>
-      ctx.db.messages.orderBy("createdAt", "desc").all()
-    ),
+    messages: query((ctx) => ctx.db.messages.orderBy("createdAt", "desc").all()),
   },
 
   mutations: {
-    sendMessage: mutation((ctx, body: string) =>
-      ctx.db.messages.insert({ body })
-    ),
+    sendMessage: mutation((ctx, body: string) => ctx.db.messages.insert({ body })),
   },
 })
 ```
@@ -113,25 +109,25 @@ Pond will:
 
 ## CLI
 
-| Command | Purpose |
-| --- | --- |
-| `pond new <name>` | Scaffold a new capsule |
-| `pond dev --port 3000` | Run the local dev server |
-| `pond deploy` | Build a standalone server bundle and write deploy metadata |
-| `pond deploy --api http://localhost:8787` | Upload a hosted deploy to a Pond control plane |
-| `pond claim` | Cross-machine claim using a deploy's claim token |
-| `pond start` | Start the bundled deploy artifact locally |
-| `pond host` | Start the self-hosted Pond control plane |
-| `pond inspect` | Inspect local capsule metadata |
-| `pond logs` | Stream structured local logs |
-| `pond db list` | List SQLite tables from a running capsule |
-| `pond db dump [table]` | Dump one table or the full local database |
-| `pond auth as <name>` | Set the current dev guest identity |
+| Command                                    | Purpose                                                                  |
+| ------------------------------------------ | ------------------------------------------------------------------------ |
+| `pond new <name>`                          | Scaffold a new capsule                                                   |
+| `pond dev --port 3000`                     | Run the local dev server                                                 |
+| `pond deploy`                              | Build a standalone server bundle and write deploy metadata               |
+| `pond deploy --api http://localhost:8787`  | Upload a hosted deploy to a Pond control plane                           |
+| `pond claim`                               | Cross-machine claim using a deploy's claim token                         |
+| `pond start`                               | Start the bundled deploy artifact locally                                |
+| `pond host`                                | Start the self-hosted Pond control plane                                 |
+| `pond inspect`                             | Inspect local capsule metadata                                           |
+| `pond logs`                                | Stream structured local logs                                             |
+| `pond db list`                             | List SQLite tables from a running capsule                                |
+| `pond db dump [table]`                     | Dump one table or the full local database                                |
+| `pond auth as <name>`                      | Set the current dev guest identity                                       |
 | `pond login --api <url> --username <name>` | Bootstrap first admin (needs `POND_HOST_TOKEN`) or attach with `--token` |
-| `pond user create <name> [--admin]` | Create a new control-plane user (admin only) |
-| `pond env list/set/unset <deployId>` | Manage hosted-deploy server env vars |
-| `pond domains list/add/remove <subdomain>` | Manage custom subdomain aliases for a deploy |
-| `pond token rotate --api <url>` | Rotate the saved user API token |
+| `pond user create <name> [--admin]`        | Create a new control-plane user (admin only)                             |
+| `pond env list/set/unset <deployId>`       | Manage hosted-deploy server env vars                                     |
+| `pond domains list/add/remove <subdomain>` | Manage custom subdomain aliases for a deploy                             |
+| `pond token rotate --api <url>`            | Rotate the saved user API token                                          |
 
 ## Runtime Model
 
@@ -254,11 +250,11 @@ The sweeper runs every 60s and at host startup.
 
 **Anonymous quotas (smaller than the defaults).**
 
-| Field | Default | Anonymous |
-| --- | --- | --- |
-| `maxBundleBytes` | 64 MB | 16 MB |
-| `maxDiskBytes` | 512 MB | 128 MB |
-| `maxMemoryMb` | 256 | 128 |
+| Field            | Default | Anonymous |
+| ---------------- | ------- | --------- |
+| `maxBundleBytes` | 64 MB   | 16 MB     |
+| `maxDiskBytes`   | 512 MB  | 128 MB    |
+| `maxMemoryMb`    | 256     | 128       |
 
 **Sandbox (Node 22+).** Anonymous workers are spawned with Node's experimental permission model:
 
@@ -302,11 +298,11 @@ When a user API token is rotated, the previous token continues to authenticate f
 
 Every deploy has a quota, enforced by the control plane:
 
-| Field | Default | Enforcement |
-| --- | --- | --- |
-| `maxBundleBytes` | 64 MB | POST/PUT bundles larger than this return 413 |
-| `maxDiskBytes` | 512 MB | post-write directory size check on bundle and env updates |
-| `maxMemoryMb` | 256 | passed to the worker via `--max-old-space-size` |
+| Field            | Default | Enforcement                                               |
+| ---------------- | ------- | --------------------------------------------------------- |
+| `maxBundleBytes` | 64 MB   | POST/PUT bundles larger than this return 413              |
+| `maxDiskBytes`   | 512 MB  | post-write directory size check on bundle and env updates |
+| `maxMemoryMb`    | 256     | passed to the worker via `--max-old-space-size`           |
 
 Env writes have separate caps not exposed as quotas: `envText` is limited to 64 KB total, 256 entries, 1024 chars per value. Oversize uploads return 413 before the file is written.
 

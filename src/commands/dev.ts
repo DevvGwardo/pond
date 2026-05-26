@@ -1,5 +1,5 @@
-import { defineCommand } from "citty";
-import { startDevServer } from "../dev-server.js";
+import { defineCommand } from "citty"
+import { startDevServer } from "../dev-server.js"
 
 export const devCommand = defineCommand({
   meta: {
@@ -14,7 +14,7 @@ export const devCommand = defineCommand({
     },
   },
   async run({ args }) {
-    const port = parseInt(args.port, 10);
-    await startDevServer(port);
+    const port = parseInt(args.port, 10)
+    await startDevServer(port)
   },
-});
+})

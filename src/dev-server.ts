@@ -26,10 +26,7 @@ export async function startDevServer(port: number): Promise<void> {
   const recentLogs: Array<{ timestamp: string; level: "info" | "error"; message: string; data?: any }> = []
   const encoder = new TextEncoder()
 
-  const broadcast = (
-    clients: Set<ReadableStreamDefaultController<Uint8Array>>,
-    payload: unknown
-  ) => {
+  const broadcast = (clients: Set<ReadableStreamDefaultController<Uint8Array>>, payload: unknown) => {
     const chunk = encoder.encode(`data: ${JSON.stringify(payload)}\n\n`)
     for (const client of clients) {
       try {
@@ -73,9 +70,7 @@ export async function startDevServer(port: number): Promise<void> {
 
     nextApp.get("/__pond/db/dump/:table", (c) => {
       const table = c.req.param("table")
-      const exists = runtime.db
-        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
-        .get(table)
+      const exists = runtime.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table)
       if (!exists) return c.json({ error: `Unknown table: ${table}` }, 404)
       const rows = runtime.db.prepare(`SELECT * FROM ${table}`).all()
       return c.json(rows)
@@ -104,7 +99,7 @@ export async function startDevServer(port: number): Promise<void> {
             "cache-control": "no-cache",
             connection: "keep-alive",
           },
-        }
+        },
       )
     })
 
@@ -120,7 +115,7 @@ export async function startDevServer(port: number): Promise<void> {
         auth: {
           guestName,
         },
-      })
+      }),
     )
 
     nextApp.post("/__pond/auth/guest", async (c) => {
@@ -179,7 +174,7 @@ export async function startDevServer(port: number): Promise<void> {
           "cache-control": "no-cache",
           connection: "keep-alive",
         },
-      }
+      },
     )
   })
 
@@ -204,8 +199,8 @@ export async function startDevServer(port: number): Promise<void> {
       const r: "server" | "client" | "env" = reasons.includes("server")
         ? "server"
         : reasons.includes("env")
-        ? "env"
-        : "client"
+          ? "env"
+          : "client"
       await rebuild(r)
     }, DEBOUNCE_MS)
   }

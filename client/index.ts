@@ -29,7 +29,9 @@ async function refetchAllQueries() {
   await Promise.all(jobs)
 }
 
-export function useQuery<T = any>(name: string): {
+export function useQuery<T = any>(
+  name: string,
+): {
   data: T | undefined
   isLoading: boolean
   error: Error | null
@@ -75,7 +77,7 @@ export function useQuery<T = any>(name: string): {
 }
 
 export function useMutation<TArgs extends any[] = any[], TResult = any>(
-  name: string
+  name: string,
 ): [(...args: TArgs) => Promise<TResult>, { isLoading: boolean; error: Error | null }] {
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<Error | null>(null)
@@ -169,7 +171,7 @@ export function SignInWithGoogle(props: Record<string, any> = {}) {
         }
       },
     },
-    "Sign in with Google"
+    "Sign in with Google",
   )
 }
 
