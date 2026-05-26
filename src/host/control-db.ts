@@ -1,5 +1,5 @@
 import Database from "better-sqlite3"
-import { createHash, randomBytes } from "node:crypto"
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto"
 import * as fs from "node:fs"
 import * as path from "node:path"
 
@@ -24,6 +24,21 @@ export const DEFAULT_QUOTA: Omit<DeployQuota, "deployId"> = {
   maxMemoryMb: 256,
 }
 
+export const ANONYMOUS_QUOTA: Omit<DeployQuota, "deployId"> = {
+  maxBundleBytes: 16 * 1024 * 1024,
+  maxDiskBytes: 128 * 1024 * 1024,
+  maxMemoryMb: 128,
+}
+
+export interface AnonymousDeployRow {
+  deployId: string
+  claimTokenHash: string
+  createdAt: string
+  terminatesAt: string
+  expiresAt: string
+  terminated: number
+}
+
 export interface ControlDb {
   hashToken(token: string): string
   createUser(username: string, isAdmin: boolean): { user: UserRow; token: string }
@@ -39,6 +54,19 @@ export interface ControlDb {
   getQuota(deployId: string): DeployQuota
   setQuota(deployId: string, patch: Partial<Omit<DeployQuota, "deployId">>): DeployQuota
   deleteQuota(deployId: string): void
+  createAnonymous(
+    deployId: string,
+    claimToken: string,
+    gracePeriodMs: number,
+    retentionMs: number
+  ): { terminatesAt: string; expiresAt: string }
+  findAnonymous(deployId: string): AnonymousDeployRow | null
+  markTerminated(deployId: string): void
+  listForTermination(nowIso: string): string[]
+  listForDeletion(nowIso: string): string[]
+  promoteAnonymous(deployId: string, userId: string): void
+  deleteAnonymous(deployId: string): void
+  verifyAnonymousClaim(deployId: string, claimToken: string): boolean
   close(): void
 }
 
@@ -67,7 +95,30 @@ export function openControlDb(dataDir: string): ControlDb {
       maxDiskBytes INTEGER,
       maxMemoryMb INTEGER
     );
+    CREATE TABLE IF NOT EXISTS anonymous_deploys (
+      deployId TEXT PRIMARY KEY,
+      claimTokenHash TEXT NOT NULL,
+      createdAt TEXT NOT NULL,
+      terminatesAt TEXT NOT NULL,
+      expiresAt TEXT NOT NULL,
+      terminated INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_anon_terminates ON anonymous_deploys(terminatesAt);
+    CREATE INDEX IF NOT EXISTS idx_anon_expires ON anonymous_deploys(expiresAt);
   `)
+
+  // Lightweight migration for pre-Phase-5 DBs that only had (createdAt, expiresAt).
+  const anonCols = (db.prepare("PRAGMA table_info(anonymous_deploys)").all() as Array<{ name: string }>).map(
+    (c) => c.name
+  )
+  if (!anonCols.includes("terminatesAt")) {
+    db.exec(`ALTER TABLE anonymous_deploys ADD COLUMN terminatesAt TEXT NOT NULL DEFAULT ''`)
+    db.exec(`UPDATE anonymous_deploys SET terminatesAt = expiresAt WHERE terminatesAt = ''`)
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_anon_terminates ON anonymous_deploys(terminatesAt)`)
+  }
+  if (!anonCols.includes("terminated")) {
+    db.exec(`ALTER TABLE anonymous_deploys ADD COLUMN terminated INTEGER NOT NULL DEFAULT 0`)
+  }
 
   function hashToken(token: string): string {
     return createHash("sha256").update(token).digest("hex")
@@ -98,6 +149,22 @@ export function openControlDb(dataDir: string): ControlDb {
       "maxDiskBytes = excluded.maxDiskBytes, maxMemoryMb = excluded.maxMemoryMb"
   )
   const deleteQuotaStmt = db.prepare("DELETE FROM deploy_quotas WHERE deployId = ?")
+  const insertAnon = db.prepare(
+    "INSERT INTO anonymous_deploys (deployId, claimTokenHash, createdAt, terminatesAt, expiresAt, terminated) VALUES (?, ?, ?, ?, ?, 0)"
+  )
+  const selectAnon = db.prepare(
+    "SELECT deployId, claimTokenHash, createdAt, terminatesAt, expiresAt, terminated FROM anonymous_deploys WHERE deployId = ?"
+  )
+  const deleteAnon = db.prepare("DELETE FROM anonymous_deploys WHERE deployId = ?")
+  const markTerminatedStmt = db.prepare("UPDATE anonymous_deploys SET terminated = 1 WHERE deployId = ?")
+  const selectForTermination = db.prepare(
+    "SELECT deployId FROM anonymous_deploys WHERE terminated = 0 AND terminatesAt < ?"
+  )
+  const selectForDeletion = db.prepare("SELECT deployId FROM anonymous_deploys WHERE expiresAt < ?")
+  const promoteTxn = db.transaction((deployId: string, userId: string) => {
+    deleteAnon.run(deployId)
+    insertOwner.run(deployId, userId)
+  })
 
   return {
     hashToken,
@@ -165,6 +232,41 @@ export function openControlDb(dataDir: string): ControlDb {
     },
     deleteQuota(deployId) {
       deleteQuotaStmt.run(deployId)
+    },
+    createAnonymous(deployId, claimToken, gracePeriodMs, retentionMs) {
+      const now = new Date()
+      const terminatesAt = new Date(now.getTime() + gracePeriodMs).toISOString()
+      const expiresAt = new Date(now.getTime() + retentionMs).toISOString()
+      insertAnon.run(deployId, hashToken(claimToken), now.toISOString(), terminatesAt, expiresAt)
+      return { terminatesAt, expiresAt }
+    },
+    findAnonymous(deployId) {
+      return (selectAnon.get(deployId) as AnonymousDeployRow | undefined) ?? null
+    },
+    markTerminated(deployId) {
+      markTerminatedStmt.run(deployId)
+    },
+    listForTermination(nowIso) {
+      const rows = selectForTermination.all(nowIso) as Array<{ deployId: string }>
+      return rows.map((r) => r.deployId)
+    },
+    listForDeletion(nowIso) {
+      const rows = selectForDeletion.all(nowIso) as Array<{ deployId: string }>
+      return rows.map((r) => r.deployId)
+    },
+    promoteAnonymous(deployId, userId) {
+      promoteTxn(deployId, userId)
+    },
+    deleteAnonymous(deployId) {
+      deleteAnon.run(deployId)
+    },
+    verifyAnonymousClaim(deployId, claimToken) {
+      const row = selectAnon.get(deployId) as AnonymousDeployRow | undefined
+      if (!row) return false
+      const provided = Buffer.from(hashToken(claimToken))
+      const stored = Buffer.from(row.claimTokenHash)
+      if (provided.length !== stored.length) return false
+      return timingSafeEqual(provided, stored)
     },
     close() {
       db.close()

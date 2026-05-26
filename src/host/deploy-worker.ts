@@ -9,6 +9,7 @@ interface BootOptions {
   inspectSecret?: string
   publicInspect?: boolean
   allowedOrigins?: string[]
+  restrictNetwork?: boolean
 }
 
 type ParentMessage =
@@ -21,9 +22,26 @@ function send(msg: object) {
   if (process.send) process.send(msg)
 }
 
+async function installNetworkRestriction() {
+  const denyFetch = () => {
+    throw new Error("Outbound network access disabled for anonymous deploys")
+  }
+  ;(globalThis as any).fetch = denyFetch
+  try {
+    // @ts-ignore — undici may not be available
+    const undici: any = await import("undici")
+    if (undici && typeof undici === "object") undici.fetch = denyFetch
+  } catch {
+    // undici may not be installed; best-effort
+  }
+}
+
 process.on("message", async (msg: ParentMessage) => {
   if (msg.type === "boot") {
     try {
+      if (msg.options.restrictNetwork) {
+        await installNetworkRestriction()
+      }
       const result = await serveBundleServer(msg.options)
       server = result.server
       send({ type: "booted", port: result.port })

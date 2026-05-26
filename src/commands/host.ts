@@ -6,7 +6,7 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { randomBytes, timingSafeEqual } from "node:crypto"
 import { fork, type ChildProcess } from "node:child_process"
-import { openControlDb, DEFAULT_QUOTA, type ControlDb, type UserRow } from "../host/control-db.js"
+import { openControlDb, DEFAULT_QUOTA, ANONYMOUS_QUOTA, type ControlDb, type UserRow } from "../host/control-db.js"
 
 interface HostedDeployRecord {
   deployId: string
@@ -85,6 +85,28 @@ function serializeEnv(entries: Record<string, string>): string {
   )
 }
 
+function parseDuration(s: string): number {
+  const m = /^(\d+)(ms|s|m|h|d)$/.exec(s.trim())
+  if (!m) throw new Error(`invalid duration: ${s}`)
+  const n = parseInt(m[1], 10)
+  switch (m[2]) {
+    case "ms": return n
+    case "s": return n * 1000
+    case "m": return n * 60 * 1000
+    case "h": return n * 60 * 60 * 1000
+    case "d": return n * 24 * 60 * 60 * 1000
+    default: throw new Error(`invalid duration unit: ${m[2]}`)
+  }
+}
+
+function formatHumanDuration(ms: number): string {
+  const s = Math.round(ms / 1000)
+  if (s % 86400 === 0) return `${s / 86400} day${s / 86400 === 1 ? "" : "s"}`
+  if (s % 3600 === 0) return `${s / 3600} hour${s / 3600 === 1 ? "" : "s"}`
+  if (s % 60 === 0) return `${s / 60} minute${s / 60 === 1 ? "" : "s"}`
+  return `${s} second${s === 1 ? "" : "s"}`
+}
+
 export const hostCommand = defineCommand({
   meta: {
     name: "host",
@@ -109,6 +131,31 @@ export const hostCommand = defineCommand({
       type: "string",
       default: ".pond-host",
     },
+    "anonymous-deploys": {
+      type: "boolean",
+      description: "Allow unauthenticated POST /api/deploys (Lakebed-style)",
+      default: true,
+    },
+    "anonymous-grace": {
+      type: "string",
+      description: "How long before an unclaimed deploy's worker is terminated (e.g. 1h, 30m, 60s)",
+      default: "1h",
+    },
+    "anonymous-retention": {
+      type: "string",
+      description: "How long before a terminated unclaimed deploy is deleted from disk",
+      default: "7d",
+    },
+    "anonymous-rate-per-hour": {
+      type: "string",
+      description: "Max anonymous POST /api/deploys per IP per rolling hour",
+      default: "5",
+    },
+    "trust-proxy": {
+      type: "boolean",
+      description: "Read client IP from x-forwarded-for (also POND_TRUST_PROXY_HEADERS=1)",
+      default: false,
+    },
   },
   async run({ args }) {
     const port = parseInt(typeof args.port === "string" ? args.port : "8787", 10)
@@ -120,9 +167,39 @@ export const hostCommand = defineCommand({
     const apiUrl = `http://${hostname}:${port}`
     const runningChildren = new Map<string, { child: ChildProcess; port: number }>()
     const workerPath = path.resolve(import.meta.dirname, "../host/deploy-worker.js")
+    const pondSrcDir = path.resolve(import.meta.dirname, "..")
+    const pondNodeModulesDir = path.resolve(import.meta.dirname, "../../node_modules")
 
-    function urlFor(deployId: string): string {
-      return `http://${deployId}.${publicHost}:${port}`
+    const anonymousEnabled = args["anonymous-deploys"] !== false
+    const graceStr = process.env.POND_ANONYMOUS_CLEANUP_GRACE ?? (typeof args["anonymous-grace"] === "string" ? args["anonymous-grace"] : "1h")
+    const retentionStr = process.env.POND_ANONYMOUS_CLEANUP_RETENTION ?? (typeof args["anonymous-retention"] === "string" ? args["anonymous-retention"] : "7d")
+    const anonymousGraceMs = parseDuration(graceStr)
+    const anonymousRetentionMs = parseDuration(retentionStr)
+    const anonymousRateLimit = parseInt(typeof args["anonymous-rate-per-hour"] === "string" ? args["anonymous-rate-per-hour"] : "5", 10)
+    const trustProxy = process.env.POND_TRUST_PROXY_HEADERS === "1" || args["trust-proxy"] === true
+
+    const nodeMajor = parseInt((process.versions.node ?? "0").split(".")[0], 10)
+    const sandboxAvailable = nodeMajor >= 22 && fs.existsSync(pondSrcDir) && fs.existsSync(pondNodeModulesDir)
+    if (!sandboxAvailable && anonymousEnabled) {
+      console.log(
+        `[pond host] Node ${process.versions.node} — permission model disabled. Upgrade to Node 22+ for anonymous deploy sandboxing.`
+      )
+    }
+
+    // Sliding-window per-IP rate limiter (in-memory).
+    const anonRateState = new Map<string, number[]>()
+    function rateAllow(ip: string): boolean {
+      const now = Date.now()
+      const cutoff = now - 60 * 60 * 1000
+      const arr = anonRateState.get(ip) ?? []
+      const pruned = arr.filter((t) => t > cutoff)
+      if (pruned.length >= anonymousRateLimit) {
+        anonRateState.set(ip, pruned)
+        return false
+      }
+      pruned.push(now)
+      anonRateState.set(ip, pruned)
+      return true
     }
 
     fs.mkdirSync(deploysDir, { recursive: true })
@@ -136,6 +213,10 @@ export const hostCommand = defineCommand({
         hostToken = randomBytes(32).toString("hex")
         fs.writeFileSync(tokenFile, hostToken, { mode: 0o600 })
       }
+    }
+
+    function urlFor(deployId: string): string {
+      return `http://${deployId}.${publicHost}:${port}`
     }
 
     function deployDirFor(deployId: string) {
@@ -204,19 +285,44 @@ export const hostCommand = defineCommand({
       clearTimeout(timer)
     }
 
-    async function forkDeploy(record: HostedDeployRecord): Promise<void> {
+    async function forkDeploy(
+      record: HostedDeployRecord,
+      opts: { restrictNetwork?: boolean; useSandbox?: boolean } = {}
+    ): Promise<void> {
       const dir = deployDirFor(record.deployId)
       const bundlePath = path.join(dir, "deploy-bundle.mjs")
       const clientPath = path.join(dir, "client.html")
       if (!fs.existsSync(bundlePath)) return
       await stopDeploy(record.deployId)
 
+      // Resolve symlinks: the permission model checks REAL paths (macOS /tmp →
+      // /private/tmp), and the worker uses cwd to compute its data.db location,
+      // so cwd / bundlePath must be in real form when the sandbox is active.
+      const realDir = opts.useSandbox && sandboxAvailable ? fs.realpathSync(dir) : dir
+      const realBundlePath = opts.useSandbox && sandboxAvailable ? fs.realpathSync(bundlePath) : bundlePath
+      const realClientPath = fs.existsSync(clientPath)
+        ? opts.useSandbox && sandboxAvailable
+          ? fs.realpathSync(clientPath)
+          : clientPath
+        : undefined
+
       const quota = controlDb.getQuota(record.deployId)
+      const execArgv = [`--max-old-space-size=${quota.maxMemoryMb}`]
+      if (opts.useSandbox && sandboxAvailable) {
+        execArgv.push(
+          "--experimental-permission",
+          `--allow-fs-read=${realDir}`,
+          `--allow-fs-read=${fs.realpathSync(pondSrcDir)}`,
+          `--allow-fs-read=${fs.realpathSync(pondNodeModulesDir)}`,
+          `--allow-fs-write=${realDir}`,
+          "--allow-addons"
+        )
+      }
       const child = fork(workerPath, [], {
-        cwd: dir,
+        cwd: realDir,
         env: scopedEnvFor(record),
         stdio: ["ignore", "inherit", "inherit", "ipc"],
-        execArgv: [`--max-old-space-size=${quota.maxMemoryMb}`],
+        execArgv,
       })
 
       const deployId = record.deployId
@@ -256,13 +362,14 @@ export const hostCommand = defineCommand({
           child.send({
             type: "boot",
             options: {
-              bundlePath,
-              clientPath: fs.existsSync(clientPath) ? clientPath : undefined,
-              cwd: dir,
+              bundlePath: realBundlePath,
+              clientPath: realClientPath,
+              cwd: realDir,
               port: 0,
               hostname: "127.0.0.1",
               inspectSecret: record.claimToken,
               publicInspect: record.publicInspect,
+              restrictNetwork: Boolean(opts.restrictNetwork),
             },
           })
         })
@@ -284,14 +391,46 @@ export const hostCommand = defineCommand({
     for (const entry of fs.readdirSync(deploysDir, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue
       const record = readRecord(entry.name)
-      if (record) {
+      if (!record) continue
+      const anon = controlDb.findAnonymous(record.deployId)
+      if (anon && anon.terminated === 1) continue
+      const isAnonUnclaimed = anon !== null
+      try {
+        await forkDeploy(record, {
+          useSandbox: isAnonUnclaimed,
+          restrictNetwork: isAnonUnclaimed,
+        })
+      } catch (err) {
+        console.error(`[pond host] boot failed for ${record.deployId}:`, err)
+      }
+    }
+
+    function runSweep() {
+      const now = new Date().toISOString()
+      for (const id of controlDb.listForTermination(now)) {
         try {
-          await forkDeploy(record)
-        } catch (err) {
-          console.error(`[pond host] boot failed for ${record.deployId}:`, err)
+          stopDeploy(id)
+          controlDb.markTerminated(id)
+          console.log(`[pond host] anonymous deploy ${id} terminated (grace passed)`)
+        } catch (e) {
+          console.error(`sweep terminate ${id}:`, e)
+        }
+      }
+      for (const id of controlDb.listForDeletion(now)) {
+        try {
+          stopDeploy(id)
+          fs.rmSync(deployDirFor(id), { recursive: true, force: true })
+          controlDb.deleteAnonymous(id)
+          controlDb.deleteQuota(id)
+          console.log(`[pond host] anonymous deploy ${id} deleted (retention passed)`)
+        } catch (e) {
+          console.error(`sweep delete ${id}:`, e)
         }
       }
     }
+    runSweep()
+    const sweepTimer = setInterval(runSweep, 60_000)
+    sweepTimer.unref()
 
     const app = new Hono()
     app.use("*", async (c, next) => {
@@ -350,6 +489,24 @@ export const hostCommand = defineCommand({
       const user = controlDb.findUserByTokenHash(controlDb.hashToken(provided))
       if (!user || user.isAdmin !== 1) return c.json({ error: "Forbidden" }, 403)
       return { user, viaHostToken: false }
+    }
+
+    function clientIp(c: any): string {
+      if (trustProxy) {
+        const xff = c.req.header("x-forwarded-for")
+        if (xff) {
+          const first = xff.split(",")[0]?.trim()
+          if (first) return first
+        }
+      }
+      try {
+        const inc = c.env?.incoming
+        const ip = inc?.socket?.remoteAddress
+        if (typeof ip === "string" && ip) return ip
+      } catch {
+        // fall through
+      }
+      return "unknown"
     }
 
     function authorizeDeployMutation(
@@ -431,16 +588,23 @@ export const hostCommand = defineCommand({
       const records = ids
         .map((id) => readRecord(id))
         .filter((rec): rec is HostedDeployRecord => rec !== null)
-        .map((rec) => ({
-          deployId: rec.deployId,
-          url: rec.url,
-          apiUrl: rec.apiUrl,
-          publicInspect: rec.publicInspect,
-          createdAt: rec.createdAt,
-          updatedAt: rec.updatedAt,
-          claimedAt: rec.claimedAt,
-          ownerId: controlDb.getDeployOwner(rec.deployId),
-        }))
+        .map((rec) => {
+          const anon = controlDb.findAnonymous(rec.deployId)
+          return {
+            deployId: rec.deployId,
+            url: rec.url,
+            apiUrl: rec.apiUrl,
+            publicInspect: rec.publicInspect,
+            createdAt: rec.createdAt,
+            updatedAt: rec.updatedAt,
+            claimedAt: rec.claimedAt,
+            ownerId: controlDb.getDeployOwner(rec.deployId),
+            anonymous: anon !== null,
+            terminatesAt: anon?.terminatesAt,
+            expiresAt: anon?.expiresAt,
+            terminated: anon?.terminated === 1,
+          }
+        })
       return c.json({ deploys: records })
     })
 
@@ -448,8 +612,28 @@ export const hostCommand = defineCommand({
       "/api/deploys",
       bodyLimit({ maxSize: MAX_BUNDLE_BYTES, onError: (c) => c.json({ error: "Payload too large" }, 413) }),
       async (c) => {
-        const r = requireUser(c)
-        if (r instanceof Response) return r
+        const providedAuth = bearer(c.req.header("authorization"))
+        let user: UserRow | null = null
+        if (providedAuth) {
+          user = controlDb.findUserByTokenHash(controlDb.hashToken(providedAuth))
+          if (!user) return c.json({ error: "Unauthorized" }, 401)
+        }
+        const isAnonymous = user === null
+
+        if (isAnonymous && !anonymousEnabled) {
+          return c.json({ error: "Anonymous deploys disabled" }, 401)
+        }
+        if (isAnonymous) {
+          const ip = clientIp(c)
+          if (!rateAllow(ip)) {
+            return new Response(JSON.stringify({ error: "Rate limit exceeded for anonymous deploys" }), {
+              status: 429,
+              headers: { "content-type": "application/json", "retry-after": "3600" },
+            })
+          }
+        }
+        const quotaTemplate = isAnonymous ? ANONYMOUS_QUOTA : DEFAULT_QUOTA
+
         const body = (await c.req.json()) as {
           bundleBase64?: unknown
           clientHtmlBase64?: unknown
@@ -462,8 +646,11 @@ export const hostCommand = defineCommand({
           return c.json({ error: "clientHtmlBase64 must be string" }, 400)
         }
         const bundleBuf = Buffer.from(body.bundleBase64, "base64")
-        if (bundleBuf.length > DEFAULT_QUOTA.maxBundleBytes) {
-          return c.json({ error: `Bundle exceeds default per-deploy quota (${DEFAULT_QUOTA.maxBundleBytes} bytes)` }, 413)
+        if (bundleBuf.length > quotaTemplate.maxBundleBytes) {
+          return c.json(
+            { error: `Bundle exceeds ${isAnonymous ? "anonymous" : "default"} per-deploy quota (${quotaTemplate.maxBundleBytes} bytes)` },
+            413
+          )
         }
         const deployId = randomBytes(8).toString("hex")
         const claimToken = randomBytes(32).toString("hex")
@@ -474,9 +661,9 @@ export const hostCommand = defineCommand({
           fs.writeFileSync(path.join(dir, "client.html"), Buffer.from(body.clientHtmlBase64, "base64"))
         }
         const sizeAfter = dirSize(dir)
-        if (sizeAfter > DEFAULT_QUOTA.maxDiskBytes) {
+        if (sizeAfter > quotaTemplate.maxDiskBytes) {
           fs.rmSync(dir, { recursive: true, force: true })
-          return c.json({ error: `Disk usage ${sizeAfter} exceeds default quota ${DEFAULT_QUOTA.maxDiskBytes}` }, 413)
+          return c.json({ error: `Disk usage ${sizeAfter} exceeds quota ${quotaTemplate.maxDiskBytes}` }, 413)
         }
         const record: HostedDeployRecord = {
           deployId,
@@ -489,13 +676,28 @@ export const hostCommand = defineCommand({
           updatedAt: new Date().toISOString(),
         }
         writeRecord(record)
-        controlDb.setDeployOwner(deployId, r.user.id)
+        let extra: { terminatesAt?: string; expiresAt?: string } = {}
+        if (isAnonymous) {
+          controlDb.setQuota(deployId, ANONYMOUS_QUOTA)
+          const { terminatesAt, expiresAt } = controlDb.createAnonymous(
+            deployId,
+            claimToken,
+            anonymousGraceMs,
+            anonymousRetentionMs
+          )
+          extra = { terminatesAt, expiresAt }
+        } else {
+          controlDb.setDeployOwner(deployId, user!.id)
+        }
         try {
-          await forkDeploy(record)
+          await forkDeploy(record, {
+            useSandbox: isAnonymous,
+            restrictNetwork: isAnonymous,
+          })
         } catch (err: any) {
           return c.json({ error: `Boot failed: ${err?.message ?? err}`, deployId }, 500)
         }
-        return c.json(record, 201)
+        return c.json({ ...record, ...extra }, 201)
       }
     )
 
@@ -506,6 +708,9 @@ export const hostCommand = defineCommand({
         const deployId = c.req.param("deployId")
         const record = readRecord(deployId)
         if (!record) return c.json({ error: "Not found" }, 404)
+        if (controlDb.findAnonymous(deployId)) {
+          return c.json({ error: "Anonymous deploys cannot be updated — claim first" }, 403)
+        }
         const auth = authorizeDeployMutation(c, record)
         if (auth instanceof Response) return auth
         const body = (await c.req.json()) as {
@@ -550,13 +755,70 @@ export const hostCommand = defineCommand({
       const deployId = c.req.param("deployId")
       const record = readRecord(deployId)
       if (!record) return c.json({ error: "Not found" }, 404)
-      const body = (await c.req.json()) as {
+      const body = (await c.req.json().catch(() => ({}))) as {
         claimToken?: unknown
+        signup?: unknown
         envText?: unknown
       }
-      if (typeof body.claimToken !== "string" || !safeEqual(body.claimToken, record.claimToken)) {
+      if (typeof body.claimToken !== "string") {
+        return c.json({ error: "claimToken required" }, 400)
+      }
+      const anon = controlDb.findAnonymous(deployId)
+      const tokenMatchesRecord = safeEqual(body.claimToken, record.claimToken)
+      const tokenMatchesAnon = anon ? controlDb.verifyAnonymousClaim(deployId, body.claimToken) : false
+      if (!tokenMatchesRecord && !tokenMatchesAnon) {
         return c.json({ error: "Forbidden" }, 403)
       }
+
+      // Resolve user
+      let user: UserRow | null = null
+      let createdCredential: { username: string; token: string } | null = null
+
+      const signup = body.signup as { username?: unknown } | undefined
+      const bearerToken = bearer(c.req.header("authorization"))
+
+      if (signup && typeof signup.username === "string") {
+        if (!anon) {
+          return c.json({ error: "signup only allowed for unclaimed anonymous deploys" }, 400)
+        }
+        const baseName = signup.username
+        if (!/^[a-z0-9_-]{1,29}$/i.test(baseName)) {
+          return c.json({ error: "username must match /^[a-z0-9_-]{1,29}$/i" }, 400)
+        }
+        // Try base, then base-2 ... base-99.
+        let chosen: string | null = null
+        if (!controlDb.findUserByUsername(baseName)) {
+          chosen = baseName
+        } else {
+          for (let n = 2; n <= 99; n++) {
+            const candidate = `${baseName}-${n}`
+            if (!controlDb.findUserByUsername(candidate)) {
+              chosen = candidate
+              break
+            }
+          }
+        }
+        if (!chosen) {
+          return c.json({ error: "username taken (tried -2..-99)" }, 409)
+        }
+        const isFirstUser = !controlDb.hasAnyUser()
+        const created = controlDb.createUser(chosen, isFirstUser)
+        user = created.user
+        createdCredential = { username: created.user.username, token: created.token }
+      } else if (bearerToken) {
+        user = controlDb.findUserByTokenHash(controlDb.hashToken(bearerToken))
+        if (!user) return c.json({ error: "Unauthorized" }, 401)
+      } else {
+        return c.json({ error: "Provide signup or Authorization" }, 400)
+      }
+
+      if (anon) {
+        controlDb.promoteAnonymous(deployId, user.id)
+      } else {
+        // Cross-machine ownership move: set owner if not already, or replace.
+        controlDb.setDeployOwner(deployId, user.id)
+      }
+
       if (typeof body.envText === "string") {
         fs.writeFileSync(path.join(deployDirFor(deployId), ".env.pond.server"), body.envText, { mode: 0o600 })
       }
@@ -568,7 +830,9 @@ export const hostCommand = defineCommand({
       } catch (err: any) {
         return c.json({ error: `Boot failed: ${err?.message ?? err}` }, 500)
       }
-      return c.json(record)
+      const resp: Record<string, unknown> = { ...record }
+      if (createdCredential) resp.user = createdCredential
+      return c.json(resp)
     })
 
     app.post("/api/deploys/:deployId/rotate-claim-token", async (c) => {
@@ -602,6 +866,7 @@ export const hostCommand = defineCommand({
       await stopDeploy(deployId)
       fs.rmSync(deployDirFor(deployId), { recursive: true, force: true })
       controlDb.deleteDeployOwner(deployId)
+      controlDb.deleteAnonymous(deployId)
       controlDb.deleteQuota(deployId)
       return c.json({ ok: true })
     })
@@ -666,6 +931,9 @@ export const hostCommand = defineCommand({
     function requireDeployOwner(c: any, deployId: string): { record: HostedDeployRecord } | Response {
       const record = readRecord(deployId)
       if (!record) return c.json({ error: "Not found" }, 404)
+      if (controlDb.findAnonymous(deployId)) {
+        return c.json({ error: "Anonymous deploys cannot manage env — claim first" }, 403)
+      }
       const r = requireUser(c)
       if (r instanceof Response) return r
       const ownerId = controlDb.getDeployOwner(deployId)
@@ -806,7 +1074,14 @@ export const hostCommand = defineCommand({
 
     console.log(`\n  pond host control plane running at http://${hostname}:${port}`)
     console.log(`  host token (bootstrap / recovery): ${hostToken}`)
-    console.log(`  bootstrap first admin: pond login --api ${apiUrl} --username <name>\n`)
+    console.log(`  bootstrap first admin: pond login --api ${apiUrl} --username <name>`)
+    if (anonymousEnabled) {
+      console.log(
+        `  anonymous deploys: enabled (grace=${formatHumanDuration(anonymousGraceMs)}, retention=${formatHumanDuration(anonymousRetentionMs)}, rate=${anonymousRateLimit}/h)\n`
+      )
+    } else {
+      console.log("  anonymous deploys: disabled\n")
+    }
     if (hostname === "0.0.0.0" || hostname === "::") {
       console.log("  ⚠ bound to all interfaces — deploying a bundle here gives the caller arbitrary code execution as this user.\n")
     }

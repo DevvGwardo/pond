@@ -6,6 +6,20 @@ import { buildForDeploy } from "../runtime.js"
 import { buildClient } from "../bundler.js"
 import { loadCredentials } from "../host/credentials.js"
 
+function formatRelative(targetIso: string | undefined, fromMs: number): string {
+  if (!targetIso) return ""
+  const diff = new Date(targetIso).getTime() - fromMs
+  if (!isFinite(diff)) return ""
+  const s = Math.max(1, Math.round(diff / 1000))
+  if (s < 60) return `${s} second${s === 1 ? "" : "s"}`
+  const m = Math.round(s / 60)
+  if (m < 60) return `${m} minute${m === 1 ? "" : "s"}`
+  const h = Math.round(m / 60)
+  if (h < 24) return `${h} hour${h === 1 ? "" : "s"}`
+  const d = Math.round(h / 24)
+  return `${d} day${d === 1 ? "" : "s"}`
+}
+
 export const deployCommand = defineCommand({
   meta: {
     name: "deploy",
@@ -88,19 +102,19 @@ export const deployCommand = defineCommand({
 
     const userToken =
       (typeof args.token === "string" && args.token) || loadCredentials(apiUrl)?.token || ""
-    if (!userToken && !localRecord?.claimToken) {
-      console.error(
-        `No saved credentials for ${apiUrl}. Run \`pond login --api ${apiUrl} --username <name>\` first, or pass --token.`
-      )
-      process.exit(1)
-    }
 
     const bundleBytes = fs.readFileSync(outfile)
     const shouldPushEnv = Boolean(args["push-env"])
     const envText = shouldPushEnv && fs.existsSync(envFile) ? fs.readFileSync(envFile, "utf-8") : undefined
 
-    console.log(`→ Uploading bundle (${(bundleBytes.length / 1024).toFixed(1)} KB) to ${apiUrl}`)
+    const isAnonymous = !userToken && !localRecord?.claimToken
+
+    console.log(`→ Uploading bundle (${(bundleBytes.length / 1024).toFixed(1)} KB) to ${apiUrl}${isAnonymous ? " (anonymous)" : ""}`)
     if (shouldPushEnv) {
+      if (isAnonymous) {
+        console.error("--push-env is not allowed for anonymous deploys; claim first.")
+        process.exit(1)
+      }
       const lineCount = envText ? envText.split("\n").filter((l) => l.trim() && !l.trim().startsWith("#")).length : 0
       console.log(`→ Uploading .env.pond.server (${lineCount} entries) to ${apiUrl}`)
     }
@@ -123,12 +137,11 @@ export const deployCommand = defineCommand({
         body: JSON.stringify({ ...baseBody, envText }),
       })
     } else {
+      const headers: Record<string, string> = { "content-type": "application/json" }
+      if (userToken) headers.authorization = `Bearer ${userToken}`
       response = await fetch(`${apiUrl}/api/deploys`, {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${userToken}`,
-        },
+        headers,
         body: JSON.stringify(baseBody),
       })
     }
@@ -146,6 +159,8 @@ export const deployCommand = defineCommand({
       publicInspect: boolean
       claimedAt?: string
       updatedAt?: string
+      terminatesAt?: string
+      expiresAt?: string
     }
 
     fs.writeFileSync(
@@ -162,6 +177,8 @@ export const deployCommand = defineCommand({
           claimToken: remote.claimToken,
           publicInspect: remote.publicInspect,
           claimedAt: remote.claimedAt,
+          terminatesAt: remote.terminatesAt,
+          expiresAt: remote.expiresAt,
           port: parseInt(args.port, 10),
         },
         null,
@@ -169,7 +186,17 @@ export const deployCommand = defineCommand({
       )
     )
 
-    console.log(`Hosted deploy ${remote.claimedAt ? "updated" : "created"} at ${remote.url}`)
-    console.log(`Manage env with: pond env list ${remote.deployId} --api ${remote.apiUrl}`)
+    if (isAnonymous && remote.terminatesAt && remote.expiresAt) {
+      const now = Date.now()
+      const terminatesIn = formatRelative(remote.terminatesAt, now)
+      const expiresIn = formatRelative(remote.expiresAt, now)
+      console.log(`Hosted deploy created at ${remote.url}`)
+      console.log(`  ⚠ Anonymous — terminates in ${terminatesIn}, deleted in ${expiresIn}`)
+      console.log(`  Claim with: pond claim --signup <username>`)
+      console.log(`          or: pond login --api ${remote.apiUrl} --username <name> first, then \`pond claim\``)
+    } else {
+      console.log(`Hosted deploy ${remote.claimedAt ? "updated" : "created"} at ${remote.url}`)
+      console.log(`Manage env with: pond env list ${remote.deployId} --api ${remote.apiUrl}`)
+    }
   },
 })

@@ -231,6 +231,49 @@ pond login --api http://localhost:8787 --token <bob-token> --username bob
 
 Each deploy is owned by the user that created it. Admins can manage any deploy. The legacy claim token in `.pond/deploy.json` still works for cross-machine ownership transfer via `pond claim`.
 
+### Anonymous deploys (Lakebed-style)
+
+`pond deploy --api <url>` without saved credentials creates a hosted deploy with no account attached. The control plane returns a URL and a claim token (saved to `.pond/deploy.json`). Claim it later by running either:
+
+```bash
+pond claim --signup <username>          # create a new account on the host
+# or
+pond login --api <url> --username <name>
+pond claim                              # attach to your existing account
+```
+
+**Two-phase TTL.** An unclaimed anonymous deploy goes through two cleanup phases:
+
+- **Grace** (`POND_ANONYMOUS_CLEANUP_GRACE`, default `1h`, also `--anonymous-grace`) — after this, the worker is terminated. The disk contents are kept, the deploy id stays valid, and claiming it (with `pond claim`) re-forks the worker.
+- **Retention** (`POND_ANONYMOUS_CLEANUP_RETENTION`, default `7d`, also `--anonymous-retention`) — after this, the deploy directory and all its data are deleted.
+
+The sweeper runs every 60s and at host startup.
+
+**Rate limit.** Anonymous `POST /api/deploys` is limited to 5 per IP per rolling hour (`--anonymous-rate-per-hour`). Disable anonymous deploys entirely with `--anonymous-deploys=false`. If the host runs behind a reverse proxy, set `POND_TRUST_PROXY_HEADERS=1` (or `--trust-proxy`) so the rate limit keys on `x-forwarded-for` rather than the proxy's address.
+
+**Anonymous quotas (smaller than the defaults).**
+
+| Field | Default | Anonymous |
+| --- | --- | --- |
+| `maxBundleBytes` | 64 MB | 16 MB |
+| `maxDiskBytes` | 512 MB | 128 MB |
+| `maxMemoryMb` | 256 | 128 |
+
+**Sandbox (Node 22+).** Anonymous workers are spawned with Node's experimental permission model:
+
+- `--experimental-permission`
+- `--allow-fs-read=<deploy dir>` + `--allow-fs-read=<pond src dir>` + `--allow-fs-read=<pond node_modules>`
+- `--allow-fs-write=<deploy dir>`
+- `--allow-addons` (required so better-sqlite3 can load — Node warns about this)
+
+In addition, `globalThis.fetch` and (best-effort) `undici.fetch` are overridden at boot to throw `Outbound network access disabled for anonymous deploys`. This is **defense-in-depth, not an airtight sandbox** — a sophisticated attacker can still re-import or trigger fetches through other paths. The point is to make the common case (an anonymous deploy that calls out to the internet) fail loudly. Authenticated deploys are NOT subject to the permission model or the fetch shim. On Node < 22, the sandbox is disabled and the host logs a warning at startup.
+
+**What anonymous deploys cannot do:**
+
+- `PUT /api/deploys/:id` — must claim before updating the bundle.
+- `PUT /api/deploys/:id/env` — env upload is blocked at the API level. `pond deploy --push-env` errors out without uploading.
+- Outbound `fetch` from inside the capsule (see above).
+
 ### Env management
 
 ```bash
