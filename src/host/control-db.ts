@@ -18,6 +18,9 @@ export interface DeployQuota {
   maxMemoryMb: number
 }
 
+/** Grace window during which a freshly-rotated user's previous token still authenticates. */
+export const ROTATE_GRACE_MS = 5 * 60 * 1000
+
 export const DEFAULT_QUOTA: Omit<DeployQuota, "deployId"> = {
   maxBundleBytes: 64 * 1024 * 1024,
   maxDiskBytes: 512 * 1024 * 1024,
@@ -123,9 +126,12 @@ export function openControlDb(dataDir: string): ControlDb {
       username TEXT UNIQUE NOT NULL,
       tokenHash TEXT NOT NULL,
       isAdmin INTEGER NOT NULL DEFAULT 0,
-      createdAt TEXT DEFAULT (datetime('now'))
+      createdAt TEXT DEFAULT (datetime('now')),
+      previousTokenHash TEXT,
+      previousTokenExpiresAt TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_users_tokenhash ON users(tokenHash);
+    CREATE INDEX IF NOT EXISTS idx_users_prev_tokenhash ON users(previousTokenHash);
     CREATE TABLE IF NOT EXISTS deploy_owners (
       deployId TEXT PRIMARY KEY,
       userId TEXT NOT NULL REFERENCES users(id)
@@ -188,6 +194,16 @@ export function openControlDb(dataDir: string): ControlDb {
     db.exec(`ALTER TABLE anonymous_deploys ADD COLUMN terminated INTEGER NOT NULL DEFAULT 0`)
   }
 
+  // Migrate pre-grace-window DBs to add previous-token columns on users.
+  const userCols = (db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>).map((c) => c.name)
+  if (!userCols.includes("previousTokenHash")) {
+    db.exec(`ALTER TABLE users ADD COLUMN previousTokenHash TEXT`)
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_users_prev_tokenhash ON users(previousTokenHash)`)
+  }
+  if (!userCols.includes("previousTokenExpiresAt")) {
+    db.exec(`ALTER TABLE users ADD COLUMN previousTokenExpiresAt TEXT`)
+  }
+
   function hashToken(token: string): string {
     return createHash("sha256").update(token).digest("hex")
   }
@@ -195,8 +211,15 @@ export function openControlDb(dataDir: string): ControlDb {
   const insertUser = db.prepare(
     "INSERT INTO users (id, username, tokenHash, isAdmin) VALUES (?, ?, ?, ?)"
   )
-  const updateUserToken = db.prepare("UPDATE users SET tokenHash = ? WHERE id = ?")
-  const selectByHash = db.prepare("SELECT id, username, tokenHash, isAdmin, createdAt FROM users WHERE tokenHash = ?")
+  const updateUserToken = db.prepare(
+    "UPDATE users SET tokenHash = ?, previousTokenHash = ?, previousTokenExpiresAt = ? WHERE id = ?"
+  )
+  const selectByCurrentHash = db.prepare(
+    "SELECT id, username, tokenHash, isAdmin, createdAt FROM users WHERE tokenHash = ?"
+  )
+  const selectByPreviousHash = db.prepare(
+    "SELECT id, username, tokenHash, isAdmin, createdAt, previousTokenExpiresAt FROM users WHERE previousTokenHash = ?"
+  )
   const selectById = db.prepare("SELECT id, username, tokenHash, isAdmin, createdAt FROM users WHERE id = ?")
   const selectByUsername = db.prepare(
     "SELECT id, username, tokenHash, isAdmin, createdAt FROM users WHERE username = ?"
@@ -291,7 +314,16 @@ export function openControlDb(dataDir: string): ControlDb {
       return { user, token }
     },
     findUserByTokenHash(tokenHash) {
-      return (selectByHash.get(tokenHash) as UserRow | undefined) ?? null
+      const current = selectByCurrentHash.get(tokenHash) as UserRow | undefined
+      if (current) return current
+      const prev = selectByPreviousHash.get(tokenHash) as
+        | (UserRow & { previousTokenExpiresAt: string | null })
+        | undefined
+      if (!prev) return null
+      if (!prev.previousTokenExpiresAt) return null
+      if (Date.parse(prev.previousTokenExpiresAt) < Date.now()) return null
+      const { previousTokenExpiresAt: _unused, ...row } = prev
+      return row
     },
     findUserById(id) {
       return (selectById.get(id) as UserRow | undefined) ?? null
@@ -300,8 +332,11 @@ export function openControlDb(dataDir: string): ControlDb {
       return (selectByUsername.get(username) as UserRow | undefined) ?? null
     },
     rotateUserToken(userId) {
+      const current = selectById.get(userId) as UserRow | undefined
+      const oldHash = current?.tokenHash ?? null
+      const graceExpiresAt = new Date(Date.now() + ROTATE_GRACE_MS).toISOString()
       const token = randomBytes(32).toString("hex")
-      updateUserToken.run(hashToken(token), userId)
+      updateUserToken.run(hashToken(token), oldHash, graceExpiresAt, userId)
       return token
     },
     hasAnyUser() {

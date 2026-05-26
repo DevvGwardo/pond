@@ -296,6 +296,8 @@ curl -X POST -H "Authorization: Bearer <token>" \
   http://localhost:8787/api/deploys/<deployId>/rotate-claim-token
 ```
 
+When a user API token is rotated, the previous token continues to authenticate for a 5-minute grace window. This lets in-flight clients (CI runners, long-lived agents) switch to the new token without an outage. The grace window applies only to the immediately prior token — repeated rotations within 5 minutes invalidate intermediate tokens.
+
 ### Quotas
 
 Every deploy has a quota, enforced by the control plane:

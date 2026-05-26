@@ -1057,6 +1057,70 @@ export default { schema: {}, queries: {}, mutations: {} }
   }
 })
 
+// ---- Token rotation grace window ----
+
+test("rotate-token: previous token honored within 5min grace, then rejected", async () => {
+  // Create a fresh user we can rotate without affecting other tests.
+  const userRes = await fetch(`${apiUrl}/api/users`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${hostToken}` },
+    body: JSON.stringify({ username: `rotater-${Date.now()}` }),
+  })
+  assert.equal(userRes.status, 201)
+  const u = await userRes.json()
+  const oldToken = u.token
+
+  // Old token works.
+  const before = await fetch(`${apiUrl}/api/users/me`, {
+    headers: { authorization: `Bearer ${oldToken}` },
+  })
+  assert.equal(before.status, 200)
+
+  // Rotate.
+  const rotateRes = await fetch(`${apiUrl}/api/users/me/rotate-token`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${oldToken}` },
+  })
+  assert.equal(rotateRes.status, 200)
+  const rotated = await rotateRes.json()
+  const newToken = rotated.token
+  assert.ok(newToken && newToken !== oldToken)
+
+  // New token works immediately.
+  const withNew = await fetch(`${apiUrl}/api/users/me`, {
+    headers: { authorization: `Bearer ${newToken}` },
+  })
+  assert.equal(withNew.status, 200)
+
+  // Old token still works within grace.
+  const withOldGrace = await fetch(`${apiUrl}/api/users/me`, {
+    headers: { authorization: `Bearer ${oldToken}` },
+  })
+  assert.equal(withOldGrace.status, 200, "old token should still work within grace window")
+
+  // Simulate grace expiry by reaching into the control DB and setting
+  // previousTokenExpiresAt to a past timestamp.
+  const Database = (await import("better-sqlite3")).default
+  const db = new Database(path.join(dataDir, "control.db"))
+  db.prepare("UPDATE users SET previousTokenExpiresAt = ? WHERE id = ?").run(
+    new Date(Date.now() - 1000).toISOString(),
+    u.userId
+  )
+  db.close()
+
+  // Now the old token should be rejected.
+  const expired = await fetch(`${apiUrl}/api/users/me`, {
+    headers: { authorization: `Bearer ${oldToken}` },
+  })
+  assert.equal(expired.status, 401, "old token must be rejected after grace expires")
+
+  // New token still works.
+  const stillNew = await fetch(`${apiUrl}/api/users/me`, {
+    headers: { authorization: `Bearer ${newToken}` },
+  })
+  assert.equal(stillNew.status, 200)
+})
+
 // ---- Audit log ----
 
 test("audit log records deploy.create and is admin-only", async () => {
