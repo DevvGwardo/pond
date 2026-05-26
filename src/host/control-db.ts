@@ -77,6 +77,7 @@ export interface ControlDb {
   findDomain(subdomain: string): CustomDomainRow | null
   listDomainsForDeploy(deployId: string): Array<{ subdomain: string; createdAt: string }>
   listDomainsForUser(userId: string): CustomDomainRow[]
+  countDomainsForUser(userId: string): number
   removeDomain(subdomain: string): void
   removeDomainsForDeploy(deployId: string): void
   close(): void
@@ -197,6 +198,9 @@ export function openControlDb(dataDir: string): ControlDb {
       "FROM custom_domains cd JOIN deploy_owners do ON do.deployId = cd.deployId " +
       "WHERE do.userId = ? ORDER BY cd.createdAt ASC"
   )
+  const countDomainsForUserStmt = db.prepare(
+    "SELECT COUNT(*) AS n FROM custom_domains cd JOIN deploy_owners do ON do.deployId = cd.deployId WHERE do.userId = ?"
+  )
   const deleteDomain = db.prepare("DELETE FROM custom_domains WHERE subdomain = ?")
   const deleteDomainsForDeployStmt = db.prepare("DELETE FROM custom_domains WHERE deployId = ?")
 
@@ -313,6 +317,9 @@ export function openControlDb(dataDir: string): ControlDb {
     },
     listDomainsForUser(userId) {
       return selectDomainsForUser.all(userId) as CustomDomainRow[]
+    },
+    countDomainsForUser(userId) {
+      return (countDomainsForUserStmt.get(userId) as { n: number }).n
     },
     removeDomain(subdomain) {
       deleteDomain.run(subdomain)

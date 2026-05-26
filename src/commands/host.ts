@@ -25,7 +25,8 @@ const MAX_BUNDLE_BYTES = 64 * 1024 * 1024
 
 const RESERVED_SUBDOMAINS = new Set(["api", "admin", "docs", "www", "app", "health"])
 const SUBDOMAIN_LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
-const HEX_DEPLOY_ID_RE = /^[a-f0-9]{8,}$/
+const HEX_DEPLOY_ID_RE = /^[a-f0-9]{16}$/
+const MAX_DOMAINS_PER_USER = 50
 
 function dirSize(dir: string): number {
   let total = 0
@@ -638,11 +639,12 @@ export const hostCommand = defineCommand({
         }
         const quotaTemplate = isAnonymous ? ANONYMOUS_QUOTA : DEFAULT_QUOTA
 
-        const body = (await c.req.json()) as {
+        const body = (await c.req.json().catch(() => null)) as {
           bundleBase64?: unknown
           clientHtmlBase64?: unknown
           publicInspect?: unknown
-        }
+        } | null
+        if (!body) return c.json({ error: "Invalid JSON body" }, 400)
         if (typeof body.bundleBase64 !== "string" || body.bundleBase64.length === 0) {
           return c.json({ error: "bundleBase64 required" }, 400)
         }
@@ -724,12 +726,13 @@ export const hostCommand = defineCommand({
         }
         const auth = authorizeDeployMutation(c, record)
         if (auth instanceof Response) return auth
-        const body = (await c.req.json()) as {
+        const body = (await c.req.json().catch(() => null)) as {
           bundleBase64?: unknown
           clientHtmlBase64?: unknown
           publicInspect?: unknown
           envText?: unknown
-        }
+        } | null
+        if (!body) return c.json({ error: "Invalid JSON body" }, 400)
         if (typeof body.bundleBase64 !== "string" || body.bundleBase64.length === 0) {
           return c.json({ error: "bundleBase64 required" }, 400)
         }
@@ -889,10 +892,14 @@ export const hostCommand = defineCommand({
       if (!record) return c.json({ error: "Not found" }, 404)
       const r = requireAdmin(c)
       if (r instanceof Response) return r
-      const body = (await c.req.json().catch(() => ({}))) as {
+      const body = (await c.req.json().catch(() => null)) as {
         maxBundleBytes?: unknown
         maxDiskBytes?: unknown
         maxMemoryMb?: unknown
+      } | null
+      if (!body) return c.json({ error: "Invalid JSON body" }, 400)
+      if (body.maxBundleBytes === undefined && body.maxDiskBytes === undefined && body.maxMemoryMb === undefined) {
+        return c.json({ error: "At least one of maxBundleBytes/maxDiskBytes/maxMemoryMb required" }, 400)
       }
       const patch: { maxBundleBytes?: number; maxDiskBytes?: number; maxMemoryMb?: number } = {}
       if (body.maxBundleBytes !== undefined) {
@@ -1051,13 +1058,16 @@ export const hostCommand = defineCommand({
         return c.json({ error: `subdomain "${sub}" is reserved` }, 400)
       }
       if (HEX_DEPLOY_ID_RE.test(sub)) {
-        return c.json({ error: "subdomain may not look like a hex deployId" }, 400)
+        return c.json({ error: "subdomain may not be a 16-char hex string (collides with deployId routing)" }, 400)
       }
       const record = readRecord(body.deployId)
       if (!record) return c.json({ error: "Not found" }, 404)
       const ownerId = controlDb.getDeployOwner(body.deployId)
       if (r.user.isAdmin !== 1 && ownerId !== r.user.id) {
         return c.json({ error: "Forbidden" }, 403)
+      }
+      if (r.user.isAdmin !== 1 && controlDb.countDomainsForUser(r.user.id) >= MAX_DOMAINS_PER_USER) {
+        return c.json({ error: `domain limit reached (${MAX_DOMAINS_PER_USER} per user)` }, 429)
       }
       try {
         controlDb.addDomain(sub, body.deployId)

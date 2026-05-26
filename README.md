@@ -130,6 +130,7 @@ Pond will:
 | `pond login --api <url> --username <name>` | Bootstrap first admin (needs `POND_HOST_TOKEN`) or attach with `--token` |
 | `pond user create <name> [--admin]` | Create a new control-plane user (admin only) |
 | `pond env list/set/unset <deployId>` | Manage hosted-deploy server env vars |
+| `pond domains list/add/remove <subdomain>` | Manage custom subdomain aliases for a deploy |
 | `pond token rotate --api <url>` | Rotate the saved user API token |
 
 ## Runtime Model
@@ -266,7 +267,7 @@ The sweeper runs every 60s and at host startup.
 - `--allow-fs-write=<deploy dir>`
 - `--allow-addons` (required so better-sqlite3 can load — Node warns about this)
 
-In addition, `globalThis.fetch` and (best-effort) `undici.fetch` are overridden at boot to throw `Outbound network access disabled for anonymous deploys`. This is **defense-in-depth, not an airtight sandbox** — a sophisticated attacker can still re-import or trigger fetches through other paths. The point is to make the common case (an anonymous deploy that calls out to the internet) fail loudly. Authenticated deploys are NOT subject to the permission model or the fetch shim. On Node < 22, the sandbox is disabled and the host logs a warning at startup.
+In addition, three things are patched at boot to block outbound network: `globalThis.fetch`, best-effort `undici.fetch`, and `net.Socket.prototype.connect` (which closes `node:http`, `node:https`, and `tls.connect`, all of which go through `net.Socket`). All four throw `Outbound network access disabled for anonymous deploys`. This is **defense-in-depth, not an airtight sandbox** — a capsule that ships a native module could bypass the JS-layer patch entirely, and `dns.lookup` still resolves names. The point is to make the common case (an anonymous deploy that calls out to the internet) fail loudly. For real network isolation, run the host behind an outbound-blocking firewall (iptables/pf). Authenticated deploys are NOT subject to the permission model or the network shims. On Node < 22, the permission model is disabled (host logs a warning at startup) but the network shims still apply.
 
 **What anonymous deploys cannot do:**
 

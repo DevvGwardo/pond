@@ -650,13 +650,39 @@ test("domains add rejects reserved subdomain (api)", async () => {
   assert.equal(res.status, 400)
 })
 
-test("domains add rejects hex-deployId-shaped subdomain", async () => {
+test("domains add rejects 16-char hex subdomain (collides with deployId routing)", async () => {
   const res = await fetch(`${apiUrl}/api/domains`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ subdomain: "abcdef1234567890", deployId: domainDeployId }),
+  })
+  assert.equal(res.status, 400)
+})
+
+test("domains add allows short hex string (under deployId length) and it routes via custom_domains", async () => {
+  const http = await import("node:http")
+  // 'abcdef12' is 8 hex chars — used to be blocked by the {8,} regex.
+  // Now it should be allowed AND route correctly through the proxy (B6 regression).
+  const add = await fetch(`${apiUrl}/api/domains`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
     body: JSON.stringify({ subdomain: "abcdef12", deployId: domainDeployId }),
   })
-  assert.equal(res.status, 400)
+  assert.equal(add.status, 201)
+  const routed = await new Promise((resolve, reject) => {
+    const req = http.request(
+      { host: "127.0.0.1", port, method: "GET", path: "/api/query/items", headers: { host: `abcdef12.${publicHost}:${port}` } },
+      (res) => resolve({ status: res.statusCode })
+    )
+    req.on("error", reject)
+    req.end()
+  })
+  assert.equal(routed.status, 200)
+  // Clean up
+  await fetch(`${apiUrl}/api/domains/abcdef12`, {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${adminToken}` },
+  })
 })
 
 test("domains add rejects invalid characters (underscore, uppercase, too long)", async () => {
@@ -813,6 +839,147 @@ test("deleting the deploy cascades — its domains are gone", async () => {
     body: JSON.stringify({ subdomain: "doomed", deployId: d2.deployId }),
   })
   assert.equal(add2.status, 201)
+})
+
+// ---- Red-team round 2 regressions ----
+
+test("malformed JSON on POST /api/deploys → 400 (not 500) [B1]", async () => {
+  const res = await fetch(`${apiUrl}/api/deploys`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+    body: "not json",
+  })
+  assert.equal(res.status, 400)
+  const body = await res.json()
+  assert.match(body.error, /Invalid JSON/i)
+})
+
+test("malformed JSON on PUT /api/deploys/:id → 400 (not 500) [B1]", async () => {
+  // Create a fresh deploy because earlier domainDeployId was cascade-deleted.
+  const fs2 = await import("node:fs")
+  const bundleBase64 = fs2.readFileSync(bundlePath).toString("base64")
+  const create = await fetch(`${apiUrl}/api/deploys`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ bundleBase64 }),
+  })
+  const cb = await create.json()
+  const res = await fetch(`${apiUrl}/api/deploys/${cb.deployId}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+    body: "not json",
+  })
+  assert.equal(res.status, 400)
+  // Cleanup
+  await fetch(`${apiUrl}/api/deploys/${cb.deployId}`, { method: "DELETE", headers: { authorization: `Bearer ${adminToken}` } })
+})
+
+test("PUT /api/deploys/:id/quota with no fields → 400 (not silent 200) [B4]", async () => {
+  const fs2 = await import("node:fs")
+  const bundleBase64 = fs2.readFileSync(bundlePath).toString("base64")
+  const create = await fetch(`${apiUrl}/api/deploys`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ bundleBase64 }),
+  })
+  const cb = await create.json()
+  const res = await fetch(`${apiUrl}/api/deploys/${cb.deployId}/quota`, {
+    method: "PUT",
+    headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({}),
+  })
+  assert.equal(res.status, 400)
+  await fetch(`${apiUrl}/api/deploys/${cb.deployId}`, { method: "DELETE", headers: { authorization: `Bearer ${adminToken}` } })
+})
+
+test("per-user domain quota: 51st domain for a non-admin user → 429 [B5]", async () => {
+  // Create a non-admin user and a deploy owned by them.
+  const userRes = await fetch(`${apiUrl}/api/users`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ username: `quota-${Date.now()}` }),
+  })
+  const userBody = await userRes.json()
+  const userToken = userBody.token
+  const fs2 = await import("node:fs")
+  const bundleBase64 = fs2.readFileSync(bundlePath).toString("base64")
+  const dRes = await fetch(`${apiUrl}/api/deploys`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${userToken}` },
+    body: JSON.stringify({ bundleBase64 }),
+  })
+  const dBody = await dRes.json()
+  const did = dBody.deployId
+  // Register 50 domains as that user.
+  for (let i = 1; i <= 50; i++) {
+    const r = await fetch(`${apiUrl}/api/domains`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${userToken}` },
+      body: JSON.stringify({ subdomain: `qd-${userBody.username}-${i}`, deployId: did }),
+    })
+    assert.equal(r.status, 201, `expected 201 on domain ${i}, got ${r.status}`)
+  }
+  // 51st should 429.
+  const r51 = await fetch(`${apiUrl}/api/domains`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${userToken}` },
+    body: JSON.stringify({ subdomain: `qd-${userBody.username}-51`, deployId: did }),
+  })
+  assert.equal(r51.status, 429)
+  // Cleanup
+  await fetch(`${apiUrl}/api/deploys/${did}`, { method: "DELETE", headers: { authorization: `Bearer ${adminToken}` } })
+})
+
+test("anonymous worker cannot make outbound https.request [B2]", async () => {
+  // Skip on Node < 22 only because sandbox flags need it — but the fetch/net shim
+  // is independent of Node version and should work on 20 too. So we always run.
+  const fs2 = await import("node:fs")
+  // Build a tiny bundle that tries to connect to 1.1.1.1:80 via https.request.
+  const escapeBundle = `
+import * as https from "node:https"
+const results = []
+try {
+  await new Promise((res, rej) => {
+    const req = https.request({host:"1.1.1.1",port:443,method:"GET",path:"/"}, () => res())
+    req.on("error", rej)
+    req.end()
+    setTimeout(()=>rej(new Error("timeout")), 1500)
+  })
+  results.push("https:OK")
+} catch (e) { results.push("https:" + (e.message || e.code)) }
+console.error("B2RESULT:" + JSON.stringify(results))
+export default { schema: {}, queries: {}, mutations: {} }
+`
+  // Write to a tmpfile and base64 it
+  const tmpFile = path.join(workDir, "b2-bundle.mjs")
+  fs2.writeFileSync(tmpFile, escapeBundle)
+  const bundleBase64 = fs2.readFileSync(tmpFile).toString("base64")
+
+  // Spin a host with rate limit high enough.
+  const h = await startExtraHost({ extraArgs: ["--anonymous-rate-per-hour", "100"] })
+  try {
+    // Capture stderr from the extra host to read B2RESULT.
+    let stderrBuf = ""
+    h.proc.stderr.on("data", (c) => (stderrBuf += c.toString()))
+    const res = await fetch(`${h.apiUrl}/api/deploys`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ bundleBase64 }),
+    })
+    assert.equal(res.status, 201)
+    // Wait for the worker to boot + run the import.
+    await new Promise((r) => setTimeout(r, 1500))
+    const match = stderrBuf.match(/B2RESULT:(\[.*?\])/)
+    assert.ok(match, `expected B2RESULT in worker stderr, got: ${stderrBuf.slice(-500)}`)
+    const result = JSON.parse(match[1])
+    assert.equal(result.length, 1)
+    assert.match(result[0], /^https:/)
+    // Must be denied, not connected.
+    assert.notEqual(result[0], "https:OK", "outbound https should have been blocked")
+    assert.match(result[0], /Outbound network access disabled/, `expected denial message, got: ${result[0]}`)
+  } finally {
+    await stopExtraHost(h)
+  }
 })
 
 test("SIGINT host leaves no orphan deploy-worker processes", async () => {
