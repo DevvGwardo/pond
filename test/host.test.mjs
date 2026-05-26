@@ -1057,6 +1057,63 @@ export default { schema: {}, queries: {}, mutations: {} }
   }
 })
 
+// ---- Schema identifier validation ----
+
+test("capsule with SQLite reserved word as table name fails to boot", async () => {
+  const reservedWorkDir = mkdtempSync(path.join(tmpdir(), "pond-cap-reserved-"))
+  try {
+    const bundle = await buildBundleWith(
+      reservedWorkDir,
+      `import { capsule, query, string, table } from "pond/server"
+export default capsule({
+  schema: { "select": table({ name: string() }) },
+  queries: { items: query((ctx) => ctx.db["select"].all()) },
+  mutations: {},
+})
+`
+    )
+    const fs2 = await import("node:fs")
+    const bundleBase64 = fs2.readFileSync(bundle).toString("base64")
+    const res = await fetch(`${apiUrl}/api/deploys`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+      body: JSON.stringify({ bundleBase64 }),
+    })
+    // boot must fail (worker rejects the identifier before mounting routes)
+    assert.equal(res.status, 500)
+    const body = await res.json()
+    assert.match(body.error, /Boot failed/i)
+  } finally {
+    if (existsSync(reservedWorkDir)) rmSync(reservedWorkDir, { recursive: true, force: true })
+  }
+})
+
+test("capsule with _pond_ prefixed table name fails to boot", async () => {
+  const prefixWorkDir = mkdtempSync(path.join(tmpdir(), "pond-cap-prefix-"))
+  try {
+    const bundle = await buildBundleWith(
+      prefixWorkDir,
+      `import { capsule, query, string, table } from "pond/server"
+export default capsule({
+  schema: { _pond_secret: table({ name: string() }) },
+  queries: { items: query((ctx) => ctx.db._pond_secret.all()) },
+  mutations: {},
+})
+`
+    )
+    const fs2 = await import("node:fs")
+    const bundleBase64 = fs2.readFileSync(bundle).toString("base64")
+    const res = await fetch(`${apiUrl}/api/deploys`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+      body: JSON.stringify({ bundleBase64 }),
+    })
+    assert.equal(res.status, 500)
+  } finally {
+    if (existsSync(prefixWorkDir)) rmSync(prefixWorkDir, { recursive: true, force: true })
+  }
+})
+
 // ---- envText size caps ----
 
 test("PUT /api/deploys/:id rejects envText > 64KB with 413", async () => {

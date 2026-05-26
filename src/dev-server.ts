@@ -124,8 +124,21 @@ export async function startDevServer(port: number): Promise<void> {
     )
 
     nextApp.post("/__pond/auth/guest", async (c) => {
-      const body = (await c.req.json()) as { name?: string }
-      guestName = body.name?.trim() || "guest"
+      const env = c.env as { incoming?: { socket?: { remoteAddress?: string } } } | undefined
+      const remote = env?.incoming?.socket?.remoteAddress
+      const isLoopback =
+        remote === "127.0.0.1" ||
+        remote === "::1" ||
+        remote === "::ffff:127.0.0.1"
+      if (!isLoopback) {
+        return c.json({ error: "guest auth restricted to loopback" }, 403)
+      }
+      const body = (await c.req.json().catch(() => ({}))) as { name?: unknown }
+      const raw = typeof body.name === "string" ? body.name.trim() : ""
+      if (raw && !/^[A-Za-z0-9 _-]{1,32}$/.test(raw)) {
+        return c.json({ error: "guest name must match /^[A-Za-z0-9 _-]{1,32}$/" }, 400)
+      }
+      guestName = raw || "guest"
       return c.json({
         ok: true,
         isGuest: true,
@@ -180,20 +193,43 @@ export async function startDevServer(port: number): Promise<void> {
     return currentApp.fetch(c.req.raw)
   })
 
+  // Trailing-edge debounce so a burst of file changes (git checkout, IDE save
+  // on multiple files) collapses into a single rebuild per source area.
+  const DEBOUNCE_MS = 200
+  const pendingReasons = new Set<"server" | "client" | "env">()
+  let debounceTimer: NodeJS.Timeout | null = null
+  const scheduleRebuild = (reason: "server" | "client" | "env") => {
+    pendingReasons.add(reason)
+    if (debounceTimer) clearTimeout(debounceTimer)
+    debounceTimer = setTimeout(async () => {
+      debounceTimer = null
+      const reasons = [...pendingReasons]
+      pendingReasons.clear()
+      // server changes invalidate everything; otherwise just rebuild the
+      // most specific changed area.
+      const r: "server" | "client" | "env" = reasons.includes("server")
+        ? "server"
+        : reasons.includes("env")
+        ? "env"
+        : "client"
+      await rebuild(r)
+    }, DEBOUNCE_MS)
+  }
+
   chokidar
     .watch([serverFile, clientFile, envFile], {
       ignoreInitial: true,
     })
-    .on("change", async (changedPath) => {
+    .on("change", (changedPath) => {
       if (changedPath === clientFile) {
-        await rebuild("client")
+        scheduleRebuild("client")
         return
       }
       if (changedPath === envFile) {
-        await rebuild("env")
+        scheduleRebuild("env")
         return
       }
-      await rebuild("server")
+      scheduleRebuild("server")
     })
 
   console.log(`\n  pond dev server running at http://localhost:${port}\n`)
