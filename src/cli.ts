@@ -9,6 +9,10 @@ import { dbCommand } from "./commands/db.js";
 import { logsCommand } from "./commands/logs.js";
 import { inspectCommand } from "./commands/inspect.js";
 import { authCommand } from "./commands/auth.js";
+import { loginCommand } from "./commands/login.js";
+import { userCommand } from "./commands/user.js";
+import { envCommand } from "./commands/env.js";
+import { tokenCommand } from "./commands/token.js";
 
 const main = defineCommand({
   meta: {
@@ -26,6 +30,10 @@ const main = defineCommand({
     logs: logsCommand,
     inspect: inspectCommand,
     auth: authCommand,
+    login: loginCommand,
+    user: userCommand,
+    env: envCommand,
+    token: tokenCommand,
   },
 });
 

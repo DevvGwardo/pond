@@ -120,6 +120,7 @@ export interface CapsuleDefinition {
   queries: Record<string, QueryHandler>;
   mutations: Record<string, MutationHandler>;
   endpoints?: Record<string, EndpointDefinition>;
+  allowedOrigins?: string[];
 }
 
 interface EndpointDefinition {
@@ -136,12 +137,14 @@ export function capsule(def: {
     string,
     (ctx: CapsuleContext, req: EndpointRequest) => EndpointResponse | Promise<EndpointResponse>
   >;
+  allowedOrigins?: string[];
 }): CapsuleDefinition {
   return {
     schema: def.schema,
     queries: def.queries,
     mutations: def.mutations,
     endpoints: def.endpoints as unknown as Record<string, EndpointDefinition>,
+    allowedOrigins: def.allowedOrigins,
   };
 }
 

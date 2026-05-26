@@ -4,6 +4,7 @@ import * as path from "node:path"
 import { randomBytes } from "node:crypto"
 import { buildForDeploy } from "../runtime.js"
 import { buildClient } from "../bundler.js"
+import { loadCredentials } from "../host/credentials.js"
 
 export const deployCommand = defineCommand({
   meta: {
@@ -21,9 +22,19 @@ export const deployCommand = defineCommand({
       description: "Control-plane API URL for hosted deploys",
       required: false,
     },
+    token: {
+      type: "string",
+      description: "User API token (overrides ~/.pond/credentials.json)",
+      required: false,
+    },
     "public-inspect": {
       type: "boolean",
       description: "Allow hosted inspection endpoints without a claim token",
+      default: false,
+    },
+    "push-env": {
+      type: "boolean",
+      description: "Upload .env.pond.server to the control plane on this deploy",
       default: false,
     },
   },
@@ -34,7 +45,7 @@ export const deployCommand = defineCommand({
     const envFile = path.join(cwd, ".env.pond.server")
     const deployDir = path.join(cwd, ".pond")
     const deployFile = path.join(deployDir, "deploy.json")
-    const deployId = randomBytes(4).toString("hex")
+    const deployId = randomBytes(8).toString("hex")
     const { outfile, hash } = await buildForDeploy(serverFile, cwd)
     const clientPath = path.join(deployDir, "client.html")
     const clientHtml = fs.existsSync(clientFile) ? await buildClient(clientFile) : undefined
@@ -75,43 +86,56 @@ export const deployCommand = defineCommand({
       return
     }
 
+    const userToken =
+      (typeof args.token === "string" && args.token) || loadCredentials(apiUrl)?.token || ""
+    if (!userToken && !localRecord?.claimToken) {
+      console.error(
+        `No saved credentials for ${apiUrl}. Run \`pond login --api ${apiUrl} --username <name>\` first, or pass --token.`
+      )
+      process.exit(1)
+    }
+
+    const bundleBytes = fs.readFileSync(outfile)
+    const shouldPushEnv = Boolean(args["push-env"])
+    const envText = shouldPushEnv && fs.existsSync(envFile) ? fs.readFileSync(envFile, "utf-8") : undefined
+
+    console.log(`→ Uploading bundle (${(bundleBytes.length / 1024).toFixed(1)} KB) to ${apiUrl}`)
+    if (shouldPushEnv) {
+      const lineCount = envText ? envText.split("\n").filter((l) => l.trim() && !l.trim().startsWith("#")).length : 0
+      console.log(`→ Uploading .env.pond.server (${lineCount} entries) to ${apiUrl}`)
+    }
+
     const baseBody = {
-      bundleBase64: Buffer.from(fs.readFileSync(outfile)).toString("base64"),
+      bundleBase64: Buffer.from(bundleBytes).toString("base64"),
       clientHtmlBase64: clientHtml ? Buffer.from(clientHtml).toString("base64") : undefined,
       publicInspect: Boolean(args["public-inspect"]),
     }
 
-    const envText =
-      localRecord?.claimToken && fs.existsSync(envFile)
-        ? fs.readFileSync(envFile, "utf-8")
-        : undefined
-
     let response: Response
 
-    if (localRecord?.apiUrl === apiUrl && localRecord.deployId && localRecord.claimToken) {
+    if (localRecord?.apiUrl === apiUrl && localRecord.deployId && (localRecord.claimToken || userToken)) {
+      const headers: Record<string, string> = { "content-type": "application/json" }
+      if (userToken) headers.authorization = `Bearer ${userToken}`
+      if (localRecord.claimToken) headers["x-pond-claim-token"] = localRecord.claimToken
       response = await fetch(`${apiUrl}/api/deploys/${localRecord.deployId}`, {
         method: "PUT",
-        headers: {
-          "content-type": "application/json",
-          "x-pond-claim-token": localRecord.claimToken,
-        },
-        body: JSON.stringify({
-          ...baseBody,
-          envText,
-        }),
+        headers,
+        body: JSON.stringify({ ...baseBody, envText }),
       })
     } else {
       response = await fetch(`${apiUrl}/api/deploys`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
+          authorization: `Bearer ${userToken}`,
         },
         body: JSON.stringify(baseBody),
       })
     }
 
     if (!response.ok) {
-      throw new Error(`Hosted deploy failed: ${response.status}`)
+      const text = await response.text().catch(() => "")
+      throw new Error(`Hosted deploy failed: ${response.status} ${text}`)
     }
 
     const remote = (await response.json()) as {
@@ -145,11 +169,7 @@ export const deployCommand = defineCommand({
       )
     )
 
-    if (remote.claimedAt) {
-      console.log(`Hosted deploy updated at ${remote.url}`)
-    } else {
-      console.log(`Hosted deploy created at ${remote.url}`)
-      console.log("Run `pond claim` to attach server env and mark ownership.")
-    }
+    console.log(`Hosted deploy ${remote.claimedAt ? "updated" : "created"} at ${remote.url}`)
+    console.log(`Manage env with: pond env list ${remote.deployId} --api ${remote.apiUrl}`)
   },
 })

@@ -119,7 +119,7 @@ Pond will:
 | `pond dev --port 3000` | Run the local dev server |
 | `pond deploy` | Build a standalone server bundle and write deploy metadata |
 | `pond deploy --api http://localhost:8787` | Upload a hosted deploy to a Pond control plane |
-| `pond claim` | Claim a hosted deploy and sync `.env.pond.server` |
+| `pond claim` | Cross-machine claim using a deploy's claim token |
 | `pond start` | Start the bundled deploy artifact locally |
 | `pond host` | Start the self-hosted Pond control plane |
 | `pond inspect` | Inspect local capsule metadata |
@@ -127,6 +127,10 @@ Pond will:
 | `pond db list` | List SQLite tables from a running capsule |
 | `pond db dump [table]` | Dump one table or the full local database |
 | `pond auth as <name>` | Set the current dev guest identity |
+| `pond login --api <url> --username <name>` | Bootstrap first admin (needs `POND_HOST_TOKEN`) or attach with `--token` |
+| `pond user create <name> [--admin]` | Create a new control-plane user (admin only) |
+| `pond env list/set/unset <deployId>` | Manage hosted-deploy server env vars |
+| `pond token rotate --api <url>` | Rotate the saved user API token |
 
 ## Runtime Model
 
@@ -194,44 +198,96 @@ These power the CLI inspection commands and make local capsules easy to inspect 
 
 This is a build artifact flow, not a full hosted deployment platform yet. The runtime already emits metadata in a shape that can later back integrations with services like Fly.io or Railway.
 
-## Hosted MVP
+## Hosted control plane (self-hosted MVP)
 
-Pond now includes a self-hostable control-plane MVP for hosted deploys and claim-based ownership.
+Pond ships a self-hostable control plane that fronts multiple capsule deploys behind a single ingress, manages user accounts and per-deploy ownership, and isolates each deploy in its own forked worker process.
 
-Start the control plane:
+### Threat model
+
+The hosted control plane is intended for **trusted deployers** (you and your team). Isolation between deploys is V8-level (one Node child process per deploy) — not OS-level. Sibling deploys run under the same UID and can read each other's files. Do **not** host untrusted third-party code on a single pond host yet.
+
+### Bootstrap quickstart
 
 ```bash
+# 1. Start the control plane (binds 127.0.0.1:8787 by default)
 pond host --port 8787
-```
 
-Create an anonymous hosted deploy:
+# 2. Note the bootstrap token printed in the log, then create the first admin
+POND_HOST_TOKEN=<that-token> pond login --api http://localhost:8787 --username admin
 
-```bash
+# 3. Deploy a capsule from any project directory
 pond deploy --api http://localhost:8787
 ```
 
-That returns a hosted app URL and stores claim metadata in `.pond/deploy.json`.
-
-Claim the deploy and sync server env:
+### Multi-user
 
 ```bash
-pond claim
+# As admin, mint a token for bob
+pond user create bob --api http://localhost:8787
+
+# On bob's machine, attach to that account
+pond login --api http://localhost:8787 --token <bob-token> --username bob
 ```
 
-Hosted behavior in the current MVP:
+Each deploy is owned by the user that created it. Admins can manage any deploy. The legacy claim token in `.pond/deploy.json` still works for cross-machine ownership transfer via `pond claim`.
 
-- each deploy gets its own hosted app port
-- inspect, DB dump, and logs are private by default
-- the local claim token in `.pond/deploy.json` is sent automatically by hosted `pond inspect`, `pond db`, and `pond logs` commands when you target that deploy
-- `.env.pond.server` is synced on claim and on later claimed redeploys
-
-Examples:
+### Env management
 
 ```bash
-pond inspect <deploy-id>
-pond db dump messages --target <deploy-id>
-pond logs --target <deploy-id>
+pond env list <deployId> --api http://localhost:8787
+pond env set <deployId> KEY=value --api http://localhost:8787
+pond env unset <deployId> KEY --api http://localhost:8787
 ```
+
+Updating env triggers a worker re-fork so the new values take effect immediately.
+
+### Token rotation
+
+```bash
+# User-side: rotate your own API token
+pond token rotate --api http://localhost:8787
+
+# Per-deploy: rotate the claim token (owner or admin)
+curl -X POST -H "Authorization: Bearer <token>" \
+  http://localhost:8787/api/deploys/<deployId>/rotate-claim-token
+```
+
+### Quotas
+
+Every deploy has a quota, enforced by the control plane:
+
+| Field | Default | Enforcement |
+| --- | --- | --- |
+| `maxBundleBytes` | 64 MB | POST/PUT bundles larger than this return 413 |
+| `maxDiskBytes` | 512 MB | post-write directory size check on bundle and env updates |
+| `maxMemoryMb` | 256 | passed to the worker via `--max-old-space-size` |
+
+Admins can override per deploy:
+
+```bash
+curl -X PUT -H "Authorization: Bearer <admin-token>" \
+  -H "content-type: application/json" \
+  -d '{"maxMemoryMb": 512}' \
+  http://localhost:8787/api/deploys/<deployId>/quota
+```
+
+Changing `maxMemoryMb` triggers a worker re-fork. There is no CLI subcommand for quotas yet — use `curl`.
+
+### Ingress & CORS
+
+The control plane routes requests by subdomain (`<deployId>.<publicHost>:<port>`) to the matching forked worker. Same-origin CORS is enforced at both the control plane and the deploy worker: cross-origin browser requests receive **no** `Access-Control-Allow-Origin` header by default. A capsule can opt extra origins in by exporting `allowedOrigins: string[]` from `capsule({ ... })`.
+
+### Persistent logs
+
+Each deploy's `ctx.log.*` entries stream over SSE on `/__pond/logs` and are appended as NDJSON to `<deploy-dir>/.pond/logs.ndjson`. The file rotates at 5 MB (one prior generation kept as `logs.ndjson.1`). On restart, the most recent 200 entries are restored.
+
+### What is NOT solved yet
+
+- No OS-level isolation between deploys (no containers, no seccomp).
+- No HTTPS, no automatic TLS, no custom domains, no wildcard DNS.
+- No billing, no usage metering beyond hard quota limits.
+- No WebSocket support through the proxy.
+- No UI — everything is CLI + HTTP.
 
 ## Public Server API
 

@@ -5,7 +5,7 @@ import * as path from "node:path"
 export const claimCommand = defineCommand({
   meta: {
     name: "claim",
-    description: "Claim a hosted Pond deploy and sync server env",
+    description: "Cross-machine claim using a deploy's claim token (rarely needed)",
   },
   async run() {
     const cwd = process.cwd()
@@ -24,10 +24,6 @@ export const claimCommand = defineCommand({
       url?: string
       timestamp?: string
       publicInspect?: boolean
-      bundleHash?: string
-      bundlePath?: string
-      clientPath?: string
-      port?: number
     }
 
     if (!deploy.deployId || !deploy.apiUrl || !deploy.claimToken) {
@@ -35,11 +31,14 @@ export const claimCommand = defineCommand({
       process.exit(1)
     }
 
+    console.log(
+      `Note: with user accounts (Phase 3), deploys are auto-owned by the creator. ` +
+        `\`pond claim\` is only useful when moving a deploy.json between machines.`
+    )
+
     const response = await fetch(`${deploy.apiUrl}/api/deploys/${deploy.deployId}/claim`, {
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-      },
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({
         claimToken: deploy.claimToken,
         envText: fs.existsSync(envFile) ? fs.readFileSync(envFile, "utf-8") : "",
@@ -79,5 +78,6 @@ export const claimCommand = defineCommand({
     )
 
     console.log(`Claimed deploy ${remote.deployId} at ${remote.url}`)
+    console.log(`Use \`pond env\` to manage server env going forward.`)
   },
 })

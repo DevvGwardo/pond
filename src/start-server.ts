@@ -1,7 +1,7 @@
 import { Hono } from "hono"
 import { serve } from "@hono/node-server"
-import { cors } from "hono/cors"
 import * as fs from "node:fs"
+import * as path from "node:path"
 import { createRuntimeFromDeployBundle } from "./runtime.js"
 
 interface StartBundleServerOptions {
@@ -9,22 +9,118 @@ interface StartBundleServerOptions {
   clientPath?: string
   cwd: string
   port: number
+  hostname?: string
   inspectSecret?: string
   publicInspect?: boolean
+  allowedOrigins?: string[]
+}
+
+interface LogEntry {
+  timestamp: string
+  level: "info" | "error"
+  message: string
+  data?: any
+}
+
+const MAX_LOG_FILE_BYTES = 5 * 1024 * 1024
+const RECENT_LOG_CAP = 200
+
+function hostFromHeader(hostHeader: string | undefined): string | null {
+  if (!hostHeader) return null
+  return hostHeader.toLowerCase().trim()
+}
+
+function originHost(originHeader: string): string | null {
+  try {
+    const u = new URL(originHeader)
+    return u.host.toLowerCase()
+  } catch {
+    return null
+  }
+}
+
+function corsHeadersFor(
+  origin: string | undefined,
+  host: string | undefined,
+  allowedOrigins: string[]
+): Record<string, string> {
+  if (!origin) return {}
+  const oHost = originHost(origin)
+  if (!oHost) return {}
+  const hostNorm = host ? host.toLowerCase() : ""
+  const allowedSet = new Set(allowedOrigins.map((o) => o.toLowerCase().replace(/\/$/, "")))
+  const originNorm = origin.toLowerCase().replace(/\/$/, "")
+  const sameOrigin = hostNorm && oHost === hostNorm
+  if (!sameOrigin && !allowedSet.has(originNorm)) return {}
+  return {
+    "access-control-allow-origin": origin,
+    "vary": "Origin",
+    "access-control-allow-credentials": "true",
+    "access-control-allow-headers": "content-type, authorization, x-pond-claim-token",
+    "access-control-allow-methods": "GET, POST, PUT, DELETE, OPTIONS",
+  }
+}
+
+function readRecentLogsFromDisk(logFile: string, cap: number): LogEntry[] {
+  if (!fs.existsSync(logFile)) return []
+  try {
+    const text = fs.readFileSync(logFile, "utf-8")
+    const lines = text.split("\n").filter((l) => l.length > 0)
+    const start = Math.max(0, lines.length - cap)
+    const out: LogEntry[] = []
+    for (let i = start; i < lines.length; i++) {
+      try {
+        out.push(JSON.parse(lines[i]) as LogEntry)
+      } catch {
+        // skip malformed
+      }
+    }
+    return out
+  } catch {
+    return []
+  }
 }
 
 export async function createBundleServerApp(options: StartBundleServerOptions): Promise<Hono> {
   const app = new Hono()
-  app.use("*", cors())
   const encoder = new TextEncoder()
   const logClients = new Set<ReadableStreamDefaultController<Uint8Array>>()
-  const recentLogs: Array<{ timestamp: string; level: "info" | "error"; message: string; data?: any }> = []
+
+  const logsDir = path.join(options.cwd, ".pond")
+  const logFile = path.join(logsDir, "logs.ndjson")
+  const logFileRotated = path.join(logsDir, "logs.ndjson.1")
+  fs.mkdirSync(logsDir, { recursive: true })
+
+  const recentLogs: LogEntry[] = readRecentLogsFromDisk(logFile, RECENT_LOG_CAP)
+
+  function appendLogToDisk(entry: LogEntry) {
+    try {
+      const line = JSON.stringify(entry) + "\n"
+      let size = 0
+      try {
+        size = fs.statSync(logFile).size
+      } catch {
+        size = 0
+      }
+      if (size + Buffer.byteLength(line) > MAX_LOG_FILE_BYTES) {
+        try {
+          fs.renameSync(logFile, logFileRotated)
+        } catch {
+          // best effort
+        }
+      }
+      fs.appendFileSync(logFile, line)
+    } catch {
+      // best effort
+    }
+  }
 
   const runtime = await createRuntimeFromDeployBundle(options.bundlePath, options.cwd, {
     port: options.port,
     onLog: (entry) => {
       recentLogs.push(entry)
-      if (recentLogs.length > 200) recentLogs.shift()
+      if (recentLogs.length > RECENT_LOG_CAP) recentLogs.shift()
+      appendLogToDisk(entry)
       const chunk = encoder.encode(`data: ${JSON.stringify(entry)}\n\n`)
       for (const client of logClients) {
         try {
@@ -34,6 +130,23 @@ export async function createBundleServerApp(options: StartBundleServerOptions): 
         }
       }
     },
+  })
+
+  const defAllowed = Array.isArray(runtime.def.allowedOrigins) ? runtime.def.allowedOrigins : []
+  const optAllowed = Array.isArray(options.allowedOrigins) ? options.allowedOrigins : []
+  const allowedOrigins = [...defAllowed, ...optAllowed]
+
+  app.use("*", async (c, next) => {
+    const origin = c.req.header("origin")
+    const host = hostFromHeader(c.req.header("host"))
+    const headers = corsHeadersFor(origin, host ?? undefined, allowedOrigins)
+    if (c.req.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers })
+    }
+    await next()
+    for (const [k, v] of Object.entries(headers)) {
+      c.res.headers.set(k, v)
+    }
   })
 
   if (options.clientPath && fs.existsSync(options.clientPath)) {
@@ -96,7 +209,10 @@ export async function createBundleServerApp(options: StartBundleServerOptions): 
         start(controller) {
           streamController = controller
           logClients.add(controller)
-          for (const entry of recentLogs) {
+          const replay = recentLogs.length < RECENT_LOG_CAP
+            ? readRecentLogsFromDisk(logFile, RECENT_LOG_CAP)
+            : recentLogs
+          for (const entry of replay) {
             controller.enqueue(encoder.encode(`data: ${JSON.stringify(entry)}\n\n`))
           }
         },
@@ -121,6 +237,11 @@ export async function createBundleServerApp(options: StartBundleServerOptions): 
 
 export async function serveBundleServer(options: StartBundleServerOptions) {
   const app = await createBundleServerApp(options)
-  const server = serve({ fetch: app.fetch, port: options.port })
-  return { app, server }
+  const { server, port } = await new Promise<{ server: ReturnType<typeof serve>; port: number }>((resolve, reject) => {
+    const s = serve({ fetch: app.fetch, port: options.port, hostname: options.hostname }, (info) => {
+      resolve({ server: s, port: info.port })
+    })
+    s.once("error", reject)
+  })
+  return { app, server, port }
 }

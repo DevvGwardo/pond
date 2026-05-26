@@ -4,7 +4,7 @@ import Database from "better-sqlite3"
 import * as esbuild from "esbuild"
 import * as fs from "node:fs"
 import * as path from "node:path"
-import { createHash } from "node:crypto"
+import { createHash, randomBytes } from "node:crypto"
 import { pathToFileURL } from "node:url"
 import { Google, generateCodeVerifier, generateState } from "arctic"
 import { SignJWT, jwtVerify } from "jose"
@@ -84,12 +84,16 @@ function createRuntimeFromDefinition(
   )
 
   for (const [tableName, columns] of Object.entries(def.schema)) {
+    assertIdent(tableName)
     const exists = db
       .prepare("SELECT name FROM _pond_migrations WHERE name = ?")
       .get(`table_${tableName}`)
 
     if (!exists) {
-      const colDefs = Object.entries(columns).map(([col, type]) => `${col} ${type._sqlType}`)
+      const colDefs = Object.entries(columns).map(([col, type]) => {
+        assertIdent(col)
+        return `${col} ${type._sqlType}`
+      })
       colDefs.push("id TEXT PRIMARY KEY")
       colDefs.push("createdAt TEXT DEFAULT (datetime('now'))")
       colDefs.push("updatedAt TEXT DEFAULT (datetime('now'))")
@@ -101,7 +105,14 @@ function createRuntimeFromDefinition(
 
   const env = loadEnv(cwd, options.port ?? 3000)
   const dbProxy = buildDbProxy(db)
-  const sessionSecret = new TextEncoder().encode(env.GOOGLE_CLIENT_SECRET || "pond-dev-session-secret")
+  let sessionSecretSource = env.POND_SESSION_SECRET || env.GOOGLE_CLIENT_SECRET
+  if (!sessionSecretSource) {
+    sessionSecretSource = randomBytes(32).toString("hex")
+    console.warn(
+      "[pond] WARNING: no POND_SESSION_SECRET set — generated an ephemeral secret. Sessions will not survive restart. Set POND_SESSION_SECRET in .env.pond.server for production."
+    )
+  }
+  const sessionSecret = new TextEncoder().encode(sessionSecretSource)
   const guestAuth = options.getGuestAuth ?? (() => ({ isGuest: true, userId: "guest", displayName: "Guest" }))
   const google =
     env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET && env.GOOGLE_REDIRECT_URI
@@ -309,16 +320,25 @@ export async function buildForDeploy(serverFile: string, cwd: string): Promise<{
   return { outfile, hash }
 }
 
+function assertIdent(name: string) {
+  if (typeof name !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+    throw new Error(`Invalid identifier: ${name}`)
+  }
+}
+
 function buildDbProxy(db: Database.Database): CapsuleContext["db"] {
   function createBuilder(tableName: string, parts: { where: Array<{ column: string; value: any }>; orderBy: Array<{ column: string; dir: "asc" | "desc" }>; limit?: number }) {
     return {
       where(column: string, value: any) {
+        assertIdent(column)
         return createBuilder(tableName, {
           ...parts,
           where: [...parts.where, { column, value }],
         })
       },
       orderBy(column: string, dir: "asc" | "desc") {
+        assertIdent(column)
+        if (dir !== "asc" && dir !== "desc") throw new Error(`Invalid order direction: ${dir}`)
         return createBuilder(tableName, {
           ...parts,
           orderBy: [...parts.orderBy, { column, dir }],
@@ -349,6 +369,7 @@ function buildDbProxy(db: Database.Database): CapsuleContext["db"] {
 
   return new Proxy({} as any, {
     get(_target, tableName: string) {
+      assertIdent(tableName)
       const builder = createBuilder(tableName, { where: [], orderBy: [] })
       return {
         where: builder.where,
@@ -361,6 +382,7 @@ function buildDbProxy(db: Database.Database): CapsuleContext["db"] {
         insert(data: Record<string, any>) {
           const id = crypto.randomUUID()
           const keys = Object.keys(data)
+          keys.forEach(assertIdent)
           const values = keys.map((key) => data[key])
           db.prepare(
             `INSERT INTO ${tableName} (id, ${keys.join(", ")}) VALUES (?, ${keys.map(() => "?").join(", ")})`
@@ -368,11 +390,11 @@ function buildDbProxy(db: Database.Database): CapsuleContext["db"] {
           return db.prepare(`SELECT * FROM ${tableName} WHERE id = ?`).get(id)
         },
         update(id: string, data: Record<string, any>) {
-          const sets = Object.keys(data)
-            .map((key) => `${key} = ?`)
-            .join(", ")
+          const keys = Object.keys(data)
+          keys.forEach(assertIdent)
+          const sets = keys.map((key) => `${key} = ?`).join(", ")
           db.prepare(`UPDATE ${tableName} SET ${sets}, updatedAt = datetime('now') WHERE id = ?`).run(
-            ...Object.values(data),
+            ...keys.map((key) => data[key]),
             id
           )
           return db.prepare(`SELECT * FROM ${tableName} WHERE id = ?`).get(id)

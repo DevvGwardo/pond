@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { execSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 
 const TODO_SERVER_TS = `import { capsule, mutation, query, string, table } from "pond/server";
 
@@ -80,7 +81,8 @@ export function App() {
 }
 `;
 
-const TODO_ENV = `# Server-only environment variables
+const TODO_ENV_TEMPLATE = `# Server-only environment variables
+# POND_SESSION_SECRET={{SESSION_SECRET}}
 # OPENAI_API_KEY=sk-...
 # GOOGLE_CLIENT_ID=
 # GOOGLE_CLIENT_SECRET=
@@ -139,7 +141,8 @@ export async function copyTemplate(
   fs.writeFileSync(path.join(dir, "server", "index.ts"), TODO_SERVER_TS);
   fs.writeFileSync(path.join(dir, "client", "index.tsx"), TODO_CLIENT_TSX);
   fs.writeFileSync(path.join(dir, "shared", ".gitkeep"), "");
-  fs.writeFileSync(path.join(dir, ".env.pond.server"), TODO_ENV);
+  const envContents = TODO_ENV_TEMPLATE.replace("{{SESSION_SECRET}}", randomBytes(32).toString("hex"));
+  fs.writeFileSync(path.join(dir, ".env.pond.server"), envContents, { mode: 0o600 });
   fs.writeFileSync(path.join(dir, ".gitignore"), TODO_GITIGNORE);
 
   if (initGit) {
