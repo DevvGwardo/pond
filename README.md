@@ -449,7 +449,7 @@ Brand assets live in [`docs/branding`](./docs/branding).
 
 ## Contributing
 
-See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for local setup, the dev loop, and the PR checklist. The full server API surface is documented at [`docs/api-reference.md`](./docs/api-reference.md).
+See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for local setup, the dev loop, and the PR checklist. API references: [`docs/api-reference.md`](./docs/api-reference.md) (server) and [`docs/client-reference.md`](./docs/client-reference.md) (client).
 
 ## License
 

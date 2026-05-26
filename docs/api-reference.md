@@ -222,5 +222,6 @@ There is no migration system beyond "create on first sight" right now. Schema ch
 
 ## Related docs
 
+- [`docs/client-reference.md`](./client-reference.md) — client-side hooks (`pond/client`).
 - `README.md` — overall introduction, quickstart, hosted control plane, security model.
 - `CONTRIBUTING.md` — local dev loop, where to add code, PR checklist.
