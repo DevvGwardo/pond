@@ -22,6 +22,9 @@ interface HostedDeployRecord {
 }
 
 const MAX_BUNDLE_BYTES = 64 * 1024 * 1024
+const MAX_ENV_BYTES = 64 * 1024
+const MAX_ENV_ENTRIES = 256
+const MAX_ENV_VALUE_CHARS = 1024
 
 const RESERVED_SUBDOMAINS = new Set(["api", "admin", "docs", "www", "app", "health"])
 const SUBDOMAIN_LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
@@ -67,6 +70,26 @@ function bearer(header: string | undefined): string | null {
   if (!header) return null
   const m = header.match(/^Bearer\s+(.+)$/i)
   return m ? m[1].trim() : null
+}
+
+function validateEnvText(text: string): { ok: true } | { ok: false; error: string } {
+  if (Buffer.byteLength(text, "utf8") > MAX_ENV_BYTES) {
+    return { ok: false, error: `envText exceeds ${MAX_ENV_BYTES} bytes` }
+  }
+  const parsed = parseEnvText(text)
+  const keys = Object.keys(parsed)
+  if (keys.length > MAX_ENV_ENTRIES) {
+    return { ok: false, error: `envText exceeds ${MAX_ENV_ENTRIES} entries` }
+  }
+  for (const k of keys) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) {
+      return { ok: false, error: `invalid env key: ${k}` }
+    }
+    if ((parsed[k] ?? "").length > MAX_ENV_VALUE_CHARS) {
+      return { ok: false, error: `env value for ${k} exceeds ${MAX_ENV_VALUE_CHARS} chars` }
+    }
+  }
+  return { ok: true }
 }
 
 function parseEnvText(text: string): Record<string, string> {
@@ -806,6 +829,8 @@ export const hostCommand = defineCommand({
           fs.writeFileSync(path.join(dir, "client.html"), Buffer.from(body.clientHtmlBase64, "base64"))
         }
         if (typeof body.envText === "string") {
+          const v = validateEnvText(body.envText)
+          if (!v.ok) return c.json({ error: v.error }, 413)
           fs.writeFileSync(path.join(dir, ".env.pond.server"), body.envText, { mode: 0o600 })
         }
         const sizeAfter = dirSize(dir)
@@ -898,6 +923,8 @@ export const hostCommand = defineCommand({
       }
 
       if (typeof body.envText === "string") {
+        const v = validateEnvText(body.envText)
+        if (!v.ok) return c.json({ error: v.error }, 413)
         fs.writeFileSync(path.join(deployDirFor(deployId), ".env.pond.server"), body.envText, { mode: 0o600 })
       }
       record.claimedAt = record.claimedAt ?? new Date().toISOString()
@@ -1066,7 +1093,17 @@ export const hostCommand = defineCommand({
         if (typeof v !== "string") {
           return c.json({ error: `value for ${k} must be string` }, 400)
         }
+        if (v.length > MAX_ENV_VALUE_CHARS) {
+          return c.json({ error: `value for ${k} exceeds ${MAX_ENV_VALUE_CHARS} chars` }, 413)
+        }
         merged[k] = v
+      }
+      if (Object.keys(merged).length > MAX_ENV_ENTRIES) {
+        return c.json({ error: `merged env exceeds ${MAX_ENV_ENTRIES} entries` }, 413)
+      }
+      const serializedBytes = Buffer.byteLength(serializeEnv(merged), "utf8")
+      if (serializedBytes > MAX_ENV_BYTES) {
+        return c.json({ error: `merged env exceeds ${MAX_ENV_BYTES} bytes` }, 413)
       }
       writeEnv(deployId, merged)
       const quota = controlDb.getQuota(deployId)

@@ -1057,6 +1057,89 @@ export default { schema: {}, queries: {}, mutations: {} }
   }
 })
 
+// ---- envText size caps ----
+
+test("PUT /api/deploys/:id rejects envText > 64KB with 413", async () => {
+  const fs2 = await import("node:fs")
+  const bundleBase64 = fs2.readFileSync(bundlePath).toString("base64")
+  const create = await fetch(`${apiUrl}/api/deploys`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ bundleBase64 }),
+  })
+  assert.equal(create.status, 201)
+  const cb = await create.json()
+  try {
+    // 65 KB envText, well over the 64 KB cap
+    const envText = `FOO=${"x".repeat(65 * 1024)}\n`
+    const res = await fetch(`${apiUrl}/api/deploys/${cb.deployId}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+      body: JSON.stringify({ bundleBase64, envText }),
+    })
+    assert.equal(res.status, 413)
+    const body = await res.json()
+    assert.match(body.error, /envText exceeds/)
+  } finally {
+    await fetch(`${apiUrl}/api/deploys/${cb.deployId}`, {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${adminToken}` },
+    })
+  }
+})
+
+test("PUT /api/deploys/:id/env rejects a single value > 1024 chars with 413", async () => {
+  const fs2 = await import("node:fs")
+  const bundleBase64 = fs2.readFileSync(bundlePath).toString("base64")
+  const create = await fetch(`${apiUrl}/api/deploys`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ bundleBase64 }),
+  })
+  const cb = await create.json()
+  try {
+    const res = await fetch(`${apiUrl}/api/deploys/${cb.deployId}/env`, {
+      method: "PUT",
+      headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+      body: JSON.stringify({ entries: { BIG: "y".repeat(1025) } }),
+    })
+    assert.equal(res.status, 413)
+    const body = await res.json()
+    assert.match(body.error, /exceeds 1024 chars/)
+  } finally {
+    await fetch(`${apiUrl}/api/deploys/${cb.deployId}`, {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${adminToken}` },
+    })
+  }
+})
+
+test("POST /api/deploys/:id/claim rejects oversize envText with 413", async () => {
+  const fs2 = await import("node:fs")
+  const bundleBase64 = fs2.readFileSync(bundlePath).toString("base64")
+  const create = await fetch(`${apiUrl}/api/deploys`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ bundleBase64 }),
+  })
+  assert.equal(create.status, 201)
+  const cb = await create.json()
+  try {
+    const envText = `FOO=${"x".repeat(65 * 1024)}\n`
+    const res = await fetch(`${apiUrl}/api/deploys/${cb.deployId}/claim`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+      body: JSON.stringify({ claimToken: cb.claimToken, envText }),
+    })
+    assert.equal(res.status, 413)
+  } finally {
+    await fetch(`${apiUrl}/api/deploys/${cb.deployId}`, {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${adminToken}` },
+    })
+  }
+})
+
 // ---- Token rotation grace window ----
 
 test("rotate-token: previous token honored within 5min grace, then rejected", async () => {

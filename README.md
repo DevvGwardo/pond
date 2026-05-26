@@ -308,6 +308,8 @@ Every deploy has a quota, enforced by the control plane:
 | `maxDiskBytes` | 512 MB | post-write directory size check on bundle and env updates |
 | `maxMemoryMb` | 256 | passed to the worker via `--max-old-space-size` |
 
+Env writes have separate caps not exposed as quotas: `envText` is limited to 64 KB total, 256 entries, 1024 chars per value. Oversize uploads return 413 before the file is written.
+
 Admins can override per deploy:
 
 ```bash
