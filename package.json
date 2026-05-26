@@ -1,0 +1,49 @@
+{
+  "name": "pond",
+  "version": "0.0.1",
+  "description": "Agent-native CLI and runtime for building small full-stack TypeScript apps",
+  "license": "UNLICENSED",
+  "type": "module",
+  "bin": {
+    "pond": "./bin/pond.js"
+  },
+  "exports": {
+    ".": "./src/index.js",
+    "./server": "./src/server/index.js",
+    "./client": "./client/index.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "client/",
+    "templates/"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.0.4",
+    "better-sqlite3": "^11.7.2",
+    "chokidar": "^4.0.0",
+    "citty": "^0.1.6",
+    "esbuild": "^0.25.0",
+    "hono": "^4.6.0",
+    "preact": "^10.24.0",
+    "preact-render-to-string": "^6.5.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0",
+    "typescript": "^5.7.0"
+  },
+  "keywords": [
+    "agents",
+    "app-runtime",
+    "cli",
+    "pond"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}

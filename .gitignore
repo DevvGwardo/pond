@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.js
+*.d.ts
+*.d.ts.map
+*.js.map
+!.gitkeep
+!bin/pond.js
