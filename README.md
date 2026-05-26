@@ -447,6 +447,10 @@ The current visual direction is intentionally simple:
 
 Brand assets live in [`docs/branding`](./docs/branding).
 
+## Contributing
+
+See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for local setup, the dev loop, and the PR checklist. The full server API surface is documented at [`docs/api-reference.md`](./docs/api-reference.md).
+
 ## License
 
-The package is currently marked `UNLICENSED` in [`package.json`](./package.json). If this is meant to be open source in the usual sense, the next step is to choose and add an explicit license file.
+MIT — see [`LICENSE`](./LICENSE).

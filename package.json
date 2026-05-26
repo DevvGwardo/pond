@@ -2,7 +2,7 @@
   "name": "pond",
   "version": "0.0.1",
   "description": "Agent-native CLI and runtime for building small full-stack TypeScript apps",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "homepage": "https://github.com/DevvGwardo/pond#readme",
   "bugs": {
     "url": "https://github.com/DevvGwardo/pond/issues"
