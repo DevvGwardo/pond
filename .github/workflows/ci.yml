@@ -21,4 +21,10 @@ jobs:
       - run: npm ci
       - run: npm run format:check
       - run: npx tsc --noEmit
+      # Some tests scaffold a capsule whose template runs `git init && git commit`.
+      # Provide a default identity so the commit step doesn't fail in CI even if
+      # the test forgets --no-git.
+      - run: |
+          git config --global user.email "ci@pond.test"
+          git config --global user.name "pond ci"
       - run: npm test

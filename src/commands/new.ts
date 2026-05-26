@@ -17,14 +17,14 @@ export const newCommand = defineCommand({
       description: "Template to use (default: todo)",
       default: "todo",
     },
-    "no-git": {
+    git: {
       type: "boolean",
-      description: "Skip git initialization",
-      default: false,
+      description: "Initialize a git repo in the new capsule (use --no-git to skip)",
+      default: true,
     },
   },
   async run({ args }) {
-    await copyTemplate(args.name, args.template, !args["no-git"])
+    await copyTemplate(args.name, args.template, Boolean(args.git))
     console.log(`\n  Created ${args.name}/\n`)
     console.log(`  Next steps:`)
     console.log(`    cd ${args.name}`)
