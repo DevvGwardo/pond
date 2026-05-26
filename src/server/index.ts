@@ -31,6 +31,7 @@ export interface CapsuleAuth {
   userId: string;
   displayName?: string;
   picture?: string;
+  email?: string;
 }
 
 export interface CapsuleLog {
@@ -39,8 +40,9 @@ export interface CapsuleLog {
 }
 
 export interface CapsuleDbTable {
-  where(column: string, value: string): QueryBuilder;
+  where(column: string, value: any): QueryBuilder;
   orderBy(column: string, dir: "asc" | "desc"): QueryBuilder;
+  limit(n: number): QueryBuilder;
   all(): any[];
   get(id: string): any;
   insert(data: Record<string, any>): any;

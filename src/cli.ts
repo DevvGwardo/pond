@@ -1,7 +1,11 @@
 import { defineCommand, runMain } from "citty";
-import { newCommand } from "./commands/new.ts";
-import { devCommand } from "./commands/dev.ts";
-import { deployCommand } from "./commands/deploy.ts";
+import { newCommand } from "./commands/new.js";
+import { devCommand } from "./commands/dev.js";
+import { deployCommand } from "./commands/deploy.js";
+import { dbCommand } from "./commands/db.js";
+import { logsCommand } from "./commands/logs.js";
+import { inspectCommand } from "./commands/inspect.js";
+import { authCommand } from "./commands/auth.js";
 
 const main = defineCommand({
   meta: {
@@ -12,6 +16,10 @@ const main = defineCommand({
     new: newCommand,
     dev: devCommand,
     deploy: deployCommand,
+    db: dbCommand,
+    logs: logsCommand,
+    inspect: inspectCommand,
+    auth: authCommand,
   },
 });
 

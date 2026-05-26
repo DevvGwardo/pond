@@ -34,8 +34,8 @@ type Message = {
 };
 
 export function App() {
-  const messages = useQuery<Message[]>("messages");
-  const sendMessage = useMutation<[body: string], void>("sendMessage");
+  const { data: messages, isLoading } = useQuery<Message[]>("messages");
+  const [sendMessage, { isLoading: isSending }] = useMutation<[body: string], void>("sendMessage");
 
   return (
     <main class="min-h-screen bg-zinc-950 p-8 text-zinc-100 font-sans">
@@ -47,7 +47,7 @@ export function App() {
           e.preventDefault();
           const input = e.currentTarget.elements.namedItem("body") as HTMLInputElement;
           if (input.value.trim()) {
-            sendMessage(input.value.trim());
+            void sendMessage(input.value.trim());
             input.value = "";
           }
         }}
@@ -59,11 +59,14 @@ export function App() {
         />
         <button
           type="submit"
+          disabled={isSending}
           class="bg-zinc-100 text-zinc-950 px-5 py-3 rounded-lg text-sm font-semibold hover:bg-zinc-200 transition-colors"
         >
-          Send
+          {isSending ? "Sending..." : "Send"}
         </button>
       </form>
+
+      {isLoading ? <p class="text-sm text-zinc-500 mb-4">Loading...</p> : null}
 
       <ul class="space-y-2">
         {messages?.map((m) => (
@@ -79,6 +82,9 @@ export function App() {
 
 const TODO_ENV = `# Server-only environment variables
 # OPENAI_API_KEY=sk-...
+# GOOGLE_CLIENT_ID=
+# GOOGLE_CLIENT_SECRET=
+# GOOGLE_REDIRECT_URI=http://localhost:3000/auth/google/callback
 `;
 
 export async function copyTemplate(
