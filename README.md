@@ -1,7 +1,7 @@
 # Pond
 
 <p align="center">
-  <img src="./docs/branding/pond-title.png" alt="Pond title image" width="100%" />
+  <img src="https://raw.githubusercontent.com/DevvGwardo/pond/main/docs/branding/pond-title.png" alt="Pond title image" width="100%" />
 </p>
 
 <p align="center">
@@ -80,6 +80,7 @@ If you install the package globally or publish it, the intended workflow is:
 ```bash
 pond new my-capsule
 cd my-capsule
+npm install
 pond dev
 ```
 
@@ -90,12 +91,14 @@ Open `http://localhost:3000`.
 ```bash
 pond new chat-demo
 cd chat-demo
+npm install
 pond dev
 ```
 
 Pond will:
 
 - scaffold `server/index.ts`, `client/index.tsx`, `shared/`, and `.env.pond.server`
+- scaffold a capsule `package.json` with local `pond` scripts
 - initialize a git repository by default
 - compile the capsule server with esbuild
 - create `.pond/data.db`
@@ -105,7 +108,7 @@ Pond will:
 - push reload events over `/__pond_reload`
 
 <p align="center">
-  <img src="./docs/branding/pond-workflow.png" alt="Pond workflow image" width="100%" />
+  <img src="https://raw.githubusercontent.com/DevvGwardo/pond/main/docs/branding/pond-workflow.png" alt="Pond workflow image" width="100%" />
 </p>
 
 ## CLI
@@ -115,6 +118,10 @@ Pond will:
 | `pond new <name>` | Scaffold a new capsule |
 | `pond dev --port 3000` | Run the local dev server |
 | `pond deploy` | Build a standalone server bundle and write deploy metadata |
+| `pond deploy --api http://localhost:8787` | Upload a hosted deploy to a Pond control plane |
+| `pond claim` | Claim a hosted deploy and sync `.env.pond.server` |
+| `pond start` | Start the bundled deploy artifact locally |
+| `pond host` | Start the self-hosted Pond control plane |
 | `pond inspect` | Inspect local capsule metadata |
 | `pond logs` | Stream structured local logs |
 | `pond db list` | List SQLite tables from a running capsule |
@@ -124,7 +131,7 @@ Pond will:
 ## Runtime Model
 
 <p align="center">
-  <img src="./docs/branding/pond-how-it-works.png" alt="How Pond works diagram" width="100%" />
+  <img src="https://raw.githubusercontent.com/DevvGwardo/pond/main/docs/branding/pond-how-it-works.png" alt="How Pond works diagram" width="100%" />
 </p>
 
 At runtime, Pond does four things:
@@ -186,6 +193,45 @@ These power the CLI inspection commands and make local capsules easy to inspect 
 - generates a deploy ID, timestamp, and bundle hash
 
 This is a build artifact flow, not a full hosted deployment platform yet. The runtime already emits metadata in a shape that can later back integrations with services like Fly.io or Railway.
+
+## Hosted MVP
+
+Pond now includes a self-hostable control-plane MVP for hosted deploys and claim-based ownership.
+
+Start the control plane:
+
+```bash
+pond host --port 8787
+```
+
+Create an anonymous hosted deploy:
+
+```bash
+pond deploy --api http://localhost:8787
+```
+
+That returns a hosted app URL and stores claim metadata in `.pond/deploy.json`.
+
+Claim the deploy and sync server env:
+
+```bash
+pond claim
+```
+
+Hosted behavior in the current MVP:
+
+- each deploy gets its own hosted app port
+- inspect, DB dump, and logs are private by default
+- the local claim token in `.pond/deploy.json` is sent automatically by hosted `pond inspect`, `pond db`, and `pond logs` commands when you target that deploy
+- `.env.pond.server` is synced on claim and on later claimed redeploys
+
+Examples:
+
+```bash
+pond inspect <deploy-id>
+pond db dump messages --target <deploy-id>
+pond logs --target <deploy-id>
+```
 
 ## Public Server API
 

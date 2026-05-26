@@ -2,6 +2,9 @@ import { defineCommand, runMain } from "citty";
 import { newCommand } from "./commands/new.js";
 import { devCommand } from "./commands/dev.js";
 import { deployCommand } from "./commands/deploy.js";
+import { claimCommand } from "./commands/claim.js";
+import { startCommand } from "./commands/start.js";
+import { hostCommand } from "./commands/host.js";
 import { dbCommand } from "./commands/db.js";
 import { logsCommand } from "./commands/logs.js";
 import { inspectCommand } from "./commands/inspect.js";
@@ -16,6 +19,9 @@ const main = defineCommand({
     new: newCommand,
     dev: devCommand,
     deploy: deployCommand,
+    claim: claimCommand,
+    start: startCommand,
+    host: hostCommand,
     db: dbCommand,
     logs: logsCommand,
     inspect: inspectCommand,

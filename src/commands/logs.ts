@@ -2,23 +2,28 @@ import { defineCommand } from "citty"
 import * as fs from "node:fs"
 import * as path from "node:path"
 
-function resolveBaseUrl(port: string, target?: string) {
-  if (!target) return `http://localhost:${port}`
+function resolveRemoteTarget(target?: string) {
   const deployFile = path.join(process.cwd(), ".pond", "deploy.json")
-  if (!fs.existsSync(deployFile)) {
-    throw new Error("No .pond/deploy.json found")
-  }
+  if (!fs.existsSync(deployFile)) return null
   const deploy = JSON.parse(fs.readFileSync(deployFile, "utf-8")) as {
-    deployId: string
+    deployId?: string
     url?: string
+    claimToken?: string
   }
-  if (deploy.deployId !== target) {
-    throw new Error(`Unknown deploy id: ${target}`)
+  if (!target) return null
+  if (target.startsWith("http://") || target.startsWith("https://")) {
+    return {
+      baseUrl: target.replace(/\/$/, ""),
+      headers: {} as Record<string, string>,
+    }
   }
-  if (!deploy.url) {
-    throw new Error("Deploy has no remote URL")
+  if (deploy.deployId === target && deploy.url) {
+    return {
+      baseUrl: deploy.url,
+      headers: deploy.claimToken ? { "x-pond-claim-token": deploy.claimToken } : ({} as Record<string, string>),
+    }
   }
-  return deploy.url
+  throw new Error(`Unknown deploy target: ${target}`)
 }
 
 export const logsCommand = defineCommand({
@@ -37,8 +42,12 @@ export const logsCommand = defineCommand({
     },
   },
   async run({ args }) {
-    const baseUrl = resolveBaseUrl(args.port, args.target)
-    const res = await fetch(`${baseUrl}/__pond/logs`)
+    const target = typeof args.target === "string" ? args.target : undefined
+    const remote = resolveRemoteTarget(target)
+    const baseUrl = remote?.baseUrl ?? `http://localhost:${args.port}`
+    const res = await fetch(`${baseUrl}/__pond/logs`, {
+      headers: remote?.headers,
+    })
     if (!res.ok || !res.body) {
       throw new Error(`Request failed: ${res.status}`)
     }

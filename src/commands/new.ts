@@ -28,6 +28,7 @@ export const newCommand = defineCommand({
     console.log(`\n  Created ${args.name}/\n`);
     console.log(`  Next steps:`);
     console.log(`    cd ${args.name}`);
-    console.log(`    npx pond dev\n`);
+    console.log(`    npm install`);
+    console.log(`    npm run dev\n`);
   },
 });

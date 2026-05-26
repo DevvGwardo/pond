@@ -87,6 +87,14 @@ const TODO_ENV = `# Server-only environment variables
 # GOOGLE_REDIRECT_URI=http://localhost:3000/auth/google/callback
 `;
 
+const TODO_GITIGNORE = `node_modules
+.pond
+`;
+
+const POND_VERSION = JSON.parse(
+  fs.readFileSync(path.resolve(import.meta.dirname, "../package.json"), "utf-8")
+).version as string;
+
 export async function copyTemplate(
   name: string,
   _template: string,
@@ -104,10 +112,35 @@ export async function copyTemplate(
   fs.mkdirSync(path.join(dir, "client"), { recursive: true });
   fs.mkdirSync(path.join(dir, "shared"), { recursive: true });
 
+  fs.writeFileSync(
+    path.join(dir, "package.json"),
+    JSON.stringify(
+      {
+        name: path.basename(dir),
+        private: true,
+        type: "module",
+        scripts: {
+          dev: "pond dev",
+          start: "pond start",
+          deploy: "pond deploy",
+          inspect: "pond inspect",
+          logs: "pond logs",
+          "db:list": "pond db list",
+          "db:dump": "pond db dump",
+        },
+        devDependencies: {
+          pond: `^${POND_VERSION}`,
+        },
+      },
+      null,
+      2
+    )
+  );
   fs.writeFileSync(path.join(dir, "server", "index.ts"), TODO_SERVER_TS);
   fs.writeFileSync(path.join(dir, "client", "index.tsx"), TODO_CLIENT_TSX);
   fs.writeFileSync(path.join(dir, "shared", ".gitkeep"), "");
   fs.writeFileSync(path.join(dir, ".env.pond.server"), TODO_ENV);
+  fs.writeFileSync(path.join(dir, ".gitignore"), TODO_GITIGNORE);
 
   if (initGit) {
     execSync("git init", { cwd: dir, stdio: "ignore" });

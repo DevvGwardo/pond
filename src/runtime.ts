@@ -55,7 +55,24 @@ export async function createRuntime(
   fs.writeFileSync(tmpFile, js)
 
   const mod: ServerModule = await import(`${pathToFileURL(tmpFile).href}?t=${Date.now()}`)
-  const def = mod.default
+
+  return createRuntimeFromDefinition(mod.default, cwd, options)
+}
+
+export async function createRuntimeFromDeployBundle(
+  bundleFile: string,
+  cwd: string,
+  options: RuntimeOptions = {}
+): Promise<{ mount: (app: Hono) => void; db: Database.Database; def: CapsuleDefinition; env: Record<string, string> }> {
+  const mod: ServerModule = await import(`${pathToFileURL(bundleFile).href}?t=${Date.now()}`)
+  return createRuntimeFromDefinition(mod.default, cwd, options)
+}
+
+function createRuntimeFromDefinition(
+  def: CapsuleDefinition,
+  cwd: string,
+  options: RuntimeOptions = {}
+): { mount: (app: Hono) => void; db: Database.Database; def: CapsuleDefinition; env: Record<string, string> } {
 
   const dbPath = path.join(cwd, ".pond", "data.db")
   fs.mkdirSync(path.dirname(dbPath), { recursive: true })
