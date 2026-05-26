@@ -1,7 +1,7 @@
 # Pond
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/DevvGwardo/pond/main/docs/branding/pond-title.png" alt="Pond title image" width="100%" />
+  <img src="./docs/branding/pond-title.png" alt="Pond title image" width="100%" />
 </p>
 
 <p align="center">
@@ -108,7 +108,7 @@ Pond will:
 - push reload events over `/__pond_reload`
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/DevvGwardo/pond/main/docs/branding/pond-workflow.png" alt="Pond workflow image" width="100%" />
+  <img src="./docs/branding/pond-workflow.png" alt="Pond workflow image" width="100%" />
 </p>
 
 ## CLI
@@ -135,7 +135,7 @@ Pond will:
 ## Runtime Model
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/DevvGwardo/pond/main/docs/branding/pond-how-it-works.png" alt="How Pond works diagram" width="100%" />
+  <img src="./docs/branding/pond-how-it-works.png" alt="How Pond works diagram" width="100%" />
 </p>
 
 At runtime, Pond does four things:
