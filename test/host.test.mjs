@@ -1291,6 +1291,48 @@ test("audit log records anonymous deploy.create with __anonymous__ actor", async
   }
 })
 
+test("pond deploy writes .pond/deploy.json with mode 0600 (hosted path)", { skip: process.platform === "win32" ? "POSIX modes only" : false }, async () => {
+  // Stage a capsule project in a tmpdir, then invoke the CLI to deploy
+  // anonymously against the running test host.
+  const projDir = mkdtempSync(path.join(tmpdir(), "pond-deploy-perm-"))
+  try {
+    mkdirSync(path.join(projDir, "server"), { recursive: true })
+    writeFileSync(
+      path.join(projDir, "server", "index.ts"),
+      `import { capsule, query, string, table } from "pond/server"
+export default capsule({
+  schema: { items: table({ name: string() }) },
+  queries: { items: query((ctx) => ctx.db.items.all()) },
+  mutations: {},
+})
+`
+    )
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const execFileP = promisify(execFile)
+    await execFileP(process.execPath, [CLI_PATH, "deploy", "--api", apiUrl], {
+      cwd: projDir,
+      env: { ...process.env },
+      timeout: 30000,
+    })
+    const deployFile = path.join(projDir, ".pond", "deploy.json")
+    const { statSync, readFileSync } = await import("node:fs")
+    const st = statSync(deployFile)
+    // POSIX mode lower 9 bits — we want 0600 (rw-------).
+    assert.equal(st.mode & 0o777, 0o600, `expected 0600, got 0${(st.mode & 0o777).toString(8)}`)
+    // sanity: file contains a claimToken
+    const body = JSON.parse(readFileSync(deployFile, "utf-8"))
+    assert.ok(typeof body.claimToken === "string" && body.claimToken.length >= 32)
+    // Cleanup the host-side deploy
+    await fetch(`${apiUrl}/api/deploys/${body.deployId}`, {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${adminToken}` },
+    })
+  } finally {
+    if (existsSync(projDir)) rmSync(projDir, { recursive: true, force: true })
+  }
+})
+
 test("SIGINT host leaves no orphan deploy-worker processes", async () => {
   await stopHost()
   // After stop, no deploy-worker.js child of the host should remain.

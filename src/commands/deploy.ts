@@ -65,6 +65,23 @@ export const deployCommand = defineCommand({
     const clientHtml = fs.existsSync(clientFile) ? await buildClient(clientFile) : undefined
     const apiUrl = typeof args.api === "string" && args.api ? args.api.replace(/\/$/, "") : undefined
 
+    if (apiUrl) {
+      try {
+        const parsed = new URL(apiUrl)
+        const isLoopback =
+          parsed.hostname === "localhost" ||
+          parsed.hostname === "127.0.0.1" ||
+          parsed.hostname === "::1"
+        if (parsed.protocol === "http:" && !isLoopback) {
+          console.error(
+            `⚠  --api ${apiUrl} uses plain http:// — credentials and claim tokens will be sent in clear. Use https:// for any non-loopback host.`
+          )
+        }
+      } catch {
+        // invalid URL is handled later by fetch
+      }
+    }
+
     fs.mkdirSync(deployDir, { recursive: true })
     if (clientHtml) {
       fs.writeFileSync(clientPath, clientHtml)
@@ -183,8 +200,14 @@ export const deployCommand = defineCommand({
         },
         null,
         2
-      )
+      ),
+      { mode: 0o600 }
     )
+    try {
+      fs.chmodSync(deployFile, 0o600)
+    } catch {
+      // best-effort on platforms without chmod (e.g. Windows)
+    }
 
     if (isAnonymous && remote.terminatesAt && remote.expiresAt) {
       const now = Date.now()

