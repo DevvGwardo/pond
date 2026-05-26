@@ -45,6 +45,24 @@ export interface CustomDomainRow {
   createdAt: string
 }
 
+export interface AuditLogRow {
+  id: number
+  ts: string
+  actor: string
+  action: string
+  targetDeployId: string | null
+  targetUserId: string | null
+  metadata: string | null
+}
+
+export interface AuditEntry {
+  actor: string
+  action: string
+  targetDeployId?: string | null
+  targetUserId?: string | null
+  metadata?: Record<string, unknown> | null
+}
+
 export interface ControlDb {
   hashToken(token: string): string
   createUser(username: string, isAdmin: boolean): { user: UserRow; token: string }
@@ -80,6 +98,8 @@ export interface ControlDb {
   countDomainsForUser(userId: string): number
   removeDomain(subdomain: string): void
   removeDomainsForDeploy(deployId: string): void
+  appendAudit(entry: AuditEntry): void
+  listAudit(opts?: { limit?: number; sinceTs?: string }): AuditLogRow[]
   close(): void
 }
 
@@ -124,6 +144,18 @@ export function openControlDb(dataDir: string): ControlDb {
       createdAt TEXT DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_custom_domains_deploy ON custom_domains(deployId);
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts TEXT NOT NULL DEFAULT (datetime('now')),
+      actor TEXT NOT NULL,
+      action TEXT NOT NULL,
+      targetDeployId TEXT,
+      targetUserId TEXT,
+      metadata TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log(ts);
+    CREATE INDEX IF NOT EXISTS idx_audit_log_actor ON audit_log(actor);
+    CREATE INDEX IF NOT EXISTS idx_audit_log_target_deploy ON audit_log(targetDeployId);
   `)
 
   // Lightweight migration for pre-Phase-5 DBs that only had (createdAt, expiresAt).
@@ -203,6 +235,15 @@ export function openControlDb(dataDir: string): ControlDb {
   )
   const deleteDomain = db.prepare("DELETE FROM custom_domains WHERE subdomain = ?")
   const deleteDomainsForDeployStmt = db.prepare("DELETE FROM custom_domains WHERE deployId = ?")
+  const insertAudit = db.prepare(
+    "INSERT INTO audit_log (actor, action, targetDeployId, targetUserId, metadata) VALUES (?, ?, ?, ?, ?)"
+  )
+  const selectAuditRecent = db.prepare(
+    "SELECT id, ts, actor, action, targetDeployId, targetUserId, metadata FROM audit_log ORDER BY id DESC LIMIT ?"
+  )
+  const selectAuditSince = db.prepare(
+    "SELECT id, ts, actor, action, targetDeployId, targetUserId, metadata FROM audit_log WHERE ts >= ? ORDER BY id DESC LIMIT ?"
+  )
 
   return {
     hashToken,
@@ -326,6 +367,22 @@ export function openControlDb(dataDir: string): ControlDb {
     },
     removeDomainsForDeploy(deployId) {
       deleteDomainsForDeployStmt.run(deployId)
+    },
+    appendAudit(entry) {
+      insertAudit.run(
+        entry.actor,
+        entry.action,
+        entry.targetDeployId ?? null,
+        entry.targetUserId ?? null,
+        entry.metadata ? JSON.stringify(entry.metadata) : null
+      )
+    },
+    listAudit(opts) {
+      const limit = Math.min(Math.max(opts?.limit ?? 100, 1), 1000)
+      const rows = (opts?.sinceTs
+        ? selectAuditSince.all(opts.sinceTs, limit)
+        : selectAuditRecent.all(limit)) as AuditLogRow[]
+      return rows
     },
     close() {
       db.close()

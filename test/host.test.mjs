@@ -982,6 +982,93 @@ export default { schema: {}, queries: {}, mutations: {} }
   }
 })
 
+// ---- Audit log ----
+
+test("audit log records deploy.create and is admin-only", async () => {
+  const fs2 = await import("node:fs")
+  const bundleBase64 = fs2.readFileSync(bundlePath).toString("base64")
+  const create = await fetch(`${apiUrl}/api/deploys`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ bundleBase64 }),
+  })
+  assert.equal(create.status, 201)
+  const cb = await create.json()
+
+  // Unauthenticated → 401
+  const unauth = await fetch(`${apiUrl}/api/audit`)
+  assert.equal(unauth.status, 401)
+
+  // Non-admin token → 403
+  const userRes = await fetch(`${apiUrl}/api/users`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${hostToken}` },
+    body: JSON.stringify({ username: `audit-viewer-${Date.now()}` }),
+  })
+  const userBody = await userRes.json()
+  const forbidden = await fetch(`${apiUrl}/api/audit`, {
+    headers: { authorization: `Bearer ${userBody.token}` },
+  })
+  assert.equal(forbidden.status, 403)
+
+  // Admin → 200 with the just-created deploy in the log
+  const ok = await fetch(`${apiUrl}/api/audit?limit=20`, {
+    headers: { authorization: `Bearer ${adminToken}` },
+  })
+  assert.equal(ok.status, 200)
+  const body = await ok.json()
+  assert.ok(Array.isArray(body.entries))
+  const creation = body.entries.find(
+    (e) => e.action === "deploy.create" && e.targetDeployId === cb.deployId
+  )
+  assert.ok(creation, `expected deploy.create entry for ${cb.deployId}, got ${JSON.stringify(body.entries.slice(0, 5))}`)
+  assert.equal(typeof creation.ts, "string")
+  assert.ok(creation.metadata && typeof creation.metadata.bundleBytes === "number")
+
+  // Cleanup
+  await fetch(`${apiUrl}/api/deploys/${cb.deployId}`, {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${adminToken}` },
+  })
+})
+
+test("audit log records anonymous deploy.create with __anonymous__ actor", async () => {
+  const h = await startExtraHost({ extraArgs: ["--anonymous-rate-per-hour", "10"] })
+  try {
+    const fs2 = await import("node:fs")
+    const bundleBase64 = fs2.readFileSync(bundlePath).toString("base64")
+    // Bootstrap an admin on this host first so we can read the audit log.
+    const bootstrap = await fetch(`${h.apiUrl}/api/users`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${h.hostToken}` },
+      body: JSON.stringify({ username: "audit-admin" }),
+    })
+    const ba = await bootstrap.json()
+
+    const dep = await fetch(`${h.apiUrl}/api/deploys`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ bundleBase64 }),
+    })
+    assert.equal(dep.status, 201)
+    const cb = await dep.json()
+
+    const auditRes = await fetch(`${h.apiUrl}/api/audit`, {
+      headers: { authorization: `Bearer ${ba.token}` },
+    })
+    assert.equal(auditRes.status, 200)
+    const body = await auditRes.json()
+    const entry = body.entries.find(
+      (e) => e.action === "deploy.create" && e.targetDeployId === cb.deployId
+    )
+    assert.ok(entry, "expected anon deploy.create audit entry")
+    assert.equal(entry.actor, "__anonymous__")
+    assert.equal(entry.metadata?.anonymous, true)
+  } finally {
+    await stopExtraHost(h)
+  }
+})
+
 test("SIGINT host leaves no orphan deploy-worker processes", async () => {
   await stopHost()
   // After stop, no deploy-worker.js child of the host should remain.

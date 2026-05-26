@@ -514,6 +514,30 @@ export const hostCommand = defineCommand({
       return "unknown"
     }
 
+    function actorFor(user: UserRow | null, viaHostToken: boolean, anonymous = false): string {
+      if (viaHostToken) return "__host__"
+      if (anonymous) return "__anonymous__"
+      return user?.id ?? "__unknown__"
+    }
+
+    function audit(
+      actor: string,
+      action: string,
+      opts: { targetDeployId?: string; targetUserId?: string; metadata?: Record<string, unknown> } = {}
+    ) {
+      try {
+        controlDb.appendAudit({
+          actor,
+          action,
+          targetDeployId: opts.targetDeployId,
+          targetUserId: opts.targetUserId,
+          metadata: opts.metadata,
+        })
+      } catch (e) {
+        console.error("[pond host] audit append failed:", e)
+      }
+    }
+
     function authorizeDeployMutation(
       c: any,
       record: HostedDeployRecord
@@ -562,6 +586,12 @@ export const hostCommand = defineCommand({
       // First user is forced admin; otherwise honour isAdmin flag (default false).
       const isAdmin = !hasAny ? true : Boolean(body.isAdmin)
       const { user, token } = controlDb.createUser(body.username, isAdmin)
+      const viaHostToken = isHostToken(provided)
+      const actorUser = viaHostToken ? null : controlDb.findUserByTokenHash(controlDb.hashToken(provided))
+      audit(actorFor(actorUser, viaHostToken), "user.create", {
+        targetUserId: user.id,
+        metadata: { username: user.username, isAdmin, bootstrap: !hasAny },
+      })
       return c.json({ userId: user.id, username: user.username, isAdmin: user.isAdmin === 1, token }, 201)
     })
 
@@ -575,7 +605,32 @@ export const hostCommand = defineCommand({
       const r = requireUser(c)
       if (r instanceof Response) return r
       const token = controlDb.rotateUserToken(r.user.id)
+      audit(actorFor(r.user, false), "user.rotate_token", { targetUserId: r.user.id })
       return c.json({ token })
+    })
+
+    // ---- AUDIT LOG ----
+
+    app.get("/api/audit", (c) => {
+      const r = requireAdmin(c)
+      if (r instanceof Response) return r
+      const limitRaw = c.req.query("limit")
+      const sinceTs = c.req.query("sinceTs")
+      const limit = limitRaw ? parseInt(limitRaw, 10) : 100
+      const rows = controlDb.listAudit({
+        limit: Number.isFinite(limit) ? limit : 100,
+        sinceTs: typeof sinceTs === "string" && sinceTs.length > 0 ? sinceTs : undefined,
+      })
+      const entries = rows.map((row) => ({
+        id: row.id,
+        ts: row.ts,
+        actor: row.actor,
+        action: row.action,
+        targetDeployId: row.targetDeployId,
+        targetUserId: row.targetUserId,
+        metadata: row.metadata ? JSON.parse(row.metadata) : null,
+      }))
+      return c.json({ entries })
     })
 
     // ---- DEPLOYS ----
@@ -708,8 +763,17 @@ export const hostCommand = defineCommand({
             controlDb.deleteDeployOwner(deployId)
           }
           controlDb.deleteQuota(deployId)
+          audit(actorFor(user, false, isAnonymous), "deploy.create_failed", {
+            targetDeployId: deployId,
+            metadata: { anonymous: isAnonymous, bundleBytes: bundleBuf.length, error: String(err?.message ?? err) },
+          })
           return c.json({ error: `Boot failed: ${err?.message ?? err}`, deployId }, 500)
         }
+        audit(actorFor(user, false, isAnonymous), "deploy.create", {
+          targetDeployId: deployId,
+          targetUserId: user?.id,
+          metadata: { anonymous: isAnonymous, bundleBytes: bundleBuf.length },
+        })
         return c.json({ ...record, ...extra }, 201)
       }
     )
@@ -761,6 +825,11 @@ export const hostCommand = defineCommand({
         } catch (err: any) {
           return c.json({ error: `Boot failed: ${err?.message ?? err}` }, 500)
         }
+        const actor = auth.kind === "claim" ? "__claim_token__" : actorFor(auth.user, false)
+        audit(actor, "deploy.update", {
+          targetDeployId: deployId,
+          metadata: { bundleBytes: bundleBuf.length, envChanged: typeof body.envText === "string" },
+        })
         return c.json(record)
       }
     )
@@ -844,6 +913,14 @@ export const hostCommand = defineCommand({
       } catch (err: any) {
         return c.json({ error: `Boot failed: ${err?.message ?? err}` }, 500)
       }
+      audit(actorFor(user, false), "deploy.claim", {
+        targetDeployId: deployId,
+        targetUserId: user.id,
+        metadata: {
+          fromAnonymous: anon !== null,
+          signedUp: createdCredential !== null,
+        },
+      })
       const resp: Record<string, unknown> = { ...record }
       if (createdCredential) resp.user = createdCredential
       return c.json(resp)
@@ -868,6 +945,7 @@ export const hostCommand = defineCommand({
       } catch (err: any) {
         return c.json({ error: `Boot failed: ${err?.message ?? err}` }, 500)
       }
+      audit(actorFor(r.user, false), "deploy.rotate_claim_token", { targetDeployId: deployId })
       return c.json({ deployId, claimToken: newToken })
     })
 
@@ -883,6 +961,8 @@ export const hostCommand = defineCommand({
       controlDb.deleteAnonymous(deployId)
       controlDb.deleteQuota(deployId)
       controlDb.removeDomainsForDeploy(deployId)
+      const actor = auth.kind === "claim" ? "__claim_token__" : actorFor(auth.user, false)
+      audit(actor, "deploy.delete", { targetDeployId: deployId })
       return c.json({ ok: true })
     })
 
@@ -929,6 +1009,10 @@ export const hostCommand = defineCommand({
           return c.json({ error: `Re-fork failed: ${err?.message ?? err}`, quota: next }, 500)
         }
       }
+      audit(actorFor(r.user, r.viaHostToken), "deploy.quota_update", {
+        targetDeployId: deployId,
+        metadata: { patch, prev, next },
+      })
       return c.json({ quota: next })
     })
 
@@ -1002,6 +1086,13 @@ export const hostCommand = defineCommand({
       } catch (err: any) {
         return c.json({ error: `Boot failed: ${err?.message ?? err}` }, 500)
       }
+      const envActor = authUser(c)
+      if (envActor) {
+        audit(actorFor(envActor, false), "deploy.env_update", {
+          targetDeployId: deployId,
+          metadata: { keys: Object.keys(incoming) },
+        })
+      }
       return c.json({ entries: merged })
     })
 
@@ -1020,6 +1111,13 @@ export const hostCommand = defineCommand({
         await forkDeploy(r.record)
       } catch (err: any) {
         return c.json({ error: `Boot failed: ${err?.message ?? err}` }, 500)
+      }
+      const envActor = authUser(c)
+      if (envActor) {
+        audit(actorFor(envActor, false), "deploy.env_delete", {
+          targetDeployId: deployId,
+          metadata: { key },
+        })
       }
       return c.json({ entries })
     })
@@ -1078,6 +1176,10 @@ export const hostCommand = defineCommand({
         throw err
       }
       const row = controlDb.findDomain(sub)
+      audit(actorFor(r.user, false), "domain.add", {
+        targetDeployId: body.deployId,
+        metadata: { subdomain: sub },
+      })
       return c.json({ subdomain: sub, deployId: body.deployId, createdAt: row?.createdAt, url: `http://${sub}.${publicHost}:${port}` }, 201)
     })
 
@@ -1092,6 +1194,10 @@ export const hostCommand = defineCommand({
         return c.json({ error: "Forbidden" }, 403)
       }
       controlDb.removeDomain(sub)
+      audit(actorFor(r.user, false), "domain.remove", {
+        targetDeployId: row.deployId,
+        metadata: { subdomain: sub },
+      })
       return c.json({ ok: true })
     })
 

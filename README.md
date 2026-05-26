@@ -353,6 +353,17 @@ Deleting a deploy cascades and removes all its custom domains.
 
 Cloudflare Tunnel works the same way: point a wildcard hostname at the pond port.
 
+### Audit log
+
+The control plane records mutations (deploy create/update/delete/claim, env writes, quota changes, domain add/remove, user create, token rotate) in an append-only `audit_log` table. Admins can read recent entries:
+
+```bash
+curl -H "Authorization: Bearer <admin-token>" \
+  http://localhost:8787/api/audit?limit=100
+```
+
+Each entry has `ts`, `actor` (user id, `__host__`, `__anonymous__`, or `__claim_token__`), `action`, `targetDeployId`, `targetUserId`, and a free-form `metadata` object. There is no CLI subcommand yet — use `curl`.
+
 ### Persistent logs
 
 Each deploy's `ctx.log.*` entries stream over SSE on `/__pond/logs` and are appended as NDJSON to `<deploy-dir>/.pond/logs.ndjson`. The file rotates at 5 MB (one prior generation kept as `logs.ndjson.1`). On restart, the most recent 200 entries are restored.
