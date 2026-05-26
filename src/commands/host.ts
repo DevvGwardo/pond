@@ -699,6 +699,13 @@ export const hostCommand = defineCommand({
             restrictNetwork: isAnonymous,
           })
         } catch (err: any) {
+          try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+          if (isAnonymous) {
+            controlDb.deleteAnonymous(deployId)
+          } else {
+            controlDb.deleteDeployOwner(deployId)
+          }
+          controlDb.deleteQuota(deployId)
           return c.json({ error: `Boot failed: ${err?.message ?? err}`, deployId }, 500)
         }
         return c.json({ ...record, ...extra }, 201)

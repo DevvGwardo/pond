@@ -231,6 +231,26 @@ test("body > 64 MB returns 413", async () => {
   assert.equal(res.status, 413)
 })
 
+test("failed anonymous boot cleans up dir + DB rows (regression)", async () => {
+  const fs = await import("node:fs")
+  // 'QQ==' base64-decodes to 'A' — a 1-byte invalid bundle that fails on import.
+  // Use an extra host so the rate-limit window is fresh.
+  const h = await startExtraHost()
+  try {
+    const before = fs.readdirSync(path.join(h.dataDir, "deploys")).length
+    const res = await fetch(`${h.apiUrl}/api/deploys`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ bundleBase64: "QQ==" }),
+    })
+    assert.equal(res.status, 500)
+    const after = fs.readdirSync(path.join(h.dataDir, "deploys")).length
+    assert.equal(after, before, "deploy dir leaked after boot failure")
+  } finally {
+    await stopExtraHost(h)
+  }
+})
+
 async function startExtraHost({ extraArgs = [], env = {} } = {}) {
   const xPort = await pickFreePort()
   const xUrl = `http://127.0.0.1:${xPort}`
