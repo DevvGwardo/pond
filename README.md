@@ -320,6 +320,38 @@ Changing `maxMemoryMb` triggers a worker re-fork. There is no CLI subcommand for
 
 The control plane routes requests by subdomain (`<deployId>.<publicHost>:<port>`) to the matching forked worker. Same-origin CORS is enforced at both the control plane and the deploy worker: cross-origin browser requests receive **no** `Access-Control-Allow-Origin` header by default. A capsule can opt extra origins in by exporting `allowedOrigins: string[]` from `capsule({ ... })`.
 
+### Custom subdomains
+
+Every deploy is always reachable at its hex-id subdomain (`<deployId>.<publicHost>`). Owners can register friendly aliases:
+
+```bash
+pond domains add my-app                  # uses deployId from .pond/deploy.json
+pond domains add my-app <deployId>       # explicit
+pond domains list
+pond domains remove my-app
+```
+
+After `add` the deploy is reachable at both `<deployId>.<publicHost>:<port>` and `my-app.<publicHost>:<port>`.
+
+Subdomain rules:
+
+- DNS label: lowercase `a-z`, digits, hyphens, max 63 chars, no leading or trailing hyphen.
+- Reserved names: `api`, `admin`, `docs`, `www`, `app`, `health`.
+- Names that look like hex deployIds (`/^[a-f0-9]{8,}$/`) are not allowed.
+
+Deleting a deploy cascades and removes all its custom domains.
+
+**Going to production** requires a wildcard DNS record `*.pond.example.com → <your-pond-host>` plus TLS handled outside of pond. Pond does not provision certificates. A minimal Caddyfile that terminates TLS for the wildcard and reverse-proxies to a local pond host:
+
+```caddy
+*.pond.example.com {
+  tls you@example.com
+  reverse_proxy 127.0.0.1:8787
+}
+```
+
+Cloudflare Tunnel works the same way: point a wildcard hostname at the pond port.
+
 ### Persistent logs
 
 Each deploy's `ctx.log.*` entries stream over SSE on `/__pond/logs` and are appended as NDJSON to `<deploy-dir>/.pond/logs.ndjson`. The file rotates at 5 MB (one prior generation kept as `logs.ndjson.1`). On restart, the most recent 200 entries are restored.
@@ -327,7 +359,7 @@ Each deploy's `ctx.log.*` entries stream over SSE on `/__pond/logs` and are appe
 ### What is NOT solved yet
 
 - No OS-level isolation between deploys (no containers, no seccomp).
-- No HTTPS, no automatic TLS, no custom domains, no wildcard DNS.
+- No HTTPS, no automatic TLS, no DNS provisioning, no wildcard cert automation (custom subdomains require an external reverse proxy for TLS).
 - No billing, no usage metering beyond hard quota limits.
 - No WebSocket support through the proxy.
 - No UI — everything is CLI + HTTP.

@@ -12,6 +12,7 @@ import { authCommand } from "./commands/auth.js";
 import { loginCommand } from "./commands/login.js";
 import { userCommand } from "./commands/user.js";
 import { envCommand } from "./commands/env.js";
+import { domainsCommand } from "./commands/domains.js";
 import { tokenCommand } from "./commands/token.js";
 
 const main = defineCommand({
@@ -33,6 +34,7 @@ const main = defineCommand({
     login: loginCommand,
     user: userCommand,
     env: envCommand,
+    domains: domainsCommand,
     token: tokenCommand,
   },
 });

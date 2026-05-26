@@ -39,6 +39,12 @@ export interface AnonymousDeployRow {
   terminated: number
 }
 
+export interface CustomDomainRow {
+  subdomain: string
+  deployId: string
+  createdAt: string
+}
+
 export interface ControlDb {
   hashToken(token: string): string
   createUser(username: string, isAdmin: boolean): { user: UserRow; token: string }
@@ -67,6 +73,12 @@ export interface ControlDb {
   promoteAnonymous(deployId: string, userId: string): void
   deleteAnonymous(deployId: string): void
   verifyAnonymousClaim(deployId: string, claimToken: string): boolean
+  addDomain(subdomain: string, deployId: string): void
+  findDomain(subdomain: string): CustomDomainRow | null
+  listDomainsForDeploy(deployId: string): Array<{ subdomain: string; createdAt: string }>
+  listDomainsForUser(userId: string): CustomDomainRow[]
+  removeDomain(subdomain: string): void
+  removeDomainsForDeploy(deployId: string): void
   close(): void
 }
 
@@ -105,6 +117,12 @@ export function openControlDb(dataDir: string): ControlDb {
     );
     CREATE INDEX IF NOT EXISTS idx_anon_terminates ON anonymous_deploys(terminatesAt);
     CREATE INDEX IF NOT EXISTS idx_anon_expires ON anonymous_deploys(expiresAt);
+    CREATE TABLE IF NOT EXISTS custom_domains (
+      subdomain TEXT PRIMARY KEY,
+      deployId TEXT NOT NULL,
+      createdAt TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_custom_domains_deploy ON custom_domains(deployId);
   `)
 
   // Lightweight migration for pre-Phase-5 DBs that only had (createdAt, expiresAt).
@@ -165,6 +183,22 @@ export function openControlDb(dataDir: string): ControlDb {
     deleteAnon.run(deployId)
     insertOwner.run(deployId, userId)
   })
+  const insertDomain = db.prepare(
+    "INSERT INTO custom_domains (subdomain, deployId) VALUES (?, ?)"
+  )
+  const selectDomain = db.prepare(
+    "SELECT subdomain, deployId, createdAt FROM custom_domains WHERE subdomain = ?"
+  )
+  const selectDomainsForDeploy = db.prepare(
+    "SELECT subdomain, createdAt FROM custom_domains WHERE deployId = ? ORDER BY createdAt ASC"
+  )
+  const selectDomainsForUser = db.prepare(
+    "SELECT cd.subdomain AS subdomain, cd.deployId AS deployId, cd.createdAt AS createdAt " +
+      "FROM custom_domains cd JOIN deploy_owners do ON do.deployId = cd.deployId " +
+      "WHERE do.userId = ? ORDER BY cd.createdAt ASC"
+  )
+  const deleteDomain = db.prepare("DELETE FROM custom_domains WHERE subdomain = ?")
+  const deleteDomainsForDeployStmt = db.prepare("DELETE FROM custom_domains WHERE deployId = ?")
 
   return {
     hashToken,
@@ -267,6 +301,24 @@ export function openControlDb(dataDir: string): ControlDb {
       const stored = Buffer.from(row.claimTokenHash)
       if (provided.length !== stored.length) return false
       return timingSafeEqual(provided, stored)
+    },
+    addDomain(subdomain, deployId) {
+      insertDomain.run(subdomain, deployId)
+    },
+    findDomain(subdomain) {
+      return (selectDomain.get(subdomain) as CustomDomainRow | undefined) ?? null
+    },
+    listDomainsForDeploy(deployId) {
+      return selectDomainsForDeploy.all(deployId) as Array<{ subdomain: string; createdAt: string }>
+    },
+    listDomainsForUser(userId) {
+      return selectDomainsForUser.all(userId) as CustomDomainRow[]
+    },
+    removeDomain(subdomain) {
+      deleteDomain.run(subdomain)
+    },
+    removeDomainsForDeploy(deployId) {
+      deleteDomainsForDeployStmt.run(deployId)
     },
     close() {
       db.close()

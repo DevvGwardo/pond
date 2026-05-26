@@ -23,6 +23,10 @@ interface HostedDeployRecord {
 
 const MAX_BUNDLE_BYTES = 64 * 1024 * 1024
 
+const RESERVED_SUBDOMAINS = new Set(["api", "admin", "docs", "www", "app", "health"])
+const SUBDOMAIN_LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
+const HEX_DEPLOY_ID_RE = /^[a-f0-9]{8,}$/
+
 function dirSize(dir: string): number {
   let total = 0
   if (!fs.existsSync(dir)) return 0
@@ -868,6 +872,7 @@ export const hostCommand = defineCommand({
       controlDb.deleteDeployOwner(deployId)
       controlDb.deleteAnonymous(deployId)
       controlDb.deleteQuota(deployId)
+      controlDb.removeDomainsForDeploy(deployId)
       return c.json({ ok: true })
     })
 
@@ -1005,6 +1010,74 @@ export const hostCommand = defineCommand({
       return c.json({ entries })
     })
 
+    // ---- CUSTOM DOMAINS ----
+
+    app.get("/api/domains", (c) => {
+      const r = requireUser(c)
+      if (r instanceof Response) return r
+      const rows =
+        r.user.isAdmin === 1
+          ? fs
+              .readdirSync(deploysDir, { withFileTypes: true })
+              .filter((e) => e.isDirectory())
+              .flatMap((e) =>
+                controlDb
+                  .listDomainsForDeploy(e.name)
+                  .map((d) => ({ subdomain: d.subdomain, deployId: e.name, createdAt: d.createdAt }))
+              )
+          : controlDb.listDomainsForUser(r.user.id)
+      return c.json({ domains: rows })
+    })
+
+    app.post("/api/domains", async (c) => {
+      const r = requireUser(c)
+      if (r instanceof Response) return r
+      const body = (await c.req.json().catch(() => ({}))) as { subdomain?: unknown; deployId?: unknown }
+      if (typeof body.subdomain !== "string" || typeof body.deployId !== "string") {
+        return c.json({ error: "subdomain and deployId required" }, 400)
+      }
+      const sub = body.subdomain
+      if (!SUBDOMAIN_LABEL_RE.test(sub) || sub.length > 63) {
+        return c.json({ error: "invalid subdomain (DNS label rules: a-z, 0-9, hyphens; max 63; no leading/trailing hyphen)" }, 400)
+      }
+      if (RESERVED_SUBDOMAINS.has(sub)) {
+        return c.json({ error: `subdomain "${sub}" is reserved` }, 400)
+      }
+      if (HEX_DEPLOY_ID_RE.test(sub)) {
+        return c.json({ error: "subdomain may not look like a hex deployId" }, 400)
+      }
+      const record = readRecord(body.deployId)
+      if (!record) return c.json({ error: "Not found" }, 404)
+      const ownerId = controlDb.getDeployOwner(body.deployId)
+      if (r.user.isAdmin !== 1 && ownerId !== r.user.id) {
+        return c.json({ error: "Forbidden" }, 403)
+      }
+      try {
+        controlDb.addDomain(sub, body.deployId)
+      } catch (err: any) {
+        if (String(err?.code ?? "").includes("SQLITE_CONSTRAINT")) {
+          return c.json({ error: "subdomain already taken" }, 409)
+        }
+        throw err
+      }
+      const row = controlDb.findDomain(sub)
+      return c.json({ subdomain: sub, deployId: body.deployId, createdAt: row?.createdAt, url: `http://${sub}.${publicHost}:${port}` }, 201)
+    })
+
+    app.delete("/api/domains/:subdomain", (c) => {
+      const r = requireUser(c)
+      if (r instanceof Response) return r
+      const sub = c.req.param("subdomain").toLowerCase()
+      const row = controlDb.findDomain(sub)
+      if (!row) return c.json({ error: "Not found" }, 404)
+      const ownerId = controlDb.getDeployOwner(row.deployId)
+      if (r.user.isAdmin !== 1 && ownerId !== r.user.id) {
+        return c.json({ error: "Forbidden" }, 403)
+      }
+      controlDb.removeDomain(sub)
+      return c.json({ ok: true })
+    })
+
     const HOP_BY_HOP = new Set([
       "connection",
       "keep-alive",
@@ -1016,15 +1089,15 @@ export const hostCommand = defineCommand({
       "upgrade",
       "host",
     ])
-    const SUBDOMAIN_RE = /^[a-f0-9]{8,}$/
-
     function deployIdFromHost(hostHeader: string | undefined): string | null {
       if (!hostHeader) return null
       const bare = hostHeader.toLowerCase().split(":")[0]
       const dot = bare.indexOf(".")
       if (dot <= 0) return null
       const sub = bare.slice(0, dot)
-      return SUBDOMAIN_RE.test(sub) ? sub : null
+      if (HEX_DEPLOY_ID_RE.test(sub)) return sub
+      const domain = controlDb.findDomain(sub)
+      return domain?.deployId ?? null
     }
 
     app.all("*", async (c) => {

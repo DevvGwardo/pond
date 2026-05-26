@@ -593,6 +593,208 @@ export default capsule({
   }
 })
 
+async function createOwnedDeploy() {
+  const fs = await import("node:fs")
+  const bundleBase64 = fs.readFileSync(bundlePath).toString("base64")
+  const res = await fetch(`${apiUrl}/api/deploys`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ bundleBase64 }),
+  })
+  assert.equal(res.status, 201)
+  return await res.json()
+}
+
+let domainDeployId = ""
+test("domains add succeeds for owner with valid subdomain", async () => {
+  const d = await createOwnedDeploy()
+  domainDeployId = d.deployId
+  const res = await fetch(`${apiUrl}/api/domains`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ subdomain: "my-app", deployId: domainDeployId }),
+  })
+  assert.equal(res.status, 201)
+  const body = await res.json()
+  assert.equal(body.subdomain, "my-app")
+  assert.equal(body.deployId, domainDeployId)
+  assert.ok(typeof body.url === "string" && body.url.includes("my-app."))
+})
+
+test("domains add rejects reserved subdomain (api)", async () => {
+  const res = await fetch(`${apiUrl}/api/domains`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ subdomain: "api", deployId: domainDeployId }),
+  })
+  assert.equal(res.status, 400)
+})
+
+test("domains add rejects hex-deployId-shaped subdomain", async () => {
+  const res = await fetch(`${apiUrl}/api/domains`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ subdomain: "abcdef12", deployId: domainDeployId }),
+  })
+  assert.equal(res.status, 400)
+})
+
+test("domains add rejects invalid characters (underscore, uppercase, too long)", async () => {
+  for (const bad of ["bad_name", "UPPER", "a".repeat(64), "-leading", "trailing-", ""]) {
+    const res = await fetch(`${apiUrl}/api/domains`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+      body: JSON.stringify({ subdomain: bad, deployId: domainDeployId }),
+    })
+    assert.equal(res.status, 400, `expected 400 for ${JSON.stringify(bad)}, got ${res.status}`)
+  }
+})
+
+test("domains add 409 on duplicate", async () => {
+  const res = await fetch(`${apiUrl}/api/domains`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ subdomain: "my-app", deployId: domainDeployId }),
+  })
+  assert.equal(res.status, 409)
+})
+
+test("custom subdomain routes to the right deploy via proxy", async () => {
+  const http = await import("node:http")
+  const result = await new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: "127.0.0.1",
+        port,
+        method: "GET",
+        path: "/api/query/items",
+        headers: { host: `my-app.${publicHost}:${port}` },
+      },
+      (res) => {
+        let data = ""
+        res.on("data", (c) => (data += c))
+        res.on("end", () => resolve({ status: res.statusCode, body: data }))
+      }
+    )
+    req.on("error", reject)
+    req.end()
+  })
+  assert.equal(result.status, 200)
+  assert.ok(Array.isArray(JSON.parse(result.body)))
+})
+
+test("domains list filters by ownership", async () => {
+  // Create a non-admin user and a deploy owned by them with a domain.
+  const u = await fetch(`${apiUrl}/api/users`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${hostToken}` },
+    body: JSON.stringify({ username: "carol" }),
+  })
+  assert.equal(u.status, 201)
+  const carol = await u.json()
+
+  const fs = await import("node:fs")
+  const bundleBase64 = fs.readFileSync(bundlePath).toString("base64")
+  const dep = await fetch(`${apiUrl}/api/deploys`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${carol.token}` },
+    body: JSON.stringify({ bundleBase64 }),
+  })
+  assert.equal(dep.status, 201)
+  const carolDeploy = await dep.json()
+
+  const add = await fetch(`${apiUrl}/api/domains`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${carol.token}` },
+    body: JSON.stringify({ subdomain: "carols-app", deployId: carolDeploy.deployId }),
+  })
+  assert.equal(add.status, 201)
+
+  const carolList = await fetch(`${apiUrl}/api/domains`, {
+    headers: { authorization: `Bearer ${carol.token}` },
+  })
+  const carolBody = await carolList.json()
+  assert.equal(carolBody.domains.length, 1)
+  assert.equal(carolBody.domains[0].subdomain, "carols-app")
+
+  const adminList = await fetch(`${apiUrl}/api/domains`, {
+    headers: { authorization: `Bearer ${adminToken}` },
+  })
+  const adminBody = await adminList.json()
+  const subs = adminBody.domains.map((d) => d.subdomain).sort()
+  assert.ok(subs.includes("my-app"))
+  assert.ok(subs.includes("carols-app"))
+})
+
+test("non-owner cannot add a domain for someone else's deploy → 403", async () => {
+  // carol exists from previous test; try to add a domain pointing to admin's deploy.
+  const u = await fetch(`${apiUrl}/api/users`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${hostToken}` },
+    body: JSON.stringify({ username: "dave" }),
+  })
+  assert.equal(u.status, 201)
+  const dave = await u.json()
+  const res = await fetch(`${apiUrl}/api/domains`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${dave.token}` },
+    body: JSON.stringify({ subdomain: "stealing", deployId: domainDeployId }),
+  })
+  assert.equal(res.status, 403)
+})
+
+test("domains remove succeeds for owner", async () => {
+  const res = await fetch(`${apiUrl}/api/domains/my-app`, {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${adminToken}` },
+  })
+  assert.equal(res.status, 200)
+  // Routing should now miss
+  const http = await import("node:http")
+  const result = await new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: "127.0.0.1",
+        port,
+        method: "GET",
+        path: "/api/query/items",
+        headers: { host: `my-app.${publicHost}:${port}` },
+      },
+      (res2) => {
+        let data = ""
+        res2.on("data", (c) => (data += c))
+        res2.on("end", () => resolve({ status: res2.statusCode, body: data }))
+      }
+    )
+    req.on("error", reject)
+    req.end()
+  })
+  assert.equal(result.status, 404)
+})
+
+test("deleting the deploy cascades — its domains are gone", async () => {
+  // Re-add a domain on domainDeployId then delete the deploy.
+  const add = await fetch(`${apiUrl}/api/domains`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ subdomain: "doomed", deployId: domainDeployId }),
+  })
+  assert.equal(add.status, 201)
+  const del = await fetch(`${apiUrl}/api/deploys/${domainDeployId}`, {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${adminToken}` },
+  })
+  assert.equal(del.status, 200)
+  // Now the subdomain should not be findable — re-adding the same name for a new deploy must succeed.
+  const d2 = await createOwnedDeploy()
+  const add2 = await fetch(`${apiUrl}/api/domains`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ subdomain: "doomed", deployId: d2.deployId }),
+  })
+  assert.equal(add2.status, 201)
+})
+
 test("SIGINT host leaves no orphan deploy-worker processes", async () => {
   await stopHost()
   // After stop, no deploy-worker.js child of the host should remain.
