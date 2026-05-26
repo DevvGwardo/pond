@@ -100,6 +100,15 @@ export interface ControlDb {
   removeDomainsForDeploy(deployId: string): void
   appendAudit(entry: AuditEntry): void
   listAudit(opts?: { limit?: number; sinceTs?: string }): AuditLogRow[]
+  /**
+   * Records an attempt and returns true if it is within the limit for the
+   * (scope, key) pair over the trailing `windowMs` window. Atomically prunes
+   * entries older than the window. False means the limit is already exhausted
+   * — no attempt is recorded in that case.
+   */
+  rateAllow(scope: string, key: string, windowMs: number, limit: number): boolean
+  /** Removes rate-limit entries older than `olderThanMs` from now (across all scopes). */
+  pruneRateLimits(olderThanMs: number): number
   close(): void
 }
 
@@ -156,6 +165,14 @@ export function openControlDb(dataDir: string): ControlDb {
     CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log(ts);
     CREATE INDEX IF NOT EXISTS idx_audit_log_actor ON audit_log(actor);
     CREATE INDEX IF NOT EXISTS idx_audit_log_target_deploy ON audit_log(targetDeployId);
+    CREATE TABLE IF NOT EXISTS rate_limits (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      scope TEXT NOT NULL,
+      key TEXT NOT NULL,
+      ts INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_rate_limits_scope_key_ts ON rate_limits(scope, key, ts);
+    CREATE INDEX IF NOT EXISTS idx_rate_limits_ts ON rate_limits(ts);
   `)
 
   // Lightweight migration for pre-Phase-5 DBs that only had (createdAt, expiresAt).
@@ -235,6 +252,24 @@ export function openControlDb(dataDir: string): ControlDb {
   )
   const deleteDomain = db.prepare("DELETE FROM custom_domains WHERE subdomain = ?")
   const deleteDomainsForDeployStmt = db.prepare("DELETE FROM custom_domains WHERE deployId = ?")
+  const pruneRateForKey = db.prepare(
+    "DELETE FROM rate_limits WHERE scope = ? AND key = ? AND ts < ?"
+  )
+  const pruneRateAll = db.prepare("DELETE FROM rate_limits WHERE ts < ?")
+  const countRateForKey = db.prepare(
+    "SELECT COUNT(*) AS n FROM rate_limits WHERE scope = ? AND key = ? AND ts >= ?"
+  )
+  const insertRate = db.prepare("INSERT INTO rate_limits (scope, key, ts) VALUES (?, ?, ?)")
+  const rateAllowTxn = db.transaction((scope: string, key: string, windowMs: number, limit: number) => {
+    const now = Date.now()
+    const cutoff = now - windowMs
+    pruneRateForKey.run(scope, key, cutoff)
+    const count = (countRateForKey.get(scope, key, cutoff) as { n: number }).n
+    if (count >= limit) return false
+    insertRate.run(scope, key, now)
+    return true
+  })
+
   const insertAudit = db.prepare(
     "INSERT INTO audit_log (actor, action, targetDeployId, targetUserId, metadata) VALUES (?, ?, ?, ?, ?)"
   )
@@ -376,6 +411,14 @@ export function openControlDb(dataDir: string): ControlDb {
         entry.targetUserId ?? null,
         entry.metadata ? JSON.stringify(entry.metadata) : null
       )
+    },
+    rateAllow(scope, key, windowMs, limit) {
+      return rateAllowTxn(scope, key, windowMs, limit) as boolean
+    },
+    pruneRateLimits(olderThanMs) {
+      const cutoff = Date.now() - olderThanMs
+      const info = pruneRateAll.run(cutoff)
+      return info.changes
     },
     listAudit(opts) {
       const limit = Math.min(Math.max(opts?.limit ?? 100, 1), 1000)

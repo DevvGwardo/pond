@@ -191,24 +191,14 @@ export const hostCommand = defineCommand({
       )
     }
 
-    // Sliding-window per-IP rate limiter (in-memory).
-    const anonRateState = new Map<string, number[]>()
-    function rateAllow(ip: string): boolean {
-      const now = Date.now()
-      const cutoff = now - 60 * 60 * 1000
-      const arr = anonRateState.get(ip) ?? []
-      const pruned = arr.filter((t) => t > cutoff)
-      if (pruned.length >= anonymousRateLimit) {
-        anonRateState.set(ip, pruned)
-        return false
-      }
-      pruned.push(now)
-      anonRateState.set(ip, pruned)
-      return true
-    }
-
     fs.mkdirSync(deploysDir, { recursive: true })
     const controlDb: ControlDb = openControlDb(dataDir)
+
+    const ANON_DEPLOY_RATE_SCOPE = "anon_deploy_per_ip"
+    const ANON_DEPLOY_RATE_WINDOW_MS = 60 * 60 * 1000
+    function rateAllow(ip: string): boolean {
+      return controlDb.rateAllow(ANON_DEPLOY_RATE_SCOPE, ip, ANON_DEPLOY_RATE_WINDOW_MS, anonymousRateLimit)
+    }
 
     let hostToken = process.env.POND_HOST_TOKEN ?? ""
     if (!hostToken) {
@@ -431,6 +421,11 @@ export const hostCommand = defineCommand({
         } catch (e) {
           console.error(`sweep delete ${id}:`, e)
         }
+      }
+      try {
+        controlDb.pruneRateLimits(ANON_DEPLOY_RATE_WINDOW_MS)
+      } catch (e) {
+        console.error("sweep prune rate_limits:", e)
       }
     }
     runSweep()

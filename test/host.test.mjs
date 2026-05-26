@@ -442,6 +442,81 @@ test("anonymous rate limit: 6th request from same IP in an hour returns 429", as
   }
 })
 
+test("anonymous rate limit survives host restart (persisted in control DB)", async () => {
+  // Start a host with rate=3, burn 3 attempts, bounce the host, confirm the
+  // 4th attempt from the same IP still returns 429 after restart.
+  const xData = mkdtempSync(path.join(tmpdir(), "pond-host-rate-persist-"))
+  const xPort = await pickFreePort()
+  const xUrl = `http://127.0.0.1:${xPort}`
+  const xToken = randomBytes(16).toString("hex")
+  function spawnHost() {
+    return spawn(
+      process.execPath,
+      [CLI_PATH, "host", "--port", String(xPort), "--host", "127.0.0.1", "--public-host", publicHost, "--data-dir", xData, "--anonymous-rate-per-hour", "3"],
+      {
+        env: { ...process.env, POND_HOST_TOKEN: xToken },
+        stdio: ["ignore", "pipe", "pipe"],
+        cwd: REPO_ROOT,
+      }
+    )
+  }
+  async function killHost(p) {
+    if (p && p.exitCode === null) {
+      const exited = new Promise((r) => p.once("exit", r))
+      p.kill("SIGINT")
+      const t = setTimeout(() => p.kill("SIGKILL"), 4000)
+      t.unref()
+      await exited
+      clearTimeout(t)
+    }
+  }
+  let p1 = spawnHost()
+  p1.stdout.on("data", () => {})
+  p1.stderr.on("data", () => {})
+  try {
+    await waitForHealth(xUrl)
+    const fs2 = await import("node:fs")
+    const bundleBase64 = fs2.readFileSync(bundlePath).toString("base64")
+    for (let i = 0; i < 3; i++) {
+      const res = await fetch(`${xUrl}/api/deploys`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ bundleBase64 }),
+      })
+      await res.text().catch(() => "")
+      assert.equal(res.status, 201, `attempt ${i + 1} should succeed`)
+    }
+    // 4th hits the in-process limiter
+    const limited = await fetch(`${xUrl}/api/deploys`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ bundleBase64 }),
+    })
+    await limited.text().catch(() => "")
+    assert.equal(limited.status, 429, "4th attempt should be rate limited pre-restart")
+
+    // Bounce the host
+    await killHost(p1)
+    p1 = spawnHost()
+    p1.stdout.on("data", () => {})
+    p1.stderr.on("data", () => {})
+    await waitForHealth(xUrl)
+
+    // After restart, the next attempt from the same IP must still be limited
+    // because the prior 3 attempts persisted to the control DB.
+    const afterRestart = await fetch(`${xUrl}/api/deploys`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ bundleBase64 }),
+    })
+    await afterRestart.text().catch(() => "")
+    assert.equal(afterRestart.status, 429, "rate limit must persist across host restart")
+  } finally {
+    await killHost(p1)
+    if (existsSync(xData)) rmSync(xData, { recursive: true, force: true })
+  }
+})
+
 test("sweeper terminates anonymous deploy after grace (via host bounce)", async () => {
   // Start a host, deploy anonymously with 1s grace, wait 2s, bounce host,
   // confirm the worker is NOT running after the bounce (sweep at startup
