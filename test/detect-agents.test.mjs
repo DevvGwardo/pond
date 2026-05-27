@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync
 import { tmpdir } from "node:os"
 import * as path from "node:path"
 
-import { detectHermes, detectClaude, detectCodex, detectAgents, detectHermesInstall } from "../src/detect-agents.js"
+import { detectHermes, detectClaude, detectCodex, detectAgents } from "../src/detect-agents.js"
 
 const execFileP = promisify(execFile)
 const REPO_ROOT = path.resolve(import.meta.dirname, "..")
@@ -16,27 +16,22 @@ function tmp(prefix) {
   return mkdtempSync(path.join(tmpdir(), prefix))
 }
 
-test("detectHermes returns null when nothing responds", async () => {
+test("detectHermes finds the `hermes` CLI on PATH", async () => {
   const result = await detectHermes({
-    fetch: async () => {
-      throw new Error("ECONNREFUSED")
-    },
+    which: (cmd) => (cmd === "hermes" ? "/usr/local/bin/hermes" : null),
   })
+  assert.equal(result?.name, "hermes")
+  assert.equal(result?.detail, "/usr/local/bin/hermes")
+})
+
+test("detectHermes returns null when `hermes` isn't on PATH", async () => {
+  const result = await detectHermes({ which: () => null })
   assert.equal(result, null)
 })
 
-test("detectHermes returns positive on 200 / 404 / 405", async () => {
-  for (const status of [200, 404, 405]) {
-    const result = await detectHermes({
-      fetch: async () => new Response("", { status }),
-    })
-    assert.equal(result?.name, "hermes", `status ${status}`)
-  }
-})
-
-test("detectHermes returns null on 401 (auth-gated → unusable)", async () => {
+test("detectHermes ignores `hermes-agent` (chat REPL, not a usable CLI)", async () => {
   const result = await detectHermes({
-    fetch: async () => new Response("", { status: 401 }),
+    which: (cmd) => (cmd === "hermes-agent" ? "/opt/homebrew/bin/hermes-agent" : null),
   })
   assert.equal(result, null)
 })
@@ -77,42 +72,6 @@ test("detectCodex finds ~/.codex/auth.json when present", async () => {
   }
 })
 
-test("detectHermesInstall surfaces a binary on PATH", () => {
-  const found = detectHermesInstall({
-    which: (cmd) => (cmd === "hermes-agent" ? "/opt/homebrew/bin/hermes-agent" : null),
-    homedir: () => "/tmp/nope",
-    existsSync: () => false,
-  })
-  assert.equal(found, "/opt/homebrew/bin/hermes-agent")
-})
-
-test("detectHermesInstall finds ~/.hermes-agent when no binary", () => {
-  const home = tmp("home-hermes-")
-  try {
-    mkdirSync(path.join(home, ".hermes-agent"), { recursive: true })
-    const found = detectHermesInstall({
-      which: () => null,
-      homedir: () => home,
-    })
-    assert.equal(found, path.join(home, ".hermes-agent"))
-  } finally {
-    rmSync(home, { recursive: true, force: true })
-  }
-})
-
-test("detectHermesInstall returns null when nothing's installed", () => {
-  const home = tmp("home-empty-")
-  try {
-    const found = detectHermesInstall({
-      which: () => null,
-      homedir: () => home,
-    })
-    assert.equal(found, null)
-  } finally {
-    rmSync(home, { recursive: true, force: true })
-  }
-})
-
 test("detectAgents returns hermes first when multiple present", async () => {
   const home = tmp("home-multi-")
   try {
@@ -120,9 +79,8 @@ test("detectAgents returns hermes first when multiple present", async () => {
     mkdirSync(path.join(home, ".codex"), { recursive: true })
     writeFileSync(path.join(home, ".codex", "auth.json"), "{}")
     const result = await detectAgents({
-      fetch: async () => new Response("", { status: 200 }),
       homedir: () => home,
-      which: () => null,
+      which: (cmd) => (cmd === "hermes" ? "/usr/local/bin/hermes" : null),
     })
     assert.deepEqual(
       result.map((r) => r.name),
@@ -206,15 +164,6 @@ test("pickTemplateForPrompt picks todo for tracker-style prompts (broadened keyw
     const t = pickTemplateForPrompt(p)
     assert.equal(t.name, "todo", `expected todo for "${p}", got ${t.name}`)
   }
-})
-
-test("promptYesNo returns the default when stdin isn't a TTY", async () => {
-  const { promptYesNo } = await import("../src/detect-agents.js")
-  // Tests run with piped stdin, so isTTY is undefined / falsy.
-  const yes = await promptYesNo("ignored", true)
-  const no = await promptYesNo("ignored", false)
-  assert.equal(yes, true)
-  assert.equal(no, false)
 })
 
 test("`pond new` writes .cursor/rules and .claude/CLAUDE.md", async () => {

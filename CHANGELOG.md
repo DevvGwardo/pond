@@ -5,6 +5,18 @@ Versioning: [Semver](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-05-27
+
+### Changed
+
+- **Hermes integration switched from HTTP probe to CLI spawn.** Previously `pond new --generate` probed `127.0.0.1:8642/v1/models` for an OpenAI-compatible endpoint and, on failure, tried to start one with `hermes-agent serve` — but `hermes-agent` is a chat REPL shim that silently ignores `serve` and runs a hard-coded demo query, so the start path always timed out after 15s. The real CLI is `hermes` with a `-z "<prompt>"` one-shot flag, mirroring `claude -p` and `codex exec`. `detectHermes` now does `which("hermes")`; `invokeHermes` spawns `hermes -z <prompt>` and streams stdout. No HTTP, no auth wiring, no gateway-start dance.
+- Removed `detectHermesInstall`, `startHermesGateway`, and `promptYesNo` from `src/detect-agents.ts` (the prompt block in `pond new --generate` that asked "Start it now and use it for --generate?" is gone — the whole flow it gated never worked).
+- Removed the `POND_HERMES_START_ARGS` env var — it overrode a verb on a binary that didn't accept any verb.
+
+### Added
+
+- **`docs/cli-reference.md`** — full CLI reference covering every `pond` subcommand (`new`, `dev`, `deploy`, `host`, `db`, `logs`, `inspect`, `fork`, `claim`, `login`, `user`, `token`, `domains`, `env`, `auth`) with when-to-use, key flags, and worked examples. Served at `https://pond.run/docs/cli-reference.md`, registered in `llms.txt`, and concatenated into `llms-full.txt`.
+
 ## [0.2.6] - 2026-05-27
 
 ### Fixed

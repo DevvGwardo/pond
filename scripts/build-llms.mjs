@@ -16,6 +16,7 @@ const sources = [
   { path: "llms.txt", title: "Pond Docs Index" },
   { path: "api-reference.md", title: "Server API Reference (pond/server)" },
   { path: "client-reference.md", title: "Client API Reference (pond/client)" },
+  { path: "cli-reference.md", title: "CLI Reference (pond <command>)" },
 ]
 
 const blocks = []

@@ -2,14 +2,7 @@ import { defineCommand } from "citty"
 import * as path from "node:path"
 import { copyTemplate } from "../template.js"
 import { TEMPLATES, getTemplate } from "../templates.js"
-import {
-  detectAgents,
-  detectHermesInstall,
-  invokeAgent,
-  promptYesNo,
-  startHermesGateway,
-  type DetectedAgent,
-} from "../detect-agents.js"
+import { detectAgents, invokeAgent, type DetectedAgent } from "../detect-agents.js"
 
 const SLUG_RE = /^[a-z][a-z0-9_-]*$/i
 const STOPWORDS = new Set([
@@ -127,30 +120,6 @@ export const newCommand = defineCommand({
       console.log(`  Detected agent: ${lead.name} — ${lead.detail}${tail}`)
     }
 
-    // Hermes special case: if the gateway is down but the binary or config dir
-    // is on disk, the user almost certainly *wants* hermes to lead. On a TTY
-    // under --generate, offer to start it and poll until it's reachable.
-    const hermesActive = detected.some((d) => d.name === "hermes")
-    const hermesInstall = !hermesActive ? detectHermesInstall() : null
-    if (hermesInstall) {
-      console.log(`  hermes-agent found at ${hermesInstall} but the gateway isn't running on 127.0.0.1:8642.`)
-      const shouldStart = wantsGenerate && (await promptYesNo("  Start it now and use it for --generate?", true))
-      if (shouldStart) {
-        console.log(`  Starting hermes-agent (override the verb with POND_HERMES_START_ARGS)...`)
-        const started = await startHermesGateway(hermesInstall, {
-          onLine: (s) => console.log(`    ${s}`),
-        })
-        if (started) {
-          console.log(`  Gateway is up — hermes will lead the cascade.`)
-          detected.unshift(started)
-        } else {
-          console.log(`  Gateway didn't come up — continuing with the other detected agents.`)
-        }
-      } else if (!wantsGenerate) {
-        console.log(`  Tip: start it (e.g. \`${path.basename(hermesInstall)} serve\`) to use the local model first.`)
-      }
-    }
-
     const requestedTemplate = templateArg ?? (promptText ? undefined : "todo")
     if (requestedTemplate && !getTemplate(requestedTemplate)) {
       console.error(`Unknown template: ${requestedTemplate}. Try --list-templates for the registry.`)
@@ -187,9 +156,9 @@ export const newCommand = defineCommand({
       }
       if (!detected.length) {
         console.error(
-          "\n  --generate: no local agent detected (looked for hermes@127.0.0.1:8642, ~/.claude, ~/.codex/auth.json).",
+          '\n  --generate: no local agent detected (looked for `hermes` on PATH, ~/.claude, ~/.codex/auth.json).',
         )
-        console.error(`  AGENTS.md remains in ${name}/ — re-run after starting one of those agents.`)
+        console.error(`  AGENTS.md remains in ${name}/ — install hermes / claude / codex and re-run.`)
         process.exit(1)
       }
       // Cascade through every detected agent. Detection passing for hermes

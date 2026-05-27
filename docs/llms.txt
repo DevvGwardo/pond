@@ -21,6 +21,7 @@ Hard constraints — non-negotiable:
 
 - [Pond Server API Reference](https://pond.run/docs/api-reference.md): the surface of `pond/server` — `capsule()`, `table()`, `query()`, `mutation()`, `endpoint()`, column types, the `ctx.db` data API, lifecycle.
 - [Pond Client API Reference](https://pond.run/docs/client-reference.md): the surface of `pond/client` — `useQuery`, `useMutation`, `useAuth`, `SignInWithGoogle`, `signOut`, plus the re-exported `render` and `h` from Preact.
+- [Pond CLI Reference](https://pond.run/docs/cli-reference.md): every `pond` subcommand (`new`, `dev`, `deploy`, `host`, `db`, `logs`, `inspect`, `fork`, `claim`, `login`, `user`, `token`, `domains`, `env`, `auth`) with flags, when-to-use, and worked examples.
 - [README](https://pond.run/docs/README.md): overall introduction, capsule example, CLI commands, in-browser IDE, hosted control plane, anonymous deploys, threat model.
 
 ## Examples
