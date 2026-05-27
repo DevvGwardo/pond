@@ -1416,6 +1416,63 @@ export const hostCommand = defineCommand({
       return c.json({ ok: true })
     })
 
+    app.post("/api/deploys/:deployId/build", async (c) => {
+      const deployId = c.req.param("deployId")
+      const r = authorizeFileOp(c, deployId)
+      if (r instanceof Response) return r
+      const dir = deployDirFor(deployId)
+      if (!fs.existsSync(path.join(dir, "source", "server", "index.ts"))) {
+        return c.json({ ok: false, errors: [{ text: "source/server/index.ts missing on host" }] }, 200)
+      }
+      const start = Date.now()
+      let result: { bundleBytes: number; bundleHash: string }
+      try {
+        result = await buildDeployFromSource(dir)
+      } catch (err: any) {
+        // esbuild throws a BuildFailure with .errors[] on compile error
+        const messages: { file?: string; line?: number; column?: number; text: string }[] = []
+        const raw = Array.isArray(err?.errors) ? err.errors : null
+        if (raw) {
+          for (const m of raw) {
+            messages.push({
+              file: m?.location?.file,
+              line: m?.location?.line,
+              column: m?.location?.column,
+              text: String(m?.text ?? "unknown error"),
+            })
+          }
+        } else {
+          messages.push({ text: String(err?.message ?? err) })
+        }
+        return c.json({ ok: false, errors: messages, durationMs: Date.now() - start }, 200)
+      }
+      const quota = controlDb.getQuota(deployId)
+      if (result.bundleBytes > quota.maxBundleBytes) {
+        return c.json(
+          { ok: false, errors: [{ text: `Bundle exceeds per-deploy quota (${quota.maxBundleBytes} bytes)` }] },
+          200,
+        )
+      }
+      r.record.updatedAt = new Date().toISOString()
+      writeRecord(r.record)
+      try {
+        await forkDeploy(r.record)
+      } catch (err: any) {
+        return c.json({ ok: false, errors: [{ text: `Boot failed: ${err?.message ?? err}` }] }, 200)
+      }
+      const buildActor = authUser(c)
+      audit(buildActor ? actorFor(buildActor, false) : "__claim_token__", "deploy.rebuild", {
+        targetDeployId: deployId,
+        metadata: { bundleBytes: result.bundleBytes, durationMs: Date.now() - start },
+      })
+      return c.json({
+        ok: true,
+        bundleBytes: result.bundleBytes,
+        bundleHash: result.bundleHash,
+        durationMs: Date.now() - start,
+      })
+    })
+
     app.post("/api/deploys/:deployId/files/move", async (c) => {
       const deployId = c.req.param("deployId")
       const r = authorizeFileOp(c, deployId)

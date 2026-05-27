@@ -263,3 +263,63 @@ test("file APIs reject missing auth with 401", async () => {
   const res = await fetch(`${apiUrl}/api/deploys/${ownedDeployId}/files`)
   assert.equal(res.status, 401)
 })
+
+// ---- /build ----
+
+test("POST /build rebuilds successfully after a valid edit", async () => {
+  const newSrc = `import { capsule, query, string, table } from "pond/server"
+export default capsule({
+  schema: { items: table({ name: string() }) },
+  queries: {
+    items: query((ctx) => ctx.db.items.all()),
+    count: query((ctx) => ctx.db.items.all().length),
+  },
+  mutations: {},
+})
+`
+  const put = await fetch(`${apiUrl}/api/deploys/${ownedDeployId}/files/server/index.ts`, {
+    method: "PUT",
+    headers: { authorization: `Bearer ${ownerToken}`, "content-type": "text/plain" },
+    body: newSrc,
+  })
+  assert.equal(put.status, 200)
+  const build = await fetch(`${apiUrl}/api/deploys/${ownedDeployId}/build`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${ownerToken}` },
+  })
+  assert.equal(build.status, 200)
+  const body = await build.json()
+  assert.equal(body.ok, true, `expected ok:true, got ${JSON.stringify(body)}`)
+  assert.ok(typeof body.bundleHash === "string" && body.bundleHash.length === 64)
+  assert.ok(typeof body.bundleBytes === "number" && body.bundleBytes > 0)
+  assert.ok(typeof body.durationMs === "number")
+})
+
+test("POST /build returns ok:false with errors on syntax error", async () => {
+  const broken = `import { capsule } from "pond/server"
+this is not valid typescript &&&
+export default capsule({ schema: {}, queries: {}, mutations: {} })
+`
+  await fetch(`${apiUrl}/api/deploys/${ownedDeployId}/files/server/index.ts`, {
+    method: "PUT",
+    headers: { authorization: `Bearer ${ownerToken}`, "content-type": "text/plain" },
+    body: broken,
+  })
+  const build = await fetch(`${apiUrl}/api/deploys/${ownedDeployId}/build`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${ownerToken}` },
+  })
+  assert.equal(build.status, 200)
+  const body = await build.json()
+  assert.equal(body.ok, false)
+  assert.ok(Array.isArray(body.errors) && body.errors.length > 0, `expected errors[]: ${JSON.stringify(body)}`)
+  assert.ok(typeof body.errors[0].text === "string")
+})
+
+test("POST /build rejects anonymous deploys with 403", async () => {
+  const res = await fetch(`${apiUrl}/api/deploys/${anonDeployId}/build`, {
+    method: "POST",
+    headers: { "x-pond-claim-token": anonClaimToken },
+  })
+  assert.equal(res.status, 403)
+})
