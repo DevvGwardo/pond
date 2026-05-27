@@ -1336,74 +1336,161 @@ export const hostCommand = defineCommand({
     }
 
     function landingHtml(): string {
-      const baseUrl = publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http://${publicHost}:${port}`
       const installCmd = "npm install -g pondsh"
-      const deployCmd = `pond deploy --api ${baseUrl}`
       return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Pond — agent-native full-stack TypeScript capsules</title>
+<title>Pond</title>
+<meta name="description" content="Agent-native full-stack TypeScript capsules." />
 <style>
-  :root { color-scheme: dark; }
+  :root {
+    --bg: #000;
+    --text: #f5f5f5;
+    --muted: #aaa;
+    --line: #242424;
+    --code-bg: #080808;
+    --code: #ededed;
+    --link: #8ab4ff;
+    --sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    color-scheme: dark;
+  }
   * { box-sizing: border-box; }
-  body {
+  html { min-height: 100%; background: var(--bg); color: var(--text); font-family: var(--sans); }
+  body { min-height: 100vh; margin: 0; background: var(--bg); }
+  main {
+    display: flex;
+    min-height: 100vh;
+    width: min(720px, calc(100vw - 40px));
+    margin: 0 auto;
+    padding: 88px 0;
+    align-items: center;
+  }
+  .content { width: 100%; }
+  h1 {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 14px;
+    margin: 0 0 18px;
+    color: var(--text);
+    font-size: 72px;
+    line-height: 0.94;
+    letter-spacing: 0;
+  }
+  .alpha-mark {
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 0.34em;
+    font-weight: 500;
+    line-height: 1;
+  }
+  p {
+    max-width: 620px;
     margin: 0;
-    background: #09090b;
-    color: #e4e4e7;
-    font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    line-height: 1.55;
+    color: var(--muted);
+    font-size: 21px;
+    line-height: 1.45;
   }
-  main { max-width: 720px; margin: 0 auto; padding: 64px 24px 96px; }
-  h1 { font-size: 44px; margin: 0 0 12px; letter-spacing: -0.02em; }
-  .lede { color: #a1a1aa; font-size: 18px; margin: 0 0 36px; }
-  h2 { font-size: 18px; margin: 40px 0 12px; color: #d4d4d8; font-weight: 600; }
-  pre {
-    background: #18181b;
-    border: 1px solid #27272a;
-    border-radius: 10px;
-    padding: 14px 16px;
-    overflow-x: auto;
-    margin: 0 0 12px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    font-size: 13.5px;
+  .command-button {
+    display: flex;
+    width: 100%;
+    min-height: 64px;
+    margin: 40px 0 28px;
+    padding: 18px 20px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+    border: 1px solid var(--line);
+    background: var(--code-bg);
+    color: var(--code);
+    font-family: var(--mono);
+    font-size: 16px;
+    line-height: 1.5;
+    text-align: left;
+    cursor: pointer;
   }
-  code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
-  a { color: #a5f3fc; text-decoration: none; }
-  a:hover { text-decoration: underline; }
-  footer { color: #71717a; font-size: 13px; margin-top: 64px; border-top: 1px solid #27272a; padding-top: 20px; }
+  .command-button:hover, .command-button:focus-visible { border-color: #4a4a4a; }
+  .command-button:focus-visible { outline: 2px solid var(--link); outline-offset: 3px; }
+  code { font-family: inherit; }
+  .copy-state {
+    flex: 0 0 auto;
+    color: var(--muted);
+    font-family: var(--sans);
+    font-size: 14px;
+  }
+  a {
+    color: var(--link);
+    font-size: 17px;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 4px;
+  }
+  .links { display: flex; flex-wrap: wrap; gap: 22px; }
+  .fine {
+    margin-top: 28px;
+    color: #5a5a5a;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .fine a { color: #7a7a7a; font-size: 13px; }
+  @media (max-width: 640px) {
+    main { width: min(100vw - 28px, 720px); padding: 48px 0; align-items: flex-start; }
+    p { font-size: 18px; }
+    h1 { font-size: 44px; }
+    .command-button { margin-top: 34px; font-size: 15px; }
+  }
 </style>
 </head>
 <body>
 <main>
-  <h1>pond</h1>
-  <p class="lede">Agent-native full-stack TypeScript capsules. Scaffold a small app, define schema + handlers in one file, deploy anonymously.</p>
-
-  <h2>1. Install the CLI</h2>
-  <pre><code>${installCmd}</code></pre>
-
-  <h2>2. Scaffold a capsule</h2>
-  <pre><code>pond new my-capsule
-cd my-capsule</code></pre>
-
-  <h2>3. Deploy anonymously</h2>
-  <pre><code>${deployCmd}</code></pre>
-  <p>You'll get a URL and a one-time claim token. The deploy lives for 7 days unless you claim it to an account.</p>
-
-  <h2>4. Claim to keep it</h2>
-  <pre><code>pond claim --signup &lt;username&gt;</code></pre>
-
-  <p style="margin-top:36px;">
-    <a href="https://github.com/DevvGwardo/pond">Source on GitHub</a> ·
-    <a href="/abuse">Abuse policy</a> ·
-    <a href="/.well-known/security.txt">Security</a>
-  </p>
-
-  <footer>
-    <p>Anonymous deploys are sandboxed and rate-limited. The host operator may terminate any deploy at any time without notice. See the <a href="/abuse">abuse policy</a> for the full terms.</p>
-  </footer>
+  <div class="content">
+    <h1>pond <span class="alpha-mark">[alpha]</span></h1>
+    <p>Agent-native full-stack TypeScript capsules. Deploy anonymously.</p>
+    <button class="command-button" type="button" data-command="${installCmd}" aria-label="Copy ${installCmd}">
+      <code>${installCmd}</code>
+      <span class="copy-state" aria-live="polite">Copy</span>
+    </button>
+    <div class="links">
+      <a href="https://github.com/DevvGwardo/pond">Docs</a>
+    </div>
+    <p class="fine">
+      Anonymous deploys are sandboxed and may be terminated at any time. <a href="/abuse">Abuse policy</a> · <a href="/.well-known/security.txt">Security</a>
+    </p>
+  </div>
 </main>
+<script>
+  const commandButton = document.querySelector(".command-button");
+  const copyState = document.querySelector(".copy-state");
+  async function copyText(value) {
+    const textarea = document.createElement("textarea");
+    textarea.value = value;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.append(textarea);
+    textarea.select();
+    const copied = document.execCommand("copy");
+    textarea.remove();
+    if (copied) return;
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(value);
+      return;
+    }
+    throw new Error("Unable to copy command.");
+  }
+  commandButton.addEventListener("click", async () => {
+    const command = commandButton.dataset.command;
+    try {
+      await copyText(command);
+      copyState.textContent = "Copied";
+    } catch {
+      copyState.textContent = "Copy failed";
+    }
+    window.setTimeout(() => { copyState.textContent = "Copy"; }, 1400);
+  });
+</script>
 </body>
 </html>`
     }
