@@ -5,6 +5,37 @@ Versioning: [Semver](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.16] - 2026-05-27
+
+### Added
+
+- **Parameterized queries — `query()` and `useQuery()` now accept arguments.** Previously, `QueryHandler` was `(ctx) => T` and `useQuery<T>(name)` took no args, so the only way to do a parameterized read from the client was to misuse a `mutation` (semantically a write, sends POST) or drop down to a custom `endpoint()` + raw `fetch` from the client — which directly contradicts the docs' "No `fetch` from the client to your own server — use `useQuery` / `useMutation`" rule. There was no in-model way to express "get post by id" or "search items by keyword." That's fixed:
+  - `src/server/index.ts` — `QueryHandler<TArgs, TResult>` and `query<TArgs, TResult>(handler)` now mirror `mutation()` exactly. Default `TArgs = any[]` so existing 0-arg capsules compile unchanged.
+  - `src/runtime.ts` — `GET /api/query/:name` stays mounted for the 0-arg case (cacheable, visible as a plain GET in the network panel). A new `POST /api/query/:name` reads `{ args: any[] }` from the JSON body and spreads them into the handler. Both routes share the same `query:<name>` metric span and the same rate-limit key. Missing / non-array `args` is treated as zero args (no crash).
+  - `client/index.ts` — `useQuery<T, TArgs>(name, ...args)`. No args → GET (existing behavior). Args present → POST with `{ args }`. Args are part of the cache key (`JSON.stringify(args)`) and the `useEffect` deps array, so changing them triggers a refetch automatically. Mutation-triggered `refetchAllQueries()` still works — each subscriber holds its own args closure and refetches with its own args.
+  - Docs: `docs/api-reference.md` and `docs/client-reference.md` document the new signatures with `postById` and `search` examples; `docs/llms-full.txt` regenerates from these during `npm run build`. `src/template.ts` agent-template guidance now teaches the parameterized form alongside the existing examples.
+  - One new regression test in `test/runtime-features.test.mjs` (`parameterized query: POST /api/query/:name spreads args; GET still works for 0-arg`) covers GET-0-arg, POST-with-1-arg, POST-with-multi-arg (positional spread), and the empty-body fallback. 132/132 tests pass.
+
+  **Wire change is additive and backward-compatible.** Existing capsules that only define 0-arg queries keep working unchanged — the GET route still resolves them the same way. New parameterized queries hit the new POST route. Mental model stays the same as before: `query` = read, `mutation` = write, `endpoint` = external HTTP / webhooks.
+
+  Usage:
+
+  ```ts
+  // server/index.ts
+  queries: {
+    postById: query((ctx, id: string) => ctx.db.posts.get(id)),
+    search: query((ctx, q: string, limit: number) =>
+      ctx.db.posts.where("title", q).limit(limit).all()
+    ),
+  }
+  ```
+
+  ```tsx
+  // client/index.tsx
+  const { data: post } = useQuery<Post, [string]>("postById", id)
+  const { data: hits } = useQuery<Post[], [string, number]>("search", keyword, 20)
+  ```
+
 ## [0.3.15] - 2026-05-27
 
 ### Fixed
