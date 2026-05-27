@@ -209,7 +209,21 @@ export const newCommand = defineCommand({
       // failure on the first candidate falls through to the next instead of
       // wasting the scaffold.
       const projDir = path.resolve(process.cwd(), name)
-      const generatePrompt = `Read AGENTS.md in the current directory and follow the build instructions. Edit server/index.ts and client/index.tsx in place.`
+      // Headless rules restated here too: the AGENTS.md file already forbids
+      // running the dev server / curling localhost / verification loops, but
+      // agents drift, so we repeat the constraint in the CLI prompt itself.
+      // Without this, claude routinely spends 5–10 minutes background-launching
+      // `npm run dev` and looping on curl after writing the actual code.
+      const generatePrompt = [
+        "Read AGENTS.md in the current directory and follow the build instructions.",
+        "Edit server/index.ts and client/index.tsx in place.",
+        "",
+        "HARD RULES (do not violate):",
+        "- Do NOT run `npm install`. Do NOT run `npm run dev` / `pond dev` / any dev server, foreground or background.",
+        "- Do NOT curl, fetch, or otherwise hit localhost:3000 to verify — the dev server is NOT running.",
+        "- Do NOT loop trying to test the app. The human will run `npm install && npm run dev` after you exit.",
+        "- Stop as soon as both files contain a complete implementation. You are running headlessly under `-p`; there is no browser and no human to ask.",
+      ].join("\n")
       const errors: Array<{ name: string; error: string }> = []
       let success = false
       const isTty = process.stdout.isTTY === true

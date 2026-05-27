@@ -103,10 +103,28 @@ export function App({ itemId }: { itemId: string }) {
 `
 
 function agentsMdContent(prompt: string, templateName: string): string {
-  const starter =
-    templateName === "stub"
-      ? `\`server/index.ts\` and \`client/index.tsx\` are empty stubs. Replace them entirely with an implementation that matches the description above.`
-      : `You're starting from the **${templateName}** template — read \`server/index.ts\` and \`client/index.tsx\` to see what's already there, then edit them in place to match the description.`
+  const isStub = templateName === "stub"
+  const starter = isStub
+    ? `\`server/index.ts\` and \`client/index.tsx\` are empty stubs. Replace them entirely with an implementation that matches the description above.`
+    : `You're starting from the **${templateName}** template — read \`server/index.ts\` and \`client/index.tsx\` to see what's already there, then edit them in place to match the description.`
+
+  // Stub mode = headless `pond new --generate`. The agent runs in -p mode,
+  // can't open a browser, and any background `npm run dev` it spawns leaks
+  // after exit. So in this mode we *forbid* verification and tell it to stop
+  // as soon as the two files compile in its head.  Without this constraint
+  // claude burns 5–10 minutes looping on `curl localhost:3000` after writing
+  // ~1KB of server code.
+  const closing = isStub
+    ? `Your job: write a complete implementation in \`server/index.ts\` and \`client/index.tsx\`. That is the entire job.
+
+**HARD RULES — do not violate:**
+
+- Do NOT run \`npm install\`.
+- Do NOT run \`npm run dev\`, \`pond dev\`, or start a server in any form (foreground OR background).
+- Do NOT \`curl\` / fetch / hit \`localhost:3000\` to "verify" — the dev server is not running and will not be running.
+- Do NOT loop trying to test the app. After both files are written and look correct on a read-through, **stop**. The human will run \`npm install && npm run dev\` themselves.
+- Exit as soon as both files contain a working implementation. You are running headlessly via \`claude -p\`; there is no human to ask, no browser to open, and no useful output beyond the two files.`
+    : `Your job: implement the description. Add tables, queries, mutations, and UI to satisfy what the user asked for. When you're done, run \`npm install && npm run dev\` and verify the app works in a browser.`
 
   return `# Build instructions
 
@@ -116,7 +134,7 @@ The user ran \`pond new\` with this description:
 
 ${starter}
 
-Your job: implement the description. Add tables, queries, mutations, and UI to satisfy what the user asked for. When you're done, run \`npm install && npm run dev\` and verify the app works in a browser.
+${closing}
 
 ### Canonical references
 

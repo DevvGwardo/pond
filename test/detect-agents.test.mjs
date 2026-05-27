@@ -272,6 +272,38 @@ test("copyTemplate({ useStub: true }) writes blank-canvas stubs, not a template"
     assert.equal(server, STUB_SERVER_TS, "server file should be the stub verbatim")
     const agents = readFileSync(path.join(parent, "stub-cap", "AGENTS.md"), "utf-8")
     assert.match(agents, /empty stubs/, "AGENTS.md should tell the agent it's working from stubs")
+    // Stub mode is the headless --generate path: forbid dev-server / verification
+    // loops so claude doesn't burn 5–10 minutes curling localhost after writing code.
+    assert.match(agents, /Do NOT run `npm install`/, "stub AGENTS.md must forbid npm install")
+    assert.match(agents, /Do NOT run `npm run dev`/, "stub AGENTS.md must forbid dev server")
+    assert.match(agents, /Do NOT.*localhost:3000/i, "stub AGENTS.md must forbid localhost verification")
+    assert.doesNotMatch(
+      agents,
+      /verify the app works in a browser/,
+      "stub AGENTS.md must NOT tell the agent to browser-verify (headless path)",
+    )
+  } finally {
+    process.chdir(prev)
+    rmSync(parent, { recursive: true, force: true })
+  }
+})
+
+test("AGENTS.md for human-driven (non-stub) flow still nudges to run dev and verify", async () => {
+  const { copyTemplate } = await import("../src/template.js")
+  const parent = tmp("pond-human-agents-")
+  const prev = process.cwd()
+  try {
+    process.chdir(parent)
+    await copyTemplate({
+      name: "human-cap",
+      templateName: "todo",
+      initGit: false,
+      prompt: "a tracker for my hobbies",
+      useStub: false,
+    })
+    const agents = readFileSync(path.join(parent, "human-cap", "AGENTS.md"), "utf-8")
+    assert.match(agents, /verify the app works in a browser/, "human AGENTS.md should keep the verify nudge")
+    assert.doesNotMatch(agents, /Do NOT run `npm install`/, "human AGENTS.md should NOT carry stub-mode prohibitions")
   } finally {
     process.chdir(prev)
     rmSync(parent, { recursive: true, force: true })
