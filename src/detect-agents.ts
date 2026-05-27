@@ -129,10 +129,20 @@ export async function detectAgents(deps: DetectionDeps = {}): Promise<DetectedAg
   return results
 }
 
+// Structured progress events parsed from an agent's JSON output. Used by
+// `pond new --generate` to render a live activity panel instead of a generic
+// "thinking…" spinner. Agents that don't support JSON streaming simply won't
+// emit these; the caller falls back to onChunk for raw text.
+export type AgentEvent =
+  | { kind: "tool"; tool: string; target?: string }
+  | { kind: "text"; text: string }
+  | { kind: "info"; message: string }
+
 export interface InvokeOptions {
   cwd: string
   prompt: string
   onChunk?: (text: string) => void
+  onEvent?: (event: AgentEvent) => void
 }
 
 export async function invokeAgent(agent: DetectedAgent, opts: InvokeOptions): Promise<{ ok: boolean; error?: string }> {
@@ -140,6 +150,34 @@ export async function invokeAgent(agent: DetectedAgent, opts: InvokeOptions): Pr
   if (agent.name === "codex") return invokeCodex(agent, opts)
   if (agent.name === "hermes") return invokeHermes(agent, opts)
   return { ok: false, error: `Unknown agent: ${agent.name}` }
+}
+
+// Parse one stream-json event from `claude -p --output-format stream-json`
+// into our generic AgentEvent. Exported for unit tests. Returns null for
+// events we don't surface (partial deltas, tool results, etc.).
+export function parseClaudeEvent(evt: unknown): AgentEvent | null {
+  if (!evt || typeof evt !== "object") return null
+  const e = evt as Record<string, unknown>
+  if (e.type === "system" && e.subtype === "init") {
+    return { kind: "info", message: "session started" }
+  }
+  if (e.type === "assistant" && e.message && typeof e.message === "object") {
+    const content = (e.message as { content?: unknown }).content
+    if (!Array.isArray(content)) return null
+    for (const c of content as Array<Record<string, unknown>>) {
+      if (c.type === "tool_use" && typeof c.name === "string") {
+        const input = (c.input ?? {}) as Record<string, unknown>
+        const targetCandidate =
+          input.file_path ?? input.path ?? input.pattern ?? input.command ?? input.description ?? input.url
+        const target = typeof targetCandidate === "string" ? targetCandidate : undefined
+        return { kind: "tool", tool: c.name, target }
+      }
+      if (c.type === "text" && typeof c.text === "string" && c.text.trim()) {
+        return { kind: "text", text: c.text.trim().slice(0, 240) }
+      }
+    }
+  }
+  return null
 }
 
 function streamChild(
@@ -169,11 +207,57 @@ function streamChild(
 
 async function invokeClaude(agent: DetectedAgent, opts: InvokeOptions): Promise<{ ok: boolean; error?: string }> {
   const cli = agent.detail.endsWith("claude") || agent.detail.includes("/bin/") ? agent.detail : "claude"
-  // `claude -p` runs a one-shot, non-interactive prompt that streams to stdout.
-  // `--permission-mode bypassPermissions` skips the interactive Edit/Write/Bash
-  // approval gate — required for headless use. The user explicitly invoked
-  // `--generate` knowing it will modify the scaffold, so this is a fair trade.
-  return streamChild(cli, ["-p", "--permission-mode", "bypassPermissions", opts.prompt], opts.cwd, opts.onChunk)
+  // `claude -p` runs a one-shot, non-interactive prompt.
+  // `--permission-mode bypassPermissions` skips the interactive approval gate.
+  // When the caller subscribes to onEvent, switch to stream-json so we can
+  // surface tool calls (Edit, Bash, Read…) live instead of a generic spinner.
+  // Without onEvent we fall back to the original raw-text mode.
+  if (!opts.onEvent) {
+    return streamChild(cli, ["-p", "--permission-mode", "bypassPermissions", opts.prompt], opts.cwd, opts.onChunk)
+  }
+  return streamClaudeJsonl(
+    cli,
+    ["-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions", opts.prompt],
+    opts.cwd,
+    opts.onEvent,
+    opts.onChunk,
+  )
+}
+
+function streamClaudeJsonl(
+  cmd: string,
+  args: string[],
+  cwd: string,
+  onEvent: (e: AgentEvent) => void,
+  onChunk?: (s: string) => void,
+): Promise<{ ok: boolean; error?: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(cmd, args, { cwd, stdio: ["ignore", "pipe", "pipe"] })
+    let buf = ""
+    child.stdout.on("data", (d) => {
+      buf += d.toString()
+      let nl: number
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl)
+        buf = buf.slice(nl + 1)
+        if (!line.trim()) continue
+        try {
+          const evt = JSON.parse(line)
+          const parsed = parseClaudeEvent(evt)
+          if (parsed) onEvent(parsed)
+        } catch {
+          // Non-JSON line (e.g. an early CLI warning) — surface via onChunk so
+          // the caller can decide whether to log it.
+          if (onChunk) onChunk(line + "\n")
+        }
+      }
+    })
+    child.stderr.on("data", (d) => onChunk?.(d.toString()))
+    child.on("error", (err) => resolve({ ok: false, error: err.message }))
+    child.on("close", (code) =>
+      resolve(code === 0 ? { ok: true } : { ok: false, error: `${path.basename(cmd)} exited with code ${code}` }),
+    )
+  })
 }
 
 async function invokeCodex(agent: DetectedAgent, opts: InvokeOptions): Promise<{ ok: boolean; error?: string }> {

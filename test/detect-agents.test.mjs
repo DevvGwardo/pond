@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync
 import { tmpdir } from "node:os"
 import * as path from "node:path"
 
-import { detectHermes, detectClaude, detectCodex, detectAgents } from "../src/detect-agents.js"
+import { detectHermes, detectClaude, detectCodex, detectAgents, parseClaudeEvent } from "../src/detect-agents.js"
 
 const execFileP = promisify(execFile)
 const REPO_ROOT = path.resolve(import.meta.dirname, "..")
@@ -162,6 +162,53 @@ test("detectAgents returns hermes first when multiple present", async () => {
   } finally {
     rmSync(home, { recursive: true, force: true })
   }
+})
+
+test("parseClaudeEvent surfaces Edit tool with file_path target", () => {
+  const evt = {
+    type: "assistant",
+    message: {
+      content: [
+        { type: "tool_use", name: "Edit", input: { file_path: "server/index.ts", old_string: "x", new_string: "y" } },
+      ],
+    },
+  }
+  const out = parseClaudeEvent(evt)
+  assert.deepEqual(out, { kind: "tool", tool: "Edit", target: "server/index.ts" })
+})
+
+test("parseClaudeEvent surfaces Bash tool with command target", () => {
+  const evt = {
+    type: "assistant",
+    message: {
+      content: [{ type: "tool_use", name: "Bash", input: { command: "npm install", description: "Install deps" } }],
+    },
+  }
+  const out = parseClaudeEvent(evt)
+  assert.deepEqual(out, { kind: "tool", tool: "Bash", target: "npm install" })
+})
+
+test("parseClaudeEvent surfaces assistant text", () => {
+  const evt = {
+    type: "assistant",
+    message: { content: [{ type: "text", text: "I'll start by reading AGENTS.md" }] },
+  }
+  const out = parseClaudeEvent(evt)
+  assert.equal(out?.kind, "text")
+  assert.match(out?.text ?? "", /AGENTS\.md/)
+})
+
+test("parseClaudeEvent emits info on system init", () => {
+  const evt = { type: "system", subtype: "init", session_id: "abc" }
+  const out = parseClaudeEvent(evt)
+  assert.equal(out?.kind, "info")
+})
+
+test("parseClaudeEvent returns null for tool_result / unknown events", () => {
+  assert.equal(parseClaudeEvent({ type: "user", message: { content: [{ type: "tool_result", content: "ok" }] } }), null)
+  assert.equal(parseClaudeEvent({ type: "result", subtype: "success" }), null)
+  assert.equal(parseClaudeEvent(null), null)
+  assert.equal(parseClaudeEvent("garbage"), null)
 })
 
 test("`pond new --list-templates` lists 5+ templates", async () => {

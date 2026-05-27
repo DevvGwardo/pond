@@ -1,8 +1,51 @@
 import { defineCommand } from "citty"
+import * as fs from "node:fs"
 import * as path from "node:path"
 import { copyTemplate } from "../template.js"
 import { TEMPLATES, getTemplate } from "../templates.js"
-import { detectAgents, invokeAgent, type DetectedAgent } from "../detect-agents.js"
+import { detectAgents, invokeAgent, type AgentEvent, type DetectedAgent } from "../detect-agents.js"
+
+function describeTool(tool: string, target?: string): string {
+  // Map Claude's tool names to human-readable verbs. Default to "Running <tool>"
+  // for tools we don't have a custom phrasing for so unknown tools still render.
+  const t = target ? target.replace(/\n/g, " ").slice(0, 80) : undefined
+  switch (tool) {
+    case "Read":
+      return t ? `Reading ${t}` : "Reading file"
+    case "Edit":
+    case "MultiEdit":
+      return t ? `Editing ${t}` : "Editing file"
+    case "Write":
+      return t ? `Writing ${t}` : "Writing file"
+    case "Bash":
+      return t ? `Running: ${t}` : "Running command"
+    case "Glob":
+      return t ? `Searching: ${t}` : "Searching files"
+    case "Grep":
+      return t ? `Searching for "${t}"` : "Searching"
+    case "WebFetch":
+    case "WebSearch":
+      return t ? `Fetching ${t}` : "Fetching web"
+    case "TodoWrite":
+      return "Updating plan"
+    default:
+      return t ? `${tool}: ${t}` : tool
+  }
+}
+
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function fileSize(p: string): number | null {
+  try {
+    return fs.statSync(p).size
+  } catch {
+    return null
+  }
+}
 
 const SLUG_RE = /^[a-z][a-z0-9_-]*$/i
 const STOPWORDS = new Set([
@@ -176,49 +219,102 @@ export const newCommand = defineCommand({
         return m > 0 ? `${m}m ${s % 60}s` : `${s}s`
       }
       const spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+      const serverPath = path.join(projDir, "server", "index.ts")
+      const clientPath = path.join(projDir, "client", "index.tsx")
+      const baselineServer = fileSize(serverPath) ?? 0
+      const baselineClient = fileSize(clientPath) ?? 0
       for (const candidate of detected) {
         const startedAt = Date.now()
-        let firstByteAt: number | null = null
-        let totalBytes = 0
+        let toolCount = 0
+        let lastActivity = `${candidate.name} starting up…`
         let frameIdx = 0
+        let drawnLines = 0
         let timer: NodeJS.Timeout | null = null
+        const supportsLiveEvents = candidate.name === "claude"
+
+        const draw = () => {
+          if (!isTty) return
+          if (drawnLines > 0) process.stdout.write(`\x1b[${drawnLines}F\x1b[J`)
+          const spin = spinnerFrames[frameIdx % spinnerFrames.length]
+          const sv = fileSize(serverPath)
+          const cl = fileSize(clientPath)
+          const svDelta = sv === null ? "missing" : sv === baselineServer ? "unchanged" : fmtBytes(sv)
+          const clDelta = cl === null ? "missing" : cl === baselineClient ? "unchanged" : fmtBytes(cl)
+          const lines = [
+            `  ${spin} ${candidate.name} is building… ${fmtElapsed(Date.now() - startedAt)}` +
+              (toolCount > 0 ? `  (${toolCount} action${toolCount === 1 ? "" : "s"})` : ""),
+            `    ▸ ${lastActivity}`,
+            `    server/index.ts → ${svDelta}    client/index.tsx → ${clDelta}`,
+          ]
+          process.stdout.write(lines.join("\n") + "\n")
+          drawnLines = lines.length
+        }
+
+        const eraseLive = () => {
+          if (isTty && drawnLines > 0) {
+            process.stdout.write(`\x1b[${drawnLines}F\x1b[J`)
+            drawnLines = 0
+          }
+        }
 
         if (isTty) {
-          process.stdout.write(`\n  ${spinnerFrames[0]} ${candidate.name} is thinking… 0s`)
+          draw()
           timer = setInterval(() => {
-            if (firstByteAt !== null) return
-            frameIdx = (frameIdx + 1) % spinnerFrames.length
-            process.stdout.write(
-              `\r\x1b[2K  ${spinnerFrames[frameIdx]} ${candidate.name} is thinking… ${fmtElapsed(Date.now() - startedAt)}`,
-            )
-          }, 120)
+            frameIdx++
+            draw()
+          }, 200)
         } else {
-          // Non-TTY (CI, pipe, log) — single up-front line, no animation.
           console.log(`\n  Building with ${candidate.name} (this can take 1–3 minutes)…`)
         }
 
-        const onChunk = (s: string) => {
-          if (firstByteAt === null) {
-            firstByteAt = Date.now()
-            if (isTty) {
-              process.stdout.write("\r\x1b[2K") // clear spinner line
-              if (timer) {
-                clearInterval(timer)
-                timer = null
-              }
-            }
+        const onEvent = (e: AgentEvent) => {
+          if (e.kind === "tool") {
+            toolCount++
+            lastActivity = describeTool(e.tool, e.target)
+            if (!isTty) console.log(`  [${fmtElapsed(Date.now() - startedAt)}] ${lastActivity}`)
+          } else if (e.kind === "text") {
+            lastActivity = e.text.split("\n")[0].slice(0, 100)
+          } else if (e.kind === "info") {
+            lastActivity = e.message
           }
-          totalBytes += Buffer.byteLength(s, "utf-8")
-          process.stdout.write(s)
+          if (isTty) draw()
         }
 
-        const result = await invokeAgent(candidate, { cwd: projDir, prompt: generatePrompt, onChunk })
+        let totalBytes = 0
+        // When the agent doesn't stream structured events (codex/hermes today),
+        // fall back to raw chunks so the user still sees something happening.
+        const onChunk = (s: string) => {
+          totalBytes += Buffer.byteLength(s, "utf-8")
+          if (supportsLiveEvents) return // claude's live panel owns the display
+          if (isTty) {
+            eraseLive()
+            process.stdout.write(s)
+          } else {
+            process.stdout.write(s)
+          }
+        }
+
+        const result = await invokeAgent(candidate, {
+          cwd: projDir,
+          prompt: generatePrompt,
+          onChunk,
+          onEvent: supportsLiveEvents ? onEvent : undefined,
+        })
         if (timer) clearInterval(timer)
-        if (isTty && firstByteAt === null) process.stdout.write("\r\x1b[2K")
+        eraseLive()
 
         if (result.ok) {
-          const kb = totalBytes > 0 ? ` — ${(totalBytes / 1024).toFixed(1)} KB streamed` : ""
-          console.log(`\n  ${candidate.name} finished in ${fmtElapsed(Date.now() - startedAt)}${kb}`)
+          const summary = supportsLiveEvents
+            ? ` — ${toolCount} action${toolCount === 1 ? "" : "s"}`
+            : totalBytes > 0
+              ? ` — ${(totalBytes / 1024).toFixed(1)} KB streamed`
+              : ""
+          const sv = fileSize(serverPath)
+          const cl = fileSize(clientPath)
+          console.log(`\n  ${candidate.name} finished in ${fmtElapsed(Date.now() - startedAt)}${summary}`)
+          if (sv !== null && cl !== null) {
+            console.log(`    server/index.ts: ${fmtBytes(sv)}    client/index.tsx: ${fmtBytes(cl)}`)
+          }
           success = true
           break
         }
