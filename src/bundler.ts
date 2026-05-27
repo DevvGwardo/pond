@@ -12,8 +12,24 @@ export async function buildClient(entry: string, options: { liveReload?: boolean
   // `globalThis.__pondApp`. We then mount the App with the SAME preact
   // instance that the user's hooks use (avoiding the "two preacts" bug
   // where hooks silently fail).
+  //
+  // Synthesise the entry so __pondApp always has {App, render, h}: the
+  // user's client/index.tsx only exports App, and re-exporting preact's
+  // render/h from every capsule's entry would be repetitive boilerplate.
+  const entryDir = path.dirname(entry)
+  const entryRel = "./" + path.relative(entryDir, entry).replace(/\\/g, "/")
+  const stdinContents = `
+import { App } from ${JSON.stringify(entryRel)};
+export { App };
+export { render, h } from "preact";
+`
   const result = await esbuild.build({
-    entryPoints: [entry],
+    stdin: {
+      contents: stdinContents,
+      resolveDir: entryDir,
+      sourcefile: "pond-client-entry.tsx",
+      loader: "tsx",
+    },
     bundle: true,
     minify: false,
     write: false,
