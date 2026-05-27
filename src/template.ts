@@ -96,7 +96,88 @@ const TODO_GITIGNORE = `node_modules
 const POND_VERSION = JSON.parse(fs.readFileSync(path.resolve(import.meta.dirname, "../package.json"), "utf-8"))
   .version as string
 
-export async function copyTemplate(name: string, _template: string, initGit: boolean): Promise<void> {
+const CAPSULE_CONTRACT = `## Pond capsule contract
+
+A pond capsule is one server file + one client file + a shared dir.
+
+### server/index.ts
+
+\`\`\`ts
+import { capsule, mutation, query, table, string, number, boolean } from "pond/server"
+
+export default capsule({
+  schema: {
+    items: table({ body: string(), done: boolean() }),
+  },
+  queries: {
+    items: query((ctx) => ctx.db.items.orderBy("createdAt", "desc").all()),
+  },
+  mutations: {
+    addItem: mutation((ctx, body: string) => ctx.db.items.insert({ body, done: false })),
+    toggleItem: mutation((ctx, id: string) => {
+      const row = ctx.db.items.where({ id }).first()
+      if (row) ctx.db.items.where({ id }).update({ done: !row.done })
+    }),
+  },
+})
+\`\`\`
+
+Every table auto-gets \`id\` (uuid), \`createdAt\`, \`updatedAt\`. Column helpers: \`string()\`, \`number()\`, \`boolean()\`, \`json()\`, \`text()\`. SQLite under the hood — booleans round-trip as 0/1.
+
+\`ctx.db.<table>\` exposes \`.all() / .first() / .where({...}) / .orderBy(col, dir) / .insert({...}) / .update({...}) / .delete()\`.
+
+Queries return data and re-run reactively on the client. Mutations take \`(ctx, ...args)\` — the args after \`ctx\` are the wire payload.
+
+### client/index.tsx
+
+Preact + Tailwind classes (use \`class\` not \`className\`). Use \`useQuery<T>(name)\` and \`useMutation<Args, Ret>(name)\` from \`"pond/client"\`.
+
+\`\`\`tsx
+import { useMutation, useQuery } from "pond/client"
+
+export function App() {
+  const { data, isLoading } = useQuery<Item[]>("items")
+  const [addItem] = useMutation<[body: string], void>("addItem")
+  return <main>…</main>
+}
+\`\`\`
+
+### Running it
+
+- \`npm install\` then \`npm run dev\` — local dev with hot reload at http://localhost:3000
+- \`npm run deploy\` — anonymous deploy. You get a URL + a one-time claim token.
+
+### Rules of thumb
+
+- Keep everything in \`server/index.ts\` and \`client/index.tsx\`. Add files under \`shared/\` only if both sides import them.
+- No separate API layer. Define mutations/queries on the server; call them by name from the client.
+- No \`fetch\` from the client to your own server — use \`useQuery\` / \`useMutation\`.
+- Tailwind classes are available out of the box; no config needed.
+`
+
+function agentsMdContent(prompt: string): string {
+  return `# Build instructions
+
+The user ran \`pond new\` with this description:
+
+> ${prompt.replace(/\n/g, "\n> ")}
+
+Your job: implement this inside the scaffolded capsule. Edit \`server/index.ts\` and \`client/index.tsx\`. Add tables, queries, mutations, and UI to satisfy the description. When you're done, run \`npm install && npm run dev\` and verify the app works in a browser.
+
+${CAPSULE_CONTRACT}
+
+### When you're done
+
+Delete this file (\`AGENTS.md\`) and the \`.claude/\` directory — they were scaffolding for the build, not part of the app.
+`
+}
+
+export async function copyTemplate(
+  name: string,
+  _template: string,
+  initGit: boolean,
+  prompt?: string,
+): Promise<void> {
   const dir = path.resolve(process.cwd(), name)
 
   if (fs.existsSync(dir)) {
@@ -139,6 +220,13 @@ export async function copyTemplate(name: string, _template: string, initGit: boo
   const envContents = TODO_ENV_TEMPLATE.replace("{{SESSION_SECRET}}", randomBytes(32).toString("hex"))
   fs.writeFileSync(path.join(dir, ".env.pond.server"), envContents, { mode: 0o600 })
   fs.writeFileSync(path.join(dir, ".gitignore"), TODO_GITIGNORE)
+
+  if (prompt) {
+    const agents = agentsMdContent(prompt)
+    fs.writeFileSync(path.join(dir, "AGENTS.md"), agents)
+    fs.mkdirSync(path.join(dir, ".claude"), { recursive: true })
+    fs.writeFileSync(path.join(dir, ".claude", "CLAUDE.md"), agents)
+  }
 
   if (initGit) {
     execSync("git init", { cwd: dir, stdio: "ignore" })
