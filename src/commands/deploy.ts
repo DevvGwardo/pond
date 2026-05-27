@@ -50,6 +50,48 @@ export function collectSourceFiles(cwd: string): Record<string, string> {
   return out
 }
 
+function slugifySubdomain(raw: string): string {
+  // Server rule (host.ts /api/domains): DNS label — a-z, 0-9, hyphens; max 63; no leading/trailing hyphen.
+  // Cap at 40 to leave headroom for a "-NN" collision suffix.
+  const slug = raw
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40)
+    .replace(/-+$/g, "")
+  return slug
+}
+
+async function tryAliasDomain(opts: {
+  apiUrl: string
+  deployId: string
+  baseSlug: string
+  userToken: string
+}): Promise<string | undefined> {
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    authorization: `Bearer ${opts.userToken}`,
+  }
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const candidate = attempt === 0 ? opts.baseSlug : `${opts.baseSlug}-${attempt + 1}`
+    if (!candidate) return undefined
+    const res = await fetch(`${opts.apiUrl}/api/domains`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ subdomain: candidate, deployId: opts.deployId }),
+    })
+    if (res.ok) {
+      const out = (await res.json().catch(() => ({}))) as { subdomain?: string; url?: string }
+      return out.subdomain ?? candidate
+    }
+    if (res.status === 409) continue
+    // 400 (invalid/reserved/hex-collision) or 401 — stop trying, alias not happening.
+    return undefined
+  }
+  return undefined
+}
+
 function formatRelative(targetIso: string | undefined, fromMs: number): string {
   if (!targetIso) return ""
   const diff = new Date(targetIso).getTime() - fromMs
@@ -98,6 +140,11 @@ export const deployCommand = defineCommand({
     local: {
       type: "boolean",
       description: "Build an offline bundle in .pond/ instead of uploading to a hosted control plane",
+      default: false,
+    },
+    "no-auto-domain": {
+      type: "boolean",
+      description: "Skip auto-aliasing the deploy to <package.json name>.<host> on first deploy",
       default: false,
     },
   },
@@ -211,6 +258,7 @@ export const deployCommand = defineCommand({
     }
 
     let response: Response
+    let isNewDeploy = false
 
     if (localRecord?.apiUrl === apiUrl && localRecord.deployId && (localRecord.claimToken || userToken)) {
       const headers: Record<string, string> = { "content-type": "application/json" }
@@ -229,6 +277,7 @@ export const deployCommand = defineCommand({
         headers,
         body: JSON.stringify(baseBody),
       })
+      isNewDeploy = true
     }
 
     if (!response.ok) {
@@ -287,6 +336,38 @@ export const deployCommand = defineCommand({
       // best-effort on platforms without chmod (e.g. Windows)
     }
 
+    // Auto-alias new deploys to a slug of package.json `name`, so the printed
+    // URL is `bento-dash.pond.run` instead of `cd8a6d5d…pond.run`. Only on
+    // first creation, only when logged in (anonymous deploys can't claim
+    // /api/domains), and only when not disabled with --no-auto-domain.
+    let aliasUrl: string | undefined
+    if (isNewDeploy && userToken && !args["no-auto-domain"]) {
+      try {
+        const pkgRaw = sourceFiles["package.json"]
+        const pkgName = pkgRaw ? (JSON.parse(pkgRaw) as { name?: string }).name : undefined
+        const baseSlug = pkgName ? slugifySubdomain(pkgName) : ""
+        if (baseSlug) {
+          const subdomain = await tryAliasDomain({
+            apiUrl: effectiveApiUrl,
+            deployId: remote.deployId,
+            baseSlug,
+            userToken,
+          })
+          if (subdomain) {
+            try {
+              const u = new URL(effectiveApiUrl)
+              aliasUrl = `${u.protocol}//${subdomain}.${u.host}`
+            } catch {
+              // effectiveApiUrl was unparseable; skip pretty URL.
+            }
+          }
+        }
+      } catch {
+        // Auto-alias is best-effort. A bad package.json or transient API
+        // failure shouldn't fail the deploy.
+      }
+    }
+
     const ideUrl = isAnonymous
       ? `${effectiveApiUrl}/ide/${remote.deployId}#token=${remote.claimToken}`
       : `${effectiveApiUrl}/ide/${remote.deployId}`
@@ -301,7 +382,9 @@ export const deployCommand = defineCommand({
       console.log(`  Claim with: pond signup <username>`)
       console.log(`   (or alias: pond claim --signup <username>)`)
     } else {
-      console.log(`Hosted deploy ${remote.claimedAt ? "updated" : "created"} at ${remote.url}`)
+      const primaryUrl = aliasUrl ?? remote.url
+      console.log(`Hosted deploy ${remote.claimedAt ? "updated" : "created"} at ${primaryUrl}`)
+      if (aliasUrl) console.log(`  (also: ${remote.url})`)
       console.log(`  IDE: ${ideUrl}`)
       console.log(`  Dashboard: ${dashboardUrl}`)
       console.log(`Manage env with: pond env list ${remote.deployId} --api ${effectiveApiUrl}`)
