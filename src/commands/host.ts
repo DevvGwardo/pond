@@ -2260,9 +2260,7 @@ function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({"&":"&amp
 <body>
 <nav class="topbar">
   <a href="/">pond</a><span class="sep">/</span><a href="/docs">docs</a>${
-    opts.activeSlug
-      ? `<span class="sep">/</span><span>${htmlEscape(opts.activeSlug)}</span>`
-      : ""
+    opts.activeSlug ? `<span class="sep">/</span><span>${htmlEscape(opts.activeSlug)}</span>` : ""
   }
 </nav>
 <div class="layout">

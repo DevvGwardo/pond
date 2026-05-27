@@ -8,24 +8,24 @@ For the full list of any command's flags, run `pond <command> --help`. This page
 
 ## At a glance
 
-| Command                         | What it does                                                           |
-| ------------------------------- | ---------------------------------------------------------------------- |
-| [`pond new`](#pond-new)         | Scaffold a new capsule from a template or a free-form description      |
-| [`pond dev`](#pond-dev)         | Start the local dev server with hot reload                             |
+| Command                         | What it does                                                            |
+| ------------------------------- | ----------------------------------------------------------------------- |
+| [`pond new`](#pond-new)         | Scaffold a new capsule from a template or a free-form description       |
+| [`pond dev`](#pond-dev)         | Start the local dev server with hot reload                              |
 | [`pond deploy`](#pond-deploy)   | Ship the capsule — hosted on pond.run by default, `--local` for offline |
-| [`pond start`](#pond-start)     | Run a previously-built local deploy bundle                             |
-| [`pond inspect`](#pond-inspect) | Peek at a running capsule's state (schema, sockets, ai, blob, env)     |
-| [`pond logs`](#pond-logs)       | Stream a capsule's logs                                                |
-| [`pond db`](#pond-db)           | Inspect, dump, back up, and restore the capsule's SQLite               |
-| [`pond fork`](#pond-fork)       | Clone a public capsule's source from a deploy URL                      |
-| [`pond claim`](#pond-claim)     | Take ownership of an anonymous hosted deploy                           |
-| [`pond host`](#pond-host)       | Run your own hosted control plane (the thing `pond deploy` deploys to) |
-| [`pond login`](#pond-login)     | Save a user API token for a control plane                              |
-| [`pond user`](#pond-user)       | Create / list / promote users on a control plane (admin)               |
-| [`pond token`](#pond-token)     | Rotate the saved user token                                            |
-| [`pond domains`](#pond-domains) | Attach a custom subdomain to a hosted deploy                           |
-| [`pond env`](#pond-env)         | Set, unset, or list env vars on a hosted deploy                        |
-| [`pond auth`](#pond-auth)       | Manage your local dev-server guest identity                            |
+| [`pond start`](#pond-start)     | Run a previously-built local deploy bundle                              |
+| [`pond inspect`](#pond-inspect) | Peek at a running capsule's state (schema, sockets, ai, blob, env)      |
+| [`pond logs`](#pond-logs)       | Stream a capsule's logs                                                 |
+| [`pond db`](#pond-db)           | Inspect, dump, back up, and restore the capsule's SQLite                |
+| [`pond fork`](#pond-fork)       | Clone a public capsule's source from a deploy URL                       |
+| [`pond claim`](#pond-claim)     | Take ownership of an anonymous hosted deploy                            |
+| [`pond host`](#pond-host)       | Run your own hosted control plane (the thing `pond deploy` deploys to)  |
+| [`pond login`](#pond-login)     | Save a user API token for a control plane                               |
+| [`pond user`](#pond-user)       | Create / list / promote users on a control plane (admin)                |
+| [`pond token`](#pond-token)     | Rotate the saved user token                                             |
+| [`pond domains`](#pond-domains) | Attach a custom subdomain to a hosted deploy                            |
+| [`pond env`](#pond-env)         | Set, unset, or list env vars on a hosted deploy                         |
+| [`pond auth`](#pond-auth)       | Manage your local dev-server guest identity                             |
 
 ---
 

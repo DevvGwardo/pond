@@ -72,7 +72,8 @@ export const forkCommand = defineCommand({
     },
     "allow-scripts": {
       type: "boolean",
-      description: "Permit forking a package.json that defines npm lifecycle scripts (preinstall/install/postinstall/prepare). Off by default — lifecycle scripts run automatically on `npm install` and are an RCE vector if the source deploy is untrusted.",
+      description:
+        "Permit forking a package.json that defines npm lifecycle scripts (preinstall/install/postinstall/prepare). Off by default — lifecycle scripts run automatically on `npm install` and are an RCE vector if the source deploy is untrusted.",
       default: false,
     },
   },
@@ -170,9 +171,7 @@ export const forkCommand = defineCommand({
           console.error(`Refusing to fork: package.json is not valid JSON.`)
           process.exit(1)
         }
-        const offending = pkg?.scripts
-          ? LIFECYCLE_SCRIPTS.filter((s) => typeof pkg!.scripts![s] === "string")
-          : []
+        const offending = pkg?.scripts ? LIFECYCLE_SCRIPTS.filter((s) => typeof pkg!.scripts![s] === "string") : []
         if (offending.length > 0) {
           console.error(
             `Refusing to fork: upstream package.json defines npm lifecycle script(s) ${offending.join(", ")} which would run on \`npm install\`. Re-run with --allow-scripts if you trust this deploy.`,
