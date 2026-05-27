@@ -45,9 +45,20 @@ export const inspectCommand = defineCommand({
     const target = typeof args.target === "string" ? args.target : undefined
     const remote = resolveRemoteTarget(target)
     const baseUrl = remote?.baseUrl ?? `http://localhost:${args.port}`
-    const res = await fetch(`${baseUrl}/__pond/inspect`, {
-      headers: remote?.headers,
-    })
+    let res: Response
+    try {
+      res = await fetch(`${baseUrl}/__pond/inspect`, {
+        headers: remote?.headers,
+      })
+    } catch (err) {
+      const code = (err as { cause?: { code?: string } })?.cause?.code
+      if (code === "ECONNREFUSED") {
+        console.error(`Could not reach ${baseUrl} — is the capsule running?`)
+        console.error(`  Start it with: pond dev   (or: npm run dev)`)
+        process.exit(1)
+      }
+      throw err
+    }
     if (!res.ok) throw new Error(`Request failed: ${res.status}`)
     console.log(JSON.stringify(await res.json(), null, 2))
   },
