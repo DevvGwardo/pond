@@ -5,6 +5,16 @@ Versioning: [Semver](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-05-27
+
+### Fixed
+
+- **`pond inspect` no longer dumps a Node undici stack trace when the capsule isn't running.** Running `pond inspect` immediately after `pond new --generate` (i.e. before `npm install && npm run dev`) previously failed with a raw `TypeError: fetch failed` and a `node:internal/deps/undici/...` traceback because the localhost connection was refused. The command now catches `ECONNREFUSED` from the localhost fetch and exits 1 with a one-line hint: `Could not reach http://localhost:3000 — is the capsule running? Start it with: pond dev   (or: npm run dev)`. Other fetch failures still propagate untouched so real bugs aren't masked. The identical pattern still exists in `pond logs` and `pond db` — those will be cleaned up in a follow-up.
+
+### Docs
+
+- **README images rehosted on a public sibling repo.** The `DevvGwardo/pond` repo is private, so `raw.githubusercontent.com/DevvGwardo/pond/main/docs/branding/*.png` returned 404 to any anonymous viewer — meaning the npm package page, social card previews, and logged-out GitHub all showed broken images. Created `DevvGwardo/pond-assets` (public) containing the 7 branding PNGs and rewrote the README's `<img src=…>` tags to point at `raw.githubusercontent.com/DevvGwardo/pond-assets/main/*.png`. The originals stay in `docs/branding/` of the main repo as the source of truth; only the README links changed.
+
 ## [0.3.4] - 2026-05-27
 
 ### Changed
