@@ -7,6 +7,69 @@ import * as path from "node:path"
 import { randomBytes, timingSafeEqual } from "node:crypto"
 import { fork, type ChildProcess } from "node:child_process"
 import { openControlDb, DEFAULT_QUOTA, ANONYMOUS_QUOTA, type ControlDb, type UserRow } from "../host/control-db.js"
+import { createHash } from "node:crypto"
+import { buildForDeploy } from "../runtime.js"
+import { buildClient } from "../bundler.js"
+
+const SOURCE_FILE_LIMIT = 200
+const SOURCE_TOTAL_LIMIT = 4 * 1024 * 1024
+const SOURCE_PATH_RE = /^(server|client|shared)\/[a-zA-Z0-9_./-]+$|^package\.json$/
+
+function validateSourceFiles(
+  input: unknown,
+): { ok: true; files: Record<string, string> } | { ok: false; error: string } {
+  if (!input || typeof input !== "object") return { ok: false, error: "sourceFiles must be an object" }
+  const entries = Object.entries(input as Record<string, unknown>)
+  if (entries.length === 0) return { ok: false, error: "sourceFiles is empty" }
+  if (entries.length > SOURCE_FILE_LIMIT) return { ok: false, error: `Too many files (max ${SOURCE_FILE_LIMIT})` }
+  let total = 0
+  const out: Record<string, string> = {}
+  let hasServerEntry = false
+  for (const [rel, content] of entries) {
+    if (typeof content !== "string") return { ok: false, error: `File ${rel} is not a string` }
+    if (rel.includes("..") || rel.startsWith("/") || rel.includes("\\")) {
+      return { ok: false, error: `Invalid path: ${rel}` }
+    }
+    if (!SOURCE_PATH_RE.test(rel)) {
+      return { ok: false, error: `Path not allowed: ${rel}` }
+    }
+    total += Buffer.byteLength(content, "utf-8")
+    if (total > SOURCE_TOTAL_LIMIT) return { ok: false, error: `Source exceeds ${SOURCE_TOTAL_LIMIT} bytes` }
+    out[rel] = content
+    if (rel === "server/index.ts") hasServerEntry = true
+  }
+  if (!hasServerEntry) return { ok: false, error: "server/index.ts is required" }
+  return { ok: true, files: out }
+}
+
+function writeSourceTree(deployDir: string, files: Record<string, string>): void {
+  const sourceDir = path.join(deployDir, "source")
+  fs.rmSync(sourceDir, { recursive: true, force: true })
+  fs.mkdirSync(sourceDir, { recursive: true })
+  for (const [rel, content] of Object.entries(files)) {
+    const abs = path.join(sourceDir, rel)
+    fs.mkdirSync(path.dirname(abs), { recursive: true })
+    fs.writeFileSync(abs, content)
+  }
+}
+
+async function buildDeployFromSource(deployDir: string): Promise<{ bundleBytes: number; bundleHash: string }> {
+  const sourceDir = path.join(deployDir, "source")
+  const serverFile = path.join(sourceDir, "server", "index.ts")
+  const clientFile = path.join(sourceDir, "client", "index.tsx")
+  const outfile = path.join(deployDir, "deploy-bundle.mjs")
+  await buildForDeploy(serverFile, sourceDir, outfile)
+  if (fs.existsSync(clientFile)) {
+    const html = await buildClient(clientFile)
+    fs.writeFileSync(path.join(deployDir, "client.html"), html)
+  } else {
+    const stale = path.join(deployDir, "client.html")
+    if (fs.existsSync(stale)) fs.rmSync(stale)
+  }
+  const bundleBuf = fs.readFileSync(outfile)
+  const bundleHash = createHash("sha256").update(bundleBuf).digest("hex")
+  return { bundleBytes: bundleBuf.length, bundleHash }
+}
 
 interface HostedDeployRecord {
   deployId: string
@@ -772,33 +835,32 @@ export const hostCommand = defineCommand({
         const quotaTemplate = isAnonymous ? ANONYMOUS_QUOTA : DEFAULT_QUOTA
 
         const body = (await c.req.json().catch(() => null)) as {
-          bundleBase64?: unknown
-          clientHtmlBase64?: unknown
+          sourceFiles?: unknown
           publicInspect?: unknown
         } | null
         if (!body) return c.json({ error: "Invalid JSON body" }, 400)
-        if (typeof body.bundleBase64 !== "string" || body.bundleBase64.length === 0) {
-          return c.json({ error: "bundleBase64 required" }, 400)
+        const validated = validateSourceFiles(body.sourceFiles)
+        if (!validated.ok) return c.json({ error: validated.error }, 400)
+        const deployId = randomBytes(8).toString("hex")
+        const claimToken = randomBytes(32).toString("hex")
+        const dir = deployDirFor(deployId)
+        fs.mkdirSync(dir, { recursive: true })
+        writeSourceTree(dir, validated.files)
+        let buildResult: { bundleBytes: number; bundleHash: string }
+        try {
+          buildResult = await buildDeployFromSource(dir)
+        } catch (err: any) {
+          fs.rmSync(dir, { recursive: true, force: true })
+          return c.json({ error: `Build failed: ${err?.message ?? err}` }, 400)
         }
-        if (body.clientHtmlBase64 !== undefined && typeof body.clientHtmlBase64 !== "string") {
-          return c.json({ error: "clientHtmlBase64 must be string" }, 400)
-        }
-        const bundleBuf = Buffer.from(body.bundleBase64, "base64")
-        if (bundleBuf.length > quotaTemplate.maxBundleBytes) {
+        if (buildResult.bundleBytes > quotaTemplate.maxBundleBytes) {
+          fs.rmSync(dir, { recursive: true, force: true })
           return c.json(
             {
               error: `Bundle exceeds ${isAnonymous ? "anonymous" : "default"} per-deploy quota (${quotaTemplate.maxBundleBytes} bytes)`,
             },
             413,
           )
-        }
-        const deployId = randomBytes(8).toString("hex")
-        const claimToken = randomBytes(32).toString("hex")
-        const dir = deployDirFor(deployId)
-        fs.mkdirSync(dir, { recursive: true })
-        fs.writeFileSync(path.join(dir, "deploy-bundle.mjs"), bundleBuf)
-        if (typeof body.clientHtmlBase64 === "string") {
-          fs.writeFileSync(path.join(dir, "client.html"), Buffer.from(body.clientHtmlBase64, "base64"))
         }
         const sizeAfter = dirSize(dir)
         if (sizeAfter > quotaTemplate.maxDiskBytes) {
@@ -846,16 +908,23 @@ export const hostCommand = defineCommand({
           controlDb.deleteQuota(deployId)
           audit(actorFor(user, false, isAnonymous), "deploy.create_failed", {
             targetDeployId: deployId,
-            metadata: { anonymous: isAnonymous, bundleBytes: bundleBuf.length, error: String(err?.message ?? err) },
+            metadata: {
+              anonymous: isAnonymous,
+              bundleBytes: buildResult.bundleBytes,
+              error: String(err?.message ?? err),
+            },
           })
           return c.json({ error: `Boot failed: ${err?.message ?? err}`, deployId }, 500)
         }
         audit(actorFor(user, false, isAnonymous), "deploy.create", {
           targetDeployId: deployId,
           targetUserId: user?.id,
-          metadata: { anonymous: isAnonymous, bundleBytes: bundleBuf.length },
+          metadata: { anonymous: isAnonymous, bundleBytes: buildResult.bundleBytes },
         })
-        return c.json({ ...record, ...extra }, 201)
+        return c.json(
+          { ...record, ...extra, bundleHash: buildResult.bundleHash, bundleBytes: buildResult.bundleBytes },
+          201,
+        )
       },
     )
 
@@ -872,24 +941,24 @@ export const hostCommand = defineCommand({
         const auth = authorizeDeployMutation(c, record)
         if (auth instanceof Response) return auth
         const body = (await c.req.json().catch(() => null)) as {
-          bundleBase64?: unknown
-          clientHtmlBase64?: unknown
+          sourceFiles?: unknown
           publicInspect?: unknown
           envText?: unknown
         } | null
         if (!body) return c.json({ error: "Invalid JSON body" }, 400)
-        if (typeof body.bundleBase64 !== "string" || body.bundleBase64.length === 0) {
-          return c.json({ error: "bundleBase64 required" }, 400)
-        }
-        const bundleBuf = Buffer.from(body.bundleBase64, "base64")
+        const validated = validateSourceFiles(body.sourceFiles)
+        if (!validated.ok) return c.json({ error: validated.error }, 400)
         const quota = controlDb.getQuota(deployId)
-        if (bundleBuf.length > quota.maxBundleBytes) {
-          return c.json({ error: `Bundle exceeds per-deploy quota (${quota.maxBundleBytes} bytes)` }, 413)
-        }
         const dir = deployDirFor(deployId)
-        fs.writeFileSync(path.join(dir, "deploy-bundle.mjs"), bundleBuf)
-        if (typeof body.clientHtmlBase64 === "string") {
-          fs.writeFileSync(path.join(dir, "client.html"), Buffer.from(body.clientHtmlBase64, "base64"))
+        writeSourceTree(dir, validated.files)
+        let buildResult: { bundleBytes: number; bundleHash: string }
+        try {
+          buildResult = await buildDeployFromSource(dir)
+        } catch (err: any) {
+          return c.json({ error: `Build failed: ${err?.message ?? err}` }, 400)
+        }
+        if (buildResult.bundleBytes > quota.maxBundleBytes) {
+          return c.json({ error: `Bundle exceeds per-deploy quota (${quota.maxBundleBytes} bytes)` }, 413)
         }
         if (typeof body.envText === "string") {
           const v = validateEnvText(body.envText)
@@ -911,9 +980,9 @@ export const hostCommand = defineCommand({
         const actor = auth.kind === "claim" ? "__claim_token__" : actorFor(auth.user, false)
         audit(actor, "deploy.update", {
           targetDeployId: deployId,
-          metadata: { bundleBytes: bundleBuf.length, envChanged: typeof body.envText === "string" },
+          metadata: { bundleBytes: buildResult.bundleBytes, envChanged: typeof body.envText === "string" },
         })
-        return c.json(record)
+        return c.json({ ...record, bundleHash: buildResult.bundleHash, bundleBytes: buildResult.bundleBytes })
       },
     )
 

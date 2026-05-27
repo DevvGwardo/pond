@@ -1,12 +1,11 @@
 import { test, before, after } from "node:test"
 import assert from "node:assert/strict"
 import { spawn } from "node:child_process"
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync } from "node:fs"
+import { mkdtempSync, rmSync, existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import * as path from "node:path"
 import * as net from "node:net"
 import { randomBytes } from "node:crypto"
-import { buildForDeploy } from "../src/runtime.js"
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "..")
 const CLI_PATH = path.join(REPO_ROOT, "src", "cli.js")
@@ -38,26 +37,20 @@ async function waitForHealth(apiUrl, timeoutMs = 8000) {
   throw new Error(`host did not become healthy at ${apiUrl} within ${timeoutMs}ms`)
 }
 
-async function buildTinyBundle(workDir) {
-  const serverFile = path.join(workDir, "server", "index.ts")
-  mkdirSync(path.dirname(serverFile), { recursive: true })
-  writeFileSync(
-    serverFile,
-    `import { capsule, mutation, query, string, table } from "pond/server"
+const TINY_SERVER_SRC = `import { capsule, mutation, query, string, table } from "pond/server"
 export default capsule({
   schema: { items: table({ name: string() }) },
   queries: { items: query((ctx) => ctx.db.items.all()) },
   mutations: { add: mutation((ctx, name) => ctx.db.items.insert({ name })) },
 })
-`,
-  )
-  const { outfile } = await buildForDeploy(serverFile, workDir)
-  return outfile
+`
+
+function tinySourceFiles(serverSrc = TINY_SERVER_SRC) {
+  return { "server/index.ts": serverSrc, "package.json": '{"name":"test-cap","private":true,"type":"module"}\n' }
 }
 
 let hostProc = null
 let dataDir = null
-let workDir = null
 let port = 0
 let apiUrl = ""
 let publicHost = "localhost"
@@ -65,7 +58,6 @@ const hostToken = randomBytes(16).toString("hex")
 let adminToken = ""
 let deployId = ""
 let claimToken = ""
-let bundlePath = ""
 
 async function startHost() {
   port = await pickFreePort()
@@ -113,8 +105,6 @@ async function stopHost() {
 }
 
 before(async () => {
-  workDir = mkdtempSync(path.join(tmpdir(), "pond-cap-test-"))
-  bundlePath = await buildTinyBundle(workDir)
   await startHost()
 })
 
@@ -123,7 +113,6 @@ after(async () => {
     await stopHost()
   } finally {
     if (dataDir && existsSync(dataDir)) rmSync(dataDir, { recursive: true, force: true })
-    if (workDir && existsSync(workDir)) rmSync(workDir, { recursive: true, force: true })
   }
 })
 
@@ -142,18 +131,18 @@ test("bootstrap creates admin via host token", async () => {
 })
 
 test("deploy create with admin token succeeds and returns subdomain URL", async () => {
-  const fs = await import("node:fs")
-  const bundleBase64 = fs.readFileSync(bundlePath).toString("base64")
   const res = await fetch(`${apiUrl}/api/deploys`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
-    body: JSON.stringify({ bundleBase64 }),
+    body: JSON.stringify({ sourceFiles: tinySourceFiles() }),
   })
   assert.equal(res.status, 201)
   const body = await res.json()
   assert.match(body.url, new RegExp(`^http://[a-f0-9]+\\.${publicHost}:${port}$`))
   assert.ok(body.deployId.length >= 8)
   assert.ok(body.claimToken.length >= 32)
+  assert.ok(typeof body.bundleHash === "string" && body.bundleHash.length === 64, "bundleHash returned")
+  assert.ok(typeof body.bundleBytes === "number" && body.bundleBytes > 0, "bundleBytes returned")
   deployId = body.deployId
   claimToken = body.claimToken
 })
@@ -268,26 +257,22 @@ test("bare domain GET /.well-known/security.txt serves a valid file", async () =
 })
 
 test("wrong user token → 401 on POST /api/deploys", async () => {
-  const fs = await import("node:fs")
-  const bundleBase64 = fs.readFileSync(bundlePath).toString("base64")
   const res = await fetch(`${apiUrl}/api/deploys`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: "Bearer not-a-real-token" },
-    body: JSON.stringify({ bundleBase64 }),
+    body: JSON.stringify({ sourceFiles: tinySourceFiles() }),
   })
   assert.equal(res.status, 401)
 })
 
 test("wrong claim token → 403 on PUT /api/deploys/:id (no auth)", async () => {
-  const fs = await import("node:fs")
-  const bundleBase64 = fs.readFileSync(bundlePath).toString("base64")
   const res = await fetch(`${apiUrl}/api/deploys/${deployId}`, {
     method: "PUT",
     headers: {
       "content-type": "application/json",
       "x-pond-claim-token": "deadbeef".repeat(8),
     },
-    body: JSON.stringify({ bundleBase64 }),
+    body: JSON.stringify({ sourceFiles: tinySourceFiles() }),
   })
   // bad claim token + no Bearer => 401 (auth required); both cases acceptable per spec
   assert.ok(res.status === 401 || res.status === 403, `expected 401/403, got ${res.status}`)
@@ -325,15 +310,17 @@ test("body > 64 MB returns 413", async () => {
 
 test("failed anonymous boot cleans up dir + DB rows (regression)", async () => {
   const fs = await import("node:fs")
-  // 'QQ==' base64-decodes to 'A' — a 1-byte invalid bundle that fails on import.
-  // Use an extra host so the rate-limit window is fresh.
+  // Source compiles fine but throws synchronously when imported — exercises the
+  // post-build boot-failure cleanup path. Use an extra host for a fresh rate window.
   const h = await startExtraHost()
   try {
     const before = fs.readdirSync(path.join(h.dataDir, "deploys")).length
     const res = await fetch(`${h.apiUrl}/api/deploys`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ bundleBase64: "QQ==" }),
+      body: JSON.stringify({
+        sourceFiles: tinySourceFiles(`throw new Error("boom on import")\nexport default {}\n`),
+      }),
     })
     assert.equal(res.status, 500)
     const after = fs.readdirSync(path.join(h.dataDir, "deploys")).length
@@ -389,24 +376,14 @@ async function stopExtraHost(h) {
   if (h.dataDir && existsSync(h.dataDir)) rmSync(h.dataDir, { recursive: true, force: true })
 }
 
-async function buildBundleWith(workDir, serverSrc) {
-  const serverFile = path.join(workDir, "server", "index.ts")
-  mkdirSync(path.dirname(serverFile), { recursive: true })
-  writeFileSync(serverFile, serverSrc)
-  const { outfile } = await buildForDeploy(serverFile, workDir)
-  return outfile
-}
-
 let anonDeployId = ""
 let anonClaimToken = ""
 
 test("anonymous POST /api/deploys succeeds and returns terminatesAt + expiresAt", async () => {
-  const fs = await import("node:fs")
-  const bundleBase64 = fs.readFileSync(bundlePath).toString("base64")
   const res = await fetch(`${apiUrl}/api/deploys`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ bundleBase64 }),
+    body: JSON.stringify({ sourceFiles: tinySourceFiles() }),
   })
   assert.equal(res.status, 201)
   const body = await res.json()
@@ -418,30 +395,27 @@ test("anonymous POST /api/deploys succeeds and returns terminatesAt + expiresAt"
   anonClaimToken = body.claimToken
 })
 
-test("anonymous quota rejects > 16 MB bundle with 413", async () => {
-  // 17 MB of random bytes, base64-encoded inside JSON. Total request body
-  // ends up ~23 MB which is under the 64 MB outer body limit but should be
-  // rejected by the anonymous 16 MB bundle quota.
-  const bigBuf = Buffer.alloc(17 * 1024 * 1024, 0x42)
-  const bundleBase64 = bigBuf.toString("base64")
+test("source tree exceeding limit returns 400", async () => {
+  // 5 MB of content in a single shared/ file — over the 4 MB source-tree cap.
+  const huge = "x".repeat(5 * 1024 * 1024)
   const res = await fetch(`${apiUrl}/api/deploys`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ bundleBase64 }),
+    body: JSON.stringify({
+      sourceFiles: { ...tinySourceFiles(), "shared/big.txt": huge },
+    }),
   })
-  assert.equal(res.status, 413)
+  assert.equal(res.status, 400)
 })
 
 test("anonymous PUT /api/deploys/:id returns 403", async () => {
-  const fs = await import("node:fs")
-  const bundleBase64 = fs.readFileSync(bundlePath).toString("base64")
   const res = await fetch(`${apiUrl}/api/deploys/${anonDeployId}`, {
     method: "PUT",
     headers: {
       "content-type": "application/json",
       "x-pond-claim-token": anonClaimToken,
     },
-    body: JSON.stringify({ bundleBase64 }),
+    body: JSON.stringify({ sourceFiles: tinySourceFiles() }),
   })
   assert.equal(res.status, 403)
 })
@@ -460,12 +434,10 @@ test("anonymous PUT /env returns 403", async () => {
 
 test("claim with --signup creates user and transfers ownership", async () => {
   // Deploy anonymously, then claim with signup.
-  const fs = await import("node:fs")
-  const bundleBase64 = fs.readFileSync(bundlePath).toString("base64")
   const create = await fetch(`${apiUrl}/api/deploys`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ bundleBase64 }),
+    body: JSON.stringify({ sourceFiles: tinySourceFiles() }),
   })
   assert.equal(create.status, 201)
   const cb = await create.json()
@@ -494,11 +466,11 @@ test("claim with --signup creates user and transfers ownership", async () => {
 
 test("claim with existing user token transfers ownership", async () => {
   const fs = await import("node:fs")
-  const bundleBase64 = fs.readFileSync(bundlePath).toString("base64")
+  const sourceFiles = tinySourceFiles()
   const create = await fetch(`${apiUrl}/api/deploys`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ bundleBase64 }),
+    body: JSON.stringify({ sourceFiles }),
   })
   assert.equal(create.status, 201)
   const cb = await create.json()
@@ -525,13 +497,13 @@ test("anonymous rate limit: 6th request from same IP in an hour returns 429", as
   const h = await startExtraHost({ extraArgs: ["--anonymous-rate-per-hour", "5"] })
   try {
     const fs = await import("node:fs")
-    const bundleBase64 = fs.readFileSync(bundlePath).toString("base64")
+    const sourceFiles = tinySourceFiles()
     const statuses = []
     for (let i = 0; i < 6; i++) {
       const res = await fetch(`${h.apiUrl}/api/deploys`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ bundleBase64 }),
+        body: JSON.stringify({ sourceFiles }),
       })
       statuses.push(res.status)
       // drain body
@@ -593,12 +565,12 @@ test("anonymous rate limit survives host restart (persisted in control DB)", asy
   try {
     await waitForHealth(xUrl)
     const fs2 = await import("node:fs")
-    const bundleBase64 = fs2.readFileSync(bundlePath).toString("base64")
+    const sourceFiles = tinySourceFiles()
     for (let i = 0; i < 3; i++) {
       const res = await fetch(`${xUrl}/api/deploys`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ bundleBase64 }),
+        body: JSON.stringify({ sourceFiles }),
       })
       await res.text().catch(() => "")
       assert.equal(res.status, 201, `attempt ${i + 1} should succeed`)
@@ -607,7 +579,7 @@ test("anonymous rate limit survives host restart (persisted in control DB)", asy
     const limited = await fetch(`${xUrl}/api/deploys`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ bundleBase64 }),
+      body: JSON.stringify({ sourceFiles }),
     })
     await limited.text().catch(() => "")
     assert.equal(limited.status, 429, "4th attempt should be rate limited pre-restart")
@@ -624,7 +596,7 @@ test("anonymous rate limit survives host restart (persisted in control DB)", asy
     const afterRestart = await fetch(`${xUrl}/api/deploys`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ bundleBase64 }),
+      body: JSON.stringify({ sourceFiles }),
     })
     await afterRestart.text().catch(() => "")
     assert.equal(afterRestart.status, 429, "rate limit must persist across host restart")
@@ -675,11 +647,11 @@ test("sweeper terminates anonymous deploy after grace (via host bounce)", async 
   try {
     await waitForHealth(tinyApi)
     const fs = await import("node:fs")
-    const bundleBase64 = fs.readFileSync(bundlePath).toString("base64")
+    const sourceFiles = tinySourceFiles()
     const res = await fetch(`${tinyApi}/api/deploys`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ bundleBase64 }),
+      body: JSON.stringify({ sourceFiles }),
     })
     assert.equal(res.status, 201)
     const cb = await res.json()
@@ -740,11 +712,11 @@ test("anonymous-deploys=false → anonymous POST returns 401", async () => {
   const h = await startExtraHost({ extraArgs: ["--anonymous-deploys", "false"] })
   try {
     const fs = await import("node:fs")
-    const bundleBase64 = fs.readFileSync(bundlePath).toString("base64")
+    const sourceFiles = tinySourceFiles()
     const res = await fetch(`${h.apiUrl}/api/deploys`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ bundleBase64 }),
+      body: JSON.stringify({ sourceFiles }),
     })
     assert.equal(res.status, 401)
   } finally {
@@ -757,12 +729,9 @@ test(
   { skip: parseInt(process.versions.node.split(".")[0], 10) < 22 ? "requires Node 22+" : false },
   async () => {
     // Capsule whose mutation tries to write to /tmp/pond-escape-test.
-    const escapeWorkDir = mkdtempSync(path.join(tmpdir(), "pond-cap-escape-"))
     const escapeFile = path.join(tmpdir(), `pond-escape-${randomBytes(4).toString("hex")}.txt`)
     try {
-      const bundle = await buildBundleWith(
-        escapeWorkDir,
-        `import { capsule, mutation, query, string, table } from "pond/server"
+      const sourceFiles = tinySourceFiles(`import { capsule, mutation, query, string, table } from "pond/server"
 import { writeFileSync } from "node:fs"
 export default capsule({
   schema: { items: table({ name: string() }) },
@@ -778,14 +747,11 @@ export default capsule({
     }),
   },
 })
-`,
-      )
-      const fs = await import("node:fs")
-      const bundleBase64 = fs.readFileSync(bundle).toString("base64")
+`)
       const create = await fetch(`${apiUrl}/api/deploys`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ bundleBase64 }),
+        body: JSON.stringify({ sourceFiles }),
       })
       assert.equal(create.status, 201)
       const cb = await create.json()
@@ -816,22 +782,21 @@ export default capsule({
         req.end()
       })
       // Either mutation reports ok:false with ERR_ACCESS_DENIED, or the file was never created.
-      const exists = fs.existsSync(escapeFile)
+      const exists = existsSync(escapeFile)
       assert.equal(exists, false, `escape file should not exist: ${escapeFile} body=${result.body}`)
     } finally {
       if (existsSync(escapeFile)) rmSync(escapeFile, { force: true })
-      if (existsSync(escapeWorkDir)) rmSync(escapeWorkDir, { recursive: true, force: true })
     }
   },
 )
 
 async function createOwnedDeploy() {
   const fs = await import("node:fs")
-  const bundleBase64 = fs.readFileSync(bundlePath).toString("base64")
+  const sourceFiles = tinySourceFiles()
   const res = await fetch(`${apiUrl}/api/deploys`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
-    body: JSON.stringify({ bundleBase64 }),
+    body: JSON.stringify({ sourceFiles }),
   })
   assert.equal(res.status, 201)
   return await res.json()
@@ -958,11 +923,11 @@ test("domains list filters by ownership", async () => {
   const carol = await u.json()
 
   const fs = await import("node:fs")
-  const bundleBase64 = fs.readFileSync(bundlePath).toString("base64")
+  const sourceFiles = tinySourceFiles()
   const dep = await fetch(`${apiUrl}/api/deploys`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${carol.token}` },
-    body: JSON.stringify({ bundleBase64 }),
+    body: JSON.stringify({ sourceFiles }),
   })
   assert.equal(dep.status, 201)
   const carolDeploy = await dep.json()
@@ -1075,11 +1040,11 @@ test("malformed JSON on POST /api/deploys → 400 (not 500) [B1]", async () => {
 test("malformed JSON on PUT /api/deploys/:id → 400 (not 500) [B1]", async () => {
   // Create a fresh deploy because earlier domainDeployId was cascade-deleted.
   const fs2 = await import("node:fs")
-  const bundleBase64 = fs2.readFileSync(bundlePath).toString("base64")
+  const sourceFiles = tinySourceFiles()
   const create = await fetch(`${apiUrl}/api/deploys`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
-    body: JSON.stringify({ bundleBase64 }),
+    body: JSON.stringify({ sourceFiles }),
   })
   const cb = await create.json()
   const res = await fetch(`${apiUrl}/api/deploys/${cb.deployId}`, {
@@ -1097,11 +1062,11 @@ test("malformed JSON on PUT /api/deploys/:id → 400 (not 500) [B1]", async () =
 
 test("PUT /api/deploys/:id/quota with no fields → 400 (not silent 200) [B4]", async () => {
   const fs2 = await import("node:fs")
-  const bundleBase64 = fs2.readFileSync(bundlePath).toString("base64")
+  const sourceFiles = tinySourceFiles()
   const create = await fetch(`${apiUrl}/api/deploys`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
-    body: JSON.stringify({ bundleBase64 }),
+    body: JSON.stringify({ sourceFiles }),
   })
   const cb = await create.json()
   const res = await fetch(`${apiUrl}/api/deploys/${cb.deployId}/quota`, {
@@ -1126,11 +1091,11 @@ test("per-user domain quota: 51st domain for a non-admin user → 429 [B5]", asy
   const userBody = await userRes.json()
   const userToken = userBody.token
   const fs2 = await import("node:fs")
-  const bundleBase64 = fs2.readFileSync(bundlePath).toString("base64")
+  const sourceFiles = tinySourceFiles()
   const dRes = await fetch(`${apiUrl}/api/deploys`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${userToken}` },
-    body: JSON.stringify({ bundleBase64 }),
+    body: JSON.stringify({ sourceFiles }),
   })
   const dBody = await dRes.json()
   const did = dBody.deployId
@@ -1155,29 +1120,25 @@ test("per-user domain quota: 51st domain for a non-admin user → 429 [B5]", asy
 })
 
 test("anonymous worker cannot make outbound https.request [B2]", async () => {
-  // Skip on Node < 22 only because sandbox flags need it — but the fetch/net shim
-  // is independent of Node version and should work on 20 too. So we always run.
-  const fs2 = await import("node:fs")
-  // Build a tiny bundle that tries to connect to 1.1.1.1:80 via https.request.
-  const escapeBundle = `
-import * as https from "node:https"
-const results = []
-try {
-  await new Promise((res, rej) => {
-    const req = https.request({host:"1.1.1.1",port:443,method:"GET",path:"/"}, () => res())
-    req.on("error", rej)
-    req.end()
-    setTimeout(()=>rej(new Error("timeout")), 1500)
-  })
-  results.push("https:OK")
-} catch (e) { results.push("https:" + (e.message || e.code)) }
-console.error("B2RESULT:" + JSON.stringify(results))
-export default { schema: {}, queries: {}, mutations: {} }
-`
-  // Write to a tmpfile and base64 it
-  const tmpFile = path.join(workDir, "b2-bundle.mjs")
-  fs2.writeFileSync(tmpFile, escapeBundle)
-  const bundleBase64 = fs2.readFileSync(tmpFile).toString("base64")
+  // Tiny capsule that fires an outbound https.request from an async IIFE on
+  // module load. Stays clear of top-level await (esbuild target is es2020).
+  const sourceFiles = tinySourceFiles(`import * as https from "node:https"
+import { capsule } from "pond/server"
+;(async () => {
+  const results: string[] = []
+  try {
+    await new Promise<void>((res, rej) => {
+      const req = https.request({host:"1.1.1.1",port:443,method:"GET",path:"/"}, () => res())
+      req.on("error", rej)
+      req.end()
+      setTimeout(()=>rej(new Error("timeout")), 1500)
+    })
+    results.push("https:OK")
+  } catch (e: any) { results.push("https:" + (e.message || e.code)) }
+  console.error("B2RESULT:" + JSON.stringify(results))
+})()
+export default capsule({ schema: {}, queries: {}, mutations: {} })
+`)
 
   // Spin a host with rate limit high enough.
   const h = await startExtraHost({ extraArgs: ["--anonymous-rate-per-hour", "100"] })
@@ -1188,7 +1149,7 @@ export default { schema: {}, queries: {}, mutations: {} }
     const res = await fetch(`${h.apiUrl}/api/deploys`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ bundleBase64 }),
+      body: JSON.stringify({ sourceFiles }),
     })
     assert.equal(res.status, 201)
     // Wait for the worker to boot + run the import.
@@ -1209,69 +1170,49 @@ export default { schema: {}, queries: {}, mutations: {} }
 // ---- Schema identifier validation ----
 
 test("capsule with SQLite reserved word as table name fails to boot", async () => {
-  const reservedWorkDir = mkdtempSync(path.join(tmpdir(), "pond-cap-reserved-"))
-  try {
-    const bundle = await buildBundleWith(
-      reservedWorkDir,
-      `import { capsule, query, string, table } from "pond/server"
+  const sourceFiles = tinySourceFiles(`import { capsule, query, string, table } from "pond/server"
 export default capsule({
   schema: { "select": table({ name: string() }) },
   queries: { items: query((ctx) => ctx.db["select"].all()) },
   mutations: {},
 })
-`,
-    )
-    const fs2 = await import("node:fs")
-    const bundleBase64 = fs2.readFileSync(bundle).toString("base64")
-    const res = await fetch(`${apiUrl}/api/deploys`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
-      body: JSON.stringify({ bundleBase64 }),
-    })
-    // boot must fail (worker rejects the identifier before mounting routes)
-    assert.equal(res.status, 500)
-    const body = await res.json()
-    assert.match(body.error, /Boot failed/i)
-  } finally {
-    if (existsSync(reservedWorkDir)) rmSync(reservedWorkDir, { recursive: true, force: true })
-  }
+`)
+  const res = await fetch(`${apiUrl}/api/deploys`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ sourceFiles }),
+  })
+  // boot must fail (worker rejects the identifier before mounting routes)
+  assert.equal(res.status, 500)
+  const body = await res.json()
+  assert.match(body.error, /Boot failed/i)
 })
 
 test("capsule with _pond_ prefixed table name fails to boot", async () => {
-  const prefixWorkDir = mkdtempSync(path.join(tmpdir(), "pond-cap-prefix-"))
-  try {
-    const bundle = await buildBundleWith(
-      prefixWorkDir,
-      `import { capsule, query, string, table } from "pond/server"
+  const sourceFiles = tinySourceFiles(`import { capsule, query, string, table } from "pond/server"
 export default capsule({
   schema: { _pond_secret: table({ name: string() }) },
   queries: { items: query((ctx) => ctx.db._pond_secret.all()) },
   mutations: {},
 })
-`,
-    )
-    const fs2 = await import("node:fs")
-    const bundleBase64 = fs2.readFileSync(bundle).toString("base64")
-    const res = await fetch(`${apiUrl}/api/deploys`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
-      body: JSON.stringify({ bundleBase64 }),
-    })
-    assert.equal(res.status, 500)
-  } finally {
-    if (existsSync(prefixWorkDir)) rmSync(prefixWorkDir, { recursive: true, force: true })
-  }
+`)
+  const res = await fetch(`${apiUrl}/api/deploys`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ sourceFiles }),
+  })
+  assert.equal(res.status, 500)
 })
 
 // ---- envText size caps ----
 
 test("PUT /api/deploys/:id rejects envText > 64KB with 413", async () => {
   const fs2 = await import("node:fs")
-  const bundleBase64 = fs2.readFileSync(bundlePath).toString("base64")
+  const sourceFiles = tinySourceFiles()
   const create = await fetch(`${apiUrl}/api/deploys`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
-    body: JSON.stringify({ bundleBase64 }),
+    body: JSON.stringify({ sourceFiles }),
   })
   assert.equal(create.status, 201)
   const cb = await create.json()
@@ -1281,7 +1222,7 @@ test("PUT /api/deploys/:id rejects envText > 64KB with 413", async () => {
     const res = await fetch(`${apiUrl}/api/deploys/${cb.deployId}`, {
       method: "PUT",
       headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
-      body: JSON.stringify({ bundleBase64, envText }),
+      body: JSON.stringify({ sourceFiles, envText }),
     })
     assert.equal(res.status, 413)
     const body = await res.json()
@@ -1296,11 +1237,11 @@ test("PUT /api/deploys/:id rejects envText > 64KB with 413", async () => {
 
 test("PUT /api/deploys/:id/env rejects a single value > 1024 chars with 413", async () => {
   const fs2 = await import("node:fs")
-  const bundleBase64 = fs2.readFileSync(bundlePath).toString("base64")
+  const sourceFiles = tinySourceFiles()
   const create = await fetch(`${apiUrl}/api/deploys`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
-    body: JSON.stringify({ bundleBase64 }),
+    body: JSON.stringify({ sourceFiles }),
   })
   const cb = await create.json()
   try {
@@ -1322,11 +1263,11 @@ test("PUT /api/deploys/:id/env rejects a single value > 1024 chars with 413", as
 
 test("POST /api/deploys/:id/claim rejects oversize envText with 413", async () => {
   const fs2 = await import("node:fs")
-  const bundleBase64 = fs2.readFileSync(bundlePath).toString("base64")
+  const sourceFiles = tinySourceFiles()
   const create = await fetch(`${apiUrl}/api/deploys`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ bundleBase64 }),
+    body: JSON.stringify({ sourceFiles }),
   })
   assert.equal(create.status, 201)
   const cb = await create.json()
@@ -1414,11 +1355,11 @@ test("rotate-token: previous token honored within 5min grace, then rejected", as
 
 test("audit log records deploy.create and is admin-only", async () => {
   const fs2 = await import("node:fs")
-  const bundleBase64 = fs2.readFileSync(bundlePath).toString("base64")
+  const sourceFiles = tinySourceFiles()
   const create = await fetch(`${apiUrl}/api/deploys`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
-    body: JSON.stringify({ bundleBase64 }),
+    body: JSON.stringify({ sourceFiles }),
   })
   assert.equal(create.status, 201)
   const cb = await create.json()
@@ -1465,7 +1406,7 @@ test("audit log records anonymous deploy.create with __anonymous__ actor", async
   const h = await startExtraHost({ extraArgs: ["--anonymous-rate-per-hour", "10"] })
   try {
     const fs2 = await import("node:fs")
-    const bundleBase64 = fs2.readFileSync(bundlePath).toString("base64")
+    const sourceFiles = tinySourceFiles()
     // Bootstrap an admin on this host first so we can read the audit log.
     const bootstrap = await fetch(`${h.apiUrl}/api/users`, {
       method: "POST",
@@ -1477,7 +1418,7 @@ test("audit log records anonymous deploy.create with __anonymous__ actor", async
     const dep = await fetch(`${h.apiUrl}/api/deploys`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ bundleBase64 }),
+      body: JSON.stringify({ sourceFiles }),
     })
     assert.equal(dep.status, 201)
     const cb = await dep.json()
@@ -1503,6 +1444,7 @@ test(
     // Stage a capsule project in a tmpdir, then invoke the CLI to deploy
     // anonymously against the running test host.
     const projDir = mkdtempSync(path.join(tmpdir(), "pond-deploy-perm-"))
+    const { mkdirSync, writeFileSync } = await import("node:fs")
     try {
       mkdirSync(path.join(projDir, "server"), { recursive: true })
       writeFileSync(

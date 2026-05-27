@@ -314,8 +314,12 @@ function createRuntimeFromDefinition(
   return { mount, db, def, env }
 }
 
-export async function buildForDeploy(serverFile: string, cwd: string): Promise<{ outfile: string; hash: string }> {
-  const outfile = path.join(cwd, ".pond", "deploy-bundle.mjs")
+export async function buildForDeploy(
+  serverFile: string,
+  cwd: string,
+  outfileOverride?: string,
+): Promise<{ outfile: string; hash: string }> {
+  const outfile = outfileOverride ?? path.join(cwd, ".pond", "deploy-bundle.mjs")
   fs.mkdirSync(path.dirname(outfile), { recursive: true })
 
   await esbuild.build({

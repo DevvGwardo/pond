@@ -6,6 +6,49 @@ import { buildForDeploy } from "../runtime.js"
 import { buildClient } from "../bundler.js"
 import { loadCredentials } from "../host/credentials.js"
 
+const SOURCE_ROOTS = ["server", "client", "shared"]
+const SOURCE_FILE_LIMIT = 200
+const SOURCE_TOTAL_LIMIT = 4 * 1024 * 1024
+
+export function collectSourceFiles(cwd: string): Record<string, string> {
+  const out: Record<string, string> = {}
+  let total = 0
+  let count = 0
+  const walk = (rel: string) => {
+    const abs = path.join(cwd, rel)
+    if (!fs.existsSync(abs)) return
+    const stat = fs.statSync(abs)
+    if (stat.isFile()) {
+      const text = fs.readFileSync(abs, "utf-8")
+      out[rel.split(path.sep).join("/")] = text
+      total += Buffer.byteLength(text, "utf-8")
+      count += 1
+      if (count > SOURCE_FILE_LIMIT) {
+        throw new Error(`Source tree exceeds ${SOURCE_FILE_LIMIT} files`)
+      }
+      if (total > SOURCE_TOTAL_LIMIT) {
+        throw new Error(`Source tree exceeds ${SOURCE_TOTAL_LIMIT} bytes total`)
+      }
+      return
+    }
+    if (stat.isDirectory()) {
+      for (const entry of fs.readdirSync(abs)) {
+        if (entry === "node_modules" || entry === ".pond" || entry.startsWith(".")) continue
+        walk(path.join(rel, entry))
+      }
+    }
+  }
+  for (const root of SOURCE_ROOTS) walk(root)
+  const pkgPath = path.join(cwd, "package.json")
+  if (fs.existsSync(pkgPath)) {
+    out["package.json"] = fs.readFileSync(pkgPath, "utf-8")
+  }
+  if (!out["server/index.ts"]) {
+    throw new Error("server/index.ts is required for a hosted deploy")
+  }
+  return out
+}
+
 function formatRelative(targetIso: string | undefined, fromMs: number): string {
   if (!targetIso) return ""
   const diff = new Date(targetIso).getTime() - fromMs
@@ -60,9 +103,6 @@ export const deployCommand = defineCommand({
     const deployDir = path.join(cwd, ".pond")
     const deployFile = path.join(deployDir, "deploy.json")
     const deployId = randomBytes(8).toString("hex")
-    const { outfile, hash } = await buildForDeploy(serverFile, cwd)
-    const clientPath = path.join(deployDir, "client.html")
-    const clientHtml = fs.existsSync(clientFile) ? await buildClient(clientFile) : undefined
     const apiUrl = typeof args.api === "string" && args.api ? args.api.replace(/\/$/, "") : undefined
 
     if (apiUrl) {
@@ -81,9 +121,6 @@ export const deployCommand = defineCommand({
     }
 
     fs.mkdirSync(deployDir, { recursive: true })
-    if (clientHtml) {
-      fs.writeFileSync(clientPath, clientHtml)
-    }
 
     const localRecord = fs.existsSync(deployFile)
       ? (JSON.parse(fs.readFileSync(deployFile, "utf-8")) as {
@@ -95,6 +132,12 @@ export const deployCommand = defineCommand({
       : null
 
     if (!apiUrl) {
+      const { outfile, hash } = await buildForDeploy(serverFile, cwd)
+      const clientPath = path.join(deployDir, "client.html")
+      const clientHtml = fs.existsSync(clientFile) ? await buildClient(clientFile) : undefined
+      if (clientHtml) {
+        fs.writeFileSync(clientPath, clientHtml)
+      }
       fs.writeFileSync(
         deployFile,
         JSON.stringify(
@@ -117,14 +160,16 @@ export const deployCommand = defineCommand({
 
     const userToken = (typeof args.token === "string" && args.token) || loadCredentials(apiUrl)?.token || ""
 
-    const bundleBytes = fs.readFileSync(outfile)
+    const sourceFiles = collectSourceFiles(cwd)
+    const totalSourceBytes = Object.values(sourceFiles).reduce((n, c) => n + Buffer.byteLength(c, "utf-8"), 0)
+
     const shouldPushEnv = Boolean(args["push-env"])
     const envText = shouldPushEnv && fs.existsSync(envFile) ? fs.readFileSync(envFile, "utf-8") : undefined
 
     const isAnonymous = !userToken && !localRecord?.claimToken
 
     console.log(
-      `→ Uploading bundle (${(bundleBytes.length / 1024).toFixed(1)} KB) to ${apiUrl}${isAnonymous ? " (anonymous)" : ""}`,
+      `→ Uploading source (${Object.keys(sourceFiles).length} files, ${(totalSourceBytes / 1024).toFixed(1)} KB) to ${apiUrl}${isAnonymous ? " (anonymous)" : ""}`,
     )
     if (shouldPushEnv) {
       if (isAnonymous) {
@@ -136,8 +181,7 @@ export const deployCommand = defineCommand({
     }
 
     const baseBody = {
-      bundleBase64: Buffer.from(bundleBytes).toString("base64"),
-      clientHtmlBase64: clientHtml ? Buffer.from(clientHtml).toString("base64") : undefined,
+      sourceFiles,
       publicInspect: Boolean(args["public-inspect"]),
     }
 
@@ -173,6 +217,8 @@ export const deployCommand = defineCommand({
       url: string
       apiUrl: string
       publicInspect: boolean
+      bundleHash?: string
+      bundleBytes?: number
       claimedAt?: string
       updatedAt?: string
       terminatesAt?: string
@@ -185,9 +231,7 @@ export const deployCommand = defineCommand({
         {
           deployId: remote.deployId,
           timestamp: remote.updatedAt ?? new Date().toISOString(),
-          bundleHash: hash,
-          bundlePath: outfile,
-          clientPath: clientHtml ? clientPath : undefined,
+          bundleHash: remote.bundleHash,
           apiUrl: remote.apiUrl,
           url: remote.url,
           claimToken: remote.claimToken,
