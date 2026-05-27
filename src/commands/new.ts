@@ -2,7 +2,7 @@ import { defineCommand } from "citty"
 import * as path from "node:path"
 import { copyTemplate } from "../template.js"
 import { TEMPLATES, getTemplate } from "../templates.js"
-import { detectAgents, invokeAgent } from "../detect-agents.js"
+import { detectAgents, detectHermesInstall, invokeAgent } from "../detect-agents.js"
 
 const SLUG_RE = /^[a-z][a-z0-9_-]*$/i
 const STOPWORDS = new Set([
@@ -118,6 +118,17 @@ export const newCommand = defineCommand({
         .join(", ")
       const tail = others ? ` (also: ${others})` : ""
       console.log(`  Detected agent: ${lead.name} — ${lead.detail}${tail}`)
+    }
+
+    // Hermes deserves a special case: if the gateway is down but the binary or
+    // config dir is on disk, the user almost certainly *wants* hermes to lead
+    // the cascade — they just haven't started it. Surface that proactively
+    // so they know to flip the switch before re-running with --generate.
+    const hermesActive = detected.some((d) => d.name === "hermes")
+    const hermesInstall = !hermesActive ? detectHermesInstall() : null
+    if (hermesInstall) {
+      console.log(`  Tip: hermes-agent found at ${hermesInstall} but the gateway isn't running on 127.0.0.1:8642.`)
+      console.log(`       Start it (e.g. \`hermes-agent serve\`) to use the local model first.`)
     }
 
     const requestedTemplate = templateArg ?? (promptText ? undefined : "todo")

@@ -54,6 +54,27 @@ export async function detectHermes(deps: DetectionDeps = {}): Promise<DetectedAg
   return null
 }
 
+// Look for evidence that hermes-agent is *installed* on this machine even when
+// the gateway isn't currently running on 8642. We use this to tell the user
+// "hey, you could start your local agent" instead of silently falling back to
+// a remote model. Returns the discovered path (binary or config dir) or null.
+export function detectHermesInstall(deps: DetectionDeps = {}): string | null {
+  const home = (deps.homedir ?? os.homedir)()
+  const exists = deps.existsSync ?? fs.existsSync
+  const which = deps.which ?? defaultWhich
+  // Binary on PATH wins — that's the actionable "start it" hint.
+  for (const candidate of ["hermes-agent", "hermes"]) {
+    const found = which(candidate)
+    if (found) return found
+  }
+  // Otherwise check the common config dirs.
+  for (const rel of [".hermes-agent", ".hermes", ".config/hermes-agent", ".config/hermes"]) {
+    const abs = path.join(home, rel)
+    if (exists(abs)) return abs
+  }
+  return null
+}
+
 export async function detectClaude(deps: DetectionDeps = {}): Promise<DetectedAgent | null> {
   const home = (deps.homedir ?? os.homedir)()
   const exists = deps.existsSync ?? fs.existsSync

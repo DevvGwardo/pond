@@ -5,6 +5,12 @@ Versioning: [Semver](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-05-27
+
+### Added
+
+- **Hermes "installed but not running" hint.** `pond new` now looks for a `hermes-agent` binary on PATH or a `~/.hermes-agent` / `~/.config/hermes-agent` config dir even when the gateway isn't listening on 127.0.0.1:8642. If it finds one, the CLI prints a short hint suggesting the user start the gateway (e.g. `hermes-agent serve`) so hermes can lead the cascade instead of silently deferring to claude/codex.
+
 ## [0.2.2] - 2026-05-27
 
 ### Fixed

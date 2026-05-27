@@ -6,7 +6,13 @@ import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync
 import { tmpdir } from "node:os"
 import * as path from "node:path"
 
-import { detectHermes, detectClaude, detectCodex, detectAgents } from "../src/detect-agents.js"
+import {
+  detectHermes,
+  detectClaude,
+  detectCodex,
+  detectAgents,
+  detectHermesInstall,
+} from "../src/detect-agents.js"
 
 const execFileP = promisify(execFile)
 const REPO_ROOT = path.resolve(import.meta.dirname, "..")
@@ -72,6 +78,42 @@ test("detectCodex finds ~/.codex/auth.json when present", async () => {
     writeFileSync(path.join(home, ".codex", "auth.json"), "{}")
     const result = await detectCodex({ homedir: () => home, which: () => null })
     assert.equal(result?.name, "codex")
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test("detectHermesInstall surfaces a binary on PATH", () => {
+  const found = detectHermesInstall({
+    which: (cmd) => (cmd === "hermes-agent" ? "/opt/homebrew/bin/hermes-agent" : null),
+    homedir: () => "/tmp/nope",
+    existsSync: () => false,
+  })
+  assert.equal(found, "/opt/homebrew/bin/hermes-agent")
+})
+
+test("detectHermesInstall finds ~/.hermes-agent when no binary", () => {
+  const home = tmp("home-hermes-")
+  try {
+    mkdirSync(path.join(home, ".hermes-agent"), { recursive: true })
+    const found = detectHermesInstall({
+      which: () => null,
+      homedir: () => home,
+    })
+    assert.equal(found, path.join(home, ".hermes-agent"))
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test("detectHermesInstall returns null when nothing's installed", () => {
+  const home = tmp("home-empty-")
+  try {
+    const found = detectHermesInstall({
+      which: () => null,
+      homedir: () => home,
+    })
+    assert.equal(found, null)
   } finally {
     rmSync(home, { recursive: true, force: true })
   }
