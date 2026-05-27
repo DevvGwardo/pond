@@ -140,4 +140,3 @@ async function invokeHermes(agent: DetectedAgent, opts: InvokeOptions): Promise<
   // key wiring inside pond.
   return streamChild(agent.detail, ["-z", opts.prompt], opts.cwd, opts.onChunk)
 }
-

@@ -156,7 +156,7 @@ export const newCommand = defineCommand({
       }
       if (!detected.length) {
         console.error(
-          '\n  --generate: no local agent detected (looked for `hermes` on PATH, ~/.claude, ~/.codex/auth.json).',
+          "\n  --generate: no local agent detected (looked for `hermes` on PATH, ~/.claude, ~/.codex/auth.json).",
         )
         console.error(`  AGENTS.md remains in ${name}/ — install hermes / claude / codex and re-run.`)
         process.exit(1)
