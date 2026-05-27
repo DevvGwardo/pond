@@ -1,0 +1,54 @@
+# Systemd unit for running `pond host` directly on a VM (no Docker).
+#
+# Install:
+#   1. Copy this file to /etc/systemd/system/pond-host.service
+#   2. Adjust User, WorkingDirectory, and the Environment= lines below
+#   3. systemctl daemon-reload
+#   4. systemctl enable --now pond-host
+#
+# Run logs:
+#   journalctl -u pond-host -f
+
+[Unit]
+Description=Pond hosted control plane
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pond
+Group=pond
+WorkingDirectory=/srv/pond
+ExecStart=/usr/bin/node /srv/pond/src/cli.js host \
+  --port 8787 \
+  --host 127.0.0.1 \
+  --data-dir /var/lib/pond \
+  --public-host pond.example.com \
+  --public-base-url https://pond.example.com \
+  --abuse-email abuse@example.com \
+  --trust-proxy
+
+# Bind only to loopback. A reverse proxy (Cloudflare Tunnel, Caddy)
+# terminates TLS and forwards.
+Environment=NODE_ENV=production
+Environment=POND_TRUST_PROXY_HEADERS=1
+# Read POND_HOST_TOKEN from a secrets file (chmod 600 root:pond):
+EnvironmentFile=-/etc/pond/host-token
+
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65535
+
+# Hardening — these don't block the deploy-worker forks but reduce blast
+# radius if something exploits the control plane itself.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/pond
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target

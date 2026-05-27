@@ -1,0 +1,34 @@
+# Cloudflare Tunnel config for the Pond host.
+#
+# Setup:
+#   1. Install cloudflared on a local machine (one-time):
+#        brew install cloudflared    # or your OS equivalent
+#   2. Authenticate:
+#        cloudflared tunnel login
+#   3. Create the tunnel:
+#        cloudflared tunnel create pond-host
+#      This prints a tunnel ID and writes credentials to
+#      ~/.cloudflared/<id>.json. Copy that file to
+#      deploy/cloudflared/credentials.json in this repo.
+#   4. Point DNS at the tunnel (Cloudflare side):
+#        cloudflared tunnel route dns pond-host pond.example.com
+#        cloudflared tunnel route dns pond-host '*.pond.example.com'
+#      OR add CNAME records in the Cloudflare dashboard pointing both
+#      pond.example.com and *.pond.example.com at <tunnel-id>.cfargotunnel.com
+#   5. Edit this file: replace <TUNNEL_ID> and the hostnames.
+#   6. Rename to config.yml. Bring up: docker compose up -d
+
+tunnel: <TUNNEL_ID>
+credentials-file: /etc/cloudflared/credentials.json
+
+ingress:
+  # Wildcard for every deploy subdomain.
+  - hostname: "*.pond.example.com"
+    service: http://pond-host:8787
+
+  # Bare domain for the landing / abuse / security pages.
+  - hostname: pond.example.com
+    service: http://pond-host:8787
+
+  # Required catch-all.
+  - service: http_status:404

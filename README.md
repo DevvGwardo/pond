@@ -64,23 +64,33 @@ That one definition becomes:
 ## Quickstart
 
 ```bash
-npm install
-npm run build
-node ./src/cli.js new my-capsule
-cd my-capsule
-node /path/to/pond/src/cli.js dev
-```
-
-If you install the package globally or publish it, the intended workflow is:
-
-```bash
+npm install -g pondsh
 pond new my-capsule
 cd my-capsule
-npm install
 pond dev
 ```
 
 Open `http://localhost:3000`.
+
+### Anonymous hosted deploy (Lakebed-style)
+
+If a public Pond host is running (e.g. `pond.example.com`), you can ship anonymously without an account:
+
+```bash
+pond deploy --api https://pond.example.com
+# → returns a URL like https://abc123def4567890.pond.example.com
+# → returns a one-time claim token saved to .pond/deploy.json
+```
+
+The deploy lives for 7 days. Claim it to keep it:
+
+```bash
+pond claim --signup <username>
+```
+
+### Self-host the control plane
+
+See [`docs/operations.md`](./docs/operations.md) for the full Lakebed-style launch runbook (Oracle Always Free + Cloudflare Tunnel + Cloudflare DNS, ~$10/yr total). Deploy files in [`deploy/`](./deploy/).
 
 ## Developer Loop
 
