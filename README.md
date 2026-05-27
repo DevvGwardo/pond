@@ -33,7 +33,7 @@ The current runtime is optimized for local development and alpha workflows: fast
 - Single-file server model. Schema, queries, mutations, and endpoints live together in the capsule definition.
 - Built-in local runtime. Pond compiles the server with esbuild, mounts routes on Hono, and auto-creates SQLite tables.
 - No manual client plumbing. Preact hooks talk to generated query and mutation routes directly.
-- Agent-friendly workflow. The CLI is small, inspectable, and easy for coding agents to scaffold against.
+- Agent-friendly workflow. The CLI is small, inspectable, and easy for coding agents to scaffold against. `pond new a dashboard for X` writes an `AGENTS.md` that the agent reads on first open.
 - Real dev ergonomics. Live reload, guest identity switching, DB inspection, logs, and a deploy bundle path are already built in.
 - Browser-based IDE for hosted capsules. After `pond deploy --api …`, open the returned `/ide/<id>` URL to edit `server/`, `client/`, and `shared/` files, see build diagnostics, and preview the live capsule without leaving the page.
 
@@ -80,6 +80,19 @@ pond dev
 ```
 
 Open `http://localhost:3000`.
+
+### Or: describe what you want and let an agent build it
+
+Anything you type after `pond new` that isn't a single slug is treated as a build prompt:
+
+```bash
+pond new a dashboard for hermes-agent
+# → creates ./dashboard-hermes-agent/
+# → writes AGENTS.md + .claude/CLAUDE.md with your prompt + the capsule contract
+# → open in Claude Code / Cursor; the agent reads the brief and edits server/ + client/
+```
+
+Pass `--dir my-app` to override the auto-slugged directory name. Pond itself doesn't call any LLM — the scaffolded files just hand the brief to whatever agent you open the capsule in. After the agent finishes, `npm run dev` and `pond deploy --api …` work normally; the IDE URL lets you keep iterating in the browser.
 
 ### Anonymous hosted deploy (Lakebed-style)
 
@@ -135,7 +148,8 @@ Pond will:
 
 | Command                                    | Purpose                                                                  |
 | ------------------------------------------ | ------------------------------------------------------------------------ |
-| `pond new <name>`                          | Scaffold a new capsule                                                   |
+| `pond new <name>`                          | Scaffold a new capsule from a template                                   |
+| `pond new <free-form description...>`      | Scaffold + write `AGENTS.md` so an agent can build the described capsule |
 | `pond dev --port 3000`                     | Run the local dev server                                                 |
 | `pond deploy`                              | Build a standalone server bundle and write deploy metadata               |
 | `pond deploy --api http://localhost:8787`  | Upload a hosted deploy to a Pond control plane                           |
