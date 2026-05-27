@@ -5,6 +5,29 @@ Versioning: [Semver](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-27
+
+### Changed
+
+- **Templates ship raw Tailwind, not a built-in component system.** The dark-mode CSS variables (`--bg`/`--fg`/`--border`/...) and opt-in classes (`.btn`/`.card`/`.input`/`.label`/`.kbd`/`.divider`) added in 0.2.5 are gone from the bundler's HTML shell. Every capsule landed on the same `bg-zinc-950` + card-stack look — the "instant polish" became "instant AI-default." The bundler now ships a minimal safety net (`* { box-sizing: border-box }`) and lets each template own its visual identity. The capsule contract in AGENTS.md / `.claude/CLAUDE.md` / `.cursor/rules/pond.mdc` flips from "prefer these classes" to a list of AI-default patterns to actively avoid (`bg-zinc-950` card stacks, white-pill buttons, `text-2xl` page titles, universal `rounded-lg`) plus a "one signature move per capsule" rule. All five templates (`todo`, `chat`, `feed`, `crud`, `dashboard`) were rewritten to demonstrate the new aesthetic: display headings, mono accents on machine-flavored text (timestamps, indices, source tags), wireframe or brand-colored buttons, `divide-y` row lists instead of card-per-item. **This changes how every freshly-scaffolded capsule looks** — existing capsules are unaffected (the CSS only applied to the bundler-generated HTML shell, which is regenerated per-deploy).
+- **`pond deploy` defaults to hosted (`https://pond.run`).** Previously, bare `pond deploy` wrote a local bundle to `.pond/deploy-bundle.mjs` and exited — which contradicted the package's own marketing ("Hosted Lakebed-style anonymous deploys included") and made the one-command first-run flow impossible. Now `pond deploy` with no args uploads an anonymous deploy to `https://pond.run` and prints the live URL + claim token + IDE URL. The CLI prints `→ No deploy target set; uploading to https://pond.run (anonymous). Pass --local to build offline instead.` before the upload so the behavior isn't invisible. **This is a behavior change**: if you previously relied on `pond deploy` producing a local bundle (CI, airgapped, self-hosted shipping), pass `--local` (see below). `pond deploy --api <url>` is unchanged for self-hosted control planes.
+- **Smart redeploy.** When `.pond/deploy.json` already records an `apiUrl` from a prior hosted deploy, plain `pond deploy` redeploys to that same control plane instead of defaulting to `pond.run`. No more "where did this deploy go?" surprises after switching between hosted control planes.
+- **Printed IDE / management URLs trust the CLI's known `apiUrl`, not the server's echoed `remote.apiUrl`.** Some control planes (incl. current `pond.run`) echo their internal bind address back in the response body (e.g. `http://0.0.0.0:8787`), which made every printed `IDE:` / `Manage env with:` line unusable. The CLI now uses the address it actually deployed to. Same fix on the `apiUrl` field saved to `.pond/deploy.json`.
+
+### Added
+
+- **`pond deploy --local`.** Explicit opt-in for the old offline-bundle behavior — builds `.pond/deploy-bundle.mjs` + `.pond/deploy.json` without uploading. Use for airgapped/self-host scenarios where you ship the bundle yourself with `pond start`.
+
+### Security
+
+- **`pond fork` no longer auto-runs upstream lifecycle scripts.** A hostile or compromised public capsule could ship a `package.json` whose `postinstall` script is arbitrary shell — and the CLI's "next step" message tells the user to run `npm install` three lines later. `pond fork` now refuses to write any `package.json` containing `preinstall`/`install`/`postinstall`/`prepare`/`postprepare` unless the user passes `--allow-scripts`. The refusal message names the offending scripts.
+- **`pond fork` validates the control-plane URL it derives.** Previously, pasting any `<id>.evil.com` URL into `pond fork` would route the source download through `evil.com` (the CLI silently stripped the deploy subdomain and used the rest as the API base). Now: when the API base is *derived* from a pasted deploy URL, only `pond.run` and `*.pond.run` are accepted; anything else requires an explicit `--api` opt-in. Plain `http://` is refused for non-loopback hosts.
+- **Dev server `/__pond/*` debug routes are gated by Origin + Host checks.** The dev server's debug surface (`/__pond/db/tables`, `/__pond/db/dump/:table`, `/__pond/inspect`, `/__pond/logs`, `/__pond/auth/guest`) was reachable from any browser tab on the machine — wide-open `cors()` made the responses readable cross-origin, and DNS rebinding could bypass the loopback bind. A new middleware on `/__pond/*` rejects requests whose `Origin` is set and cross-origin, or whose `Host` header isn't `127.0.0.1:<port>` / `localhost:<port>` / `[::1]:<port>`. User-defined routes on the dev server are unchanged.
+
+### Fixed
+
+- **`pond claim` no longer drops `0o600` on `.pond/deploy.json`.** `pond deploy` writes the file at mode `0o600` (it contains the claim token); `pond claim` rewrote the same file with default umask, undoing the protection on every claim. Now matches `deploy.ts`.
+
 ## [0.2.11] - 2026-05-27
 
 ### Changed

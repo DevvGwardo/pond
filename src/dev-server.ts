@@ -69,9 +69,34 @@ export async function startDevServer(requestedPort: number): Promise<void> {
     }
   }
 
+  // Block cross-origin/DNS-rebind attacks against the /__pond/* debug surface.
+  // Without this, any tab the dev visits can hit the dev server on loopback
+  // and read the running app's DB or logs (cors() at the outer app sets
+  // Access-Control-Allow-Origin:*). We can't rely on loopback binding alone —
+  // the browser IS on loopback. So: same-origin Origin if present, and a
+  // Host header that points at loopback (defeats DNS rebinding).
+  const isInternalRouteSafe = (originHeader: string | null | undefined, hostHeader: string | null | undefined) => {
+    const expectedHosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`])
+    if (!hostHeader || !expectedHosts.has(hostHeader.toLowerCase())) return false
+    if (!originHeader) return true
+    try {
+      const o = new URL(originHeader)
+      const h = o.host.toLowerCase()
+      return expectedHosts.has(h)
+    } catch {
+      return false
+    }
+  }
+
   const buildApp = async () => {
     const nextApp = new Hono()
     nextApp.use("*", cors())
+    nextApp.use("/__pond/*", async (c, next) => {
+      if (!isInternalRouteSafe(c.req.header("origin"), c.req.header("host"))) {
+        return c.json({ error: "forbidden" }, 403)
+      }
+      await next()
+    })
 
     clientHtml = await buildClient(clientFile, { liveReload: true })
     nextApp.get("/", (c) => c.html(clientHtml))

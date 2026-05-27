@@ -94,6 +94,11 @@ export const deployCommand = defineCommand({
       description: "Upload .env.pond.server to the control plane on this deploy",
       default: false,
     },
+    local: {
+      type: "boolean",
+      description: "Build an offline bundle in .pond/ instead of uploading to a hosted control plane",
+      default: false,
+    },
   },
   async run({ args }) {
     const cwd = process.cwd()
@@ -103,7 +108,38 @@ export const deployCommand = defineCommand({
     const deployDir = path.join(cwd, ".pond")
     const deployFile = path.join(deployDir, "deploy.json")
     const deployId = randomBytes(8).toString("hex")
-    const apiUrl = typeof args.api === "string" && args.api ? args.api.replace(/\/$/, "") : undefined
+
+    fs.mkdirSync(deployDir, { recursive: true })
+
+    const localRecord = fs.existsSync(deployFile)
+      ? (JSON.parse(fs.readFileSync(deployFile, "utf-8")) as {
+          apiUrl?: string
+          deployId?: string
+          claimToken?: string
+          claimedAt?: string
+        })
+      : null
+
+    // Decide the deploy target:
+    //   --local              → offline build, no upload
+    //   --api X              → use X
+    //   prior hosted record  → redeploy to the same control plane (so plain
+    //                          `pond deploy` updates an existing hosted app)
+    //   otherwise            → https://pond.run, with a visible upload notice
+    const argApi = typeof args.api === "string" && args.api ? args.api.replace(/\/$/, "") : undefined
+    const wantLocal = Boolean(args["local"])
+    let apiUrl: string | undefined
+    let usingHostedDefault = false
+    if (wantLocal) {
+      apiUrl = undefined
+    } else if (argApi) {
+      apiUrl = argApi
+    } else if (localRecord?.apiUrl) {
+      apiUrl = localRecord.apiUrl
+    } else {
+      apiUrl = "https://pond.run"
+      usingHostedDefault = true
+    }
 
     if (apiUrl) {
       try {
@@ -120,16 +156,11 @@ export const deployCommand = defineCommand({
       }
     }
 
-    fs.mkdirSync(deployDir, { recursive: true })
-
-    const localRecord = fs.existsSync(deployFile)
-      ? (JSON.parse(fs.readFileSync(deployFile, "utf-8")) as {
-          apiUrl?: string
-          deployId?: string
-          claimToken?: string
-          claimedAt?: string
-        })
-      : null
+    if (usingHostedDefault) {
+      console.log(
+        `→ No deploy target set; uploading to https://pond.run (anonymous). Pass --local to build offline instead.`,
+      )
+    }
 
     if (!apiUrl) {
       const { outfile, hash } = await buildForDeploy(serverFile, cwd)
@@ -225,6 +256,13 @@ export const deployCommand = defineCommand({
       expiresAt?: string
     }
 
+    // Use the apiUrl WE deployed to, not the server's echoed `remote.apiUrl`.
+    // Some control planes (incl. current pond.run) echo back their internal
+    // bind address (e.g. http://0.0.0.0:8787) which would make every printed
+    // link unusable. The user reached this server through `apiUrl`; that's
+    // the authoritative public address.
+    const effectiveApiUrl = apiUrl
+
     fs.writeFileSync(
       deployFile,
       JSON.stringify(
@@ -232,7 +270,7 @@ export const deployCommand = defineCommand({
           deployId: remote.deployId,
           timestamp: remote.updatedAt ?? new Date().toISOString(),
           bundleHash: remote.bundleHash,
-          apiUrl: remote.apiUrl,
+          apiUrl: effectiveApiUrl,
           url: remote.url,
           claimToken: remote.claimToken,
           publicInspect: remote.publicInspect,
@@ -253,8 +291,8 @@ export const deployCommand = defineCommand({
     }
 
     const ideUrl = isAnonymous
-      ? `${remote.apiUrl}/ide/${remote.deployId}#token=${remote.claimToken}`
-      : `${remote.apiUrl}/ide/${remote.deployId}`
+      ? `${effectiveApiUrl}/ide/${remote.deployId}#token=${remote.claimToken}`
+      : `${effectiveApiUrl}/ide/${remote.deployId}`
     if (isAnonymous && remote.terminatesAt && remote.expiresAt) {
       const now = Date.now()
       const terminatesIn = formatRelative(remote.terminatesAt, now)
@@ -263,11 +301,11 @@ export const deployCommand = defineCommand({
       console.log(`  IDE: ${ideUrl}`)
       console.log(`  ⚠ Anonymous — terminates in ${terminatesIn}, deleted in ${expiresIn}`)
       console.log(`  Claim with: pond claim --signup <username>`)
-      console.log(`          or: pond login --api ${remote.apiUrl} --username <name> first, then \`pond claim\``)
+      console.log(`          or: pond login --api ${effectiveApiUrl} --username <name> first, then \`pond claim\``)
     } else {
       console.log(`Hosted deploy ${remote.claimedAt ? "updated" : "created"} at ${remote.url}`)
       console.log(`  IDE: ${ideUrl}`)
-      console.log(`Manage env with: pond env list ${remote.deployId} --api ${remote.apiUrl}`)
+      console.log(`Manage env with: pond env list ${remote.deployId} --api ${effectiveApiUrl}`)
     }
   },
 })

@@ -5,6 +5,20 @@ import { execSync } from "node:child_process"
 import { randomBytes } from "node:crypto"
 
 const SLUG_RE = /^[a-z][a-z0-9_-]*$/i
+const LIFECYCLE_SCRIPTS = ["preinstall", "install", "postinstall", "prepare", "postprepare"] as const
+
+// Hosts we'll silently trust when the apiBase is derived from a deploy URL.
+// Anything else requires an explicit `--api` so the user has to consciously
+// point fork at a non-default control plane.
+function isTrustedDerivedHost(host: string): boolean {
+  const h = host.toLowerCase().split(":")[0]
+  return h === "pond.run" || h.endsWith(".pond.run")
+}
+
+function isLoopbackHost(host: string): boolean {
+  const h = host.toLowerCase().split(":")[0]
+  return h === "localhost" || h === "127.0.0.1" || h === "::1"
+}
 
 function slugify(s: string): string {
   return (
@@ -56,6 +70,11 @@ export const forkCommand = defineCommand({
       description: "Initialize a git repo in the new directory (use --no-git to skip)",
       default: true,
     },
+    "allow-scripts": {
+      type: "boolean",
+      description: "Permit forking a package.json that defines npm lifecycle scripts (preinstall/install/postinstall/prepare). Off by default — lifecycle scripts run automatically on `npm install` and are an RCE vector if the source deploy is untrusted.",
+      default: false,
+    },
   },
   async run({ args }) {
     const source = String(args.source)
@@ -69,12 +88,13 @@ export const forkCommand = defineCommand({
     }
     // Where to fetch the source from. If the user gave us a URL we use its
     // origin; otherwise the explicit --api flag; otherwise default to the
-    // public pond.run host.
+    // public pond.run host. Whichever we end up with, validate the scheme
+    // and host before issuing the fetch — a hostile control plane is the
+    // root of the fork-RCE attack surface.
+    const apiFlag = typeof args.api === "string" ? args.api : ""
     const apiBase = (() => {
-      const flag = typeof args.api === "string" ? args.api : ""
-      if (flag) return flag.replace(/\/$/, "")
+      if (apiFlag) return apiFlag.replace(/\/$/, "")
       if (parsed?.origin) {
-        // Drop the deployId subdomain to land on the bare control plane host.
         try {
           const u = new URL(parsed.origin)
           const parts = u.host.split(".")
@@ -86,6 +106,33 @@ export const forkCommand = defineCommand({
       }
       return "https://pond.run"
     })()
+
+    try {
+      const u = new URL(apiBase)
+      const loopback = isLoopbackHost(u.host)
+      if (u.protocol === "http:" && !loopback) {
+        console.error(
+          `Refusing to fork over plain http:// from ${u.host} — fork downloads code that you'll execute. Use https://, or pass --api with a loopback host for local testing.`,
+        )
+        process.exit(1)
+      }
+      if (u.protocol !== "http:" && u.protocol !== "https:") {
+        console.error(`Refusing to fork from non-http(s) scheme: ${u.protocol}`)
+        process.exit(1)
+      }
+      // If we derived the API host from the deploy URL the user pasted, only
+      // trust pond.run-family hosts. Anything else has to be an explicit
+      // `--api` opt-in so the user is consciously choosing a control plane.
+      if (!apiFlag && !loopback && !isTrustedDerivedHost(u.host)) {
+        console.error(
+          `Refusing to derive control-plane host from ${u.host}. Pass --api https://<host> explicitly if you trust it — note that fork executes code from this host on \`npm install\` and \`pond dev\`.`,
+        )
+        process.exit(1)
+      }
+    } catch {
+      console.error(`Invalid --api URL: ${apiBase}`)
+      process.exit(1)
+    }
 
     const url = `${apiBase}/api/public-deploys/${deployId}/source`
     const res = await fetch(url)
@@ -107,6 +154,32 @@ export const forkCommand = defineCommand({
     if (!body.files || typeof body.files !== "object") {
       console.error("Source export was malformed.")
       process.exit(1)
+    }
+
+    // npm runs lifecycle scripts automatically on `npm install`, which the
+    // CLI tells the user to run next. A hostile or compromised control plane
+    // can ship a package.json whose postinstall script is `rm -rf ~`. Refuse
+    // by default; let the user opt in with --allow-scripts.
+    if (!args["allow-scripts"]) {
+      const pkgText = body.files["package.json"]
+      if (typeof pkgText === "string") {
+        let pkg: { scripts?: Record<string, unknown> } | null = null
+        try {
+          pkg = JSON.parse(pkgText)
+        } catch {
+          console.error(`Refusing to fork: package.json is not valid JSON.`)
+          process.exit(1)
+        }
+        const offending = pkg?.scripts
+          ? LIFECYCLE_SCRIPTS.filter((s) => typeof pkg!.scripts![s] === "string")
+          : []
+        if (offending.length > 0) {
+          console.error(
+            `Refusing to fork: upstream package.json defines npm lifecycle script(s) ${offending.join(", ")} which would run on \`npm install\`. Re-run with --allow-scripts if you trust this deploy.`,
+          )
+          process.exit(1)
+        }
+      }
     }
 
     let dirName = typeof args.name === "string" ? args.name : ""

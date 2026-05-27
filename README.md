@@ -160,8 +160,9 @@ Pond will:
 | `pond new <name>`                          | Scaffold a new capsule from a template                                   |
 | `pond new <free-form description...>`      | Scaffold + write `AGENTS.md` so an agent can build the described capsule |
 | `pond dev --port 3000`                     | Run the local dev server                                                 |
-| `pond deploy`                              | Build a standalone server bundle and write deploy metadata               |
-| `pond deploy --api http://localhost:8787`  | Upload a hosted deploy to a Pond control plane                           |
+| `pond deploy`                              | Anonymous deploy to https://pond.run — prints a live URL + claim token   |
+| `pond deploy --api <url>`                  | Upload to a different control plane (e.g. self-hosted)                   |
+| `pond deploy --local`                      | Build a standalone server bundle for `pond start` instead of uploading   |
 | `pond claim`                               | Cross-machine claim using a deploy's claim token                         |
 | `pond start`                               | Start the bundled deploy artifact locally                                |
 | `pond host`                                | Start the self-hosted Pond control plane                                 |
@@ -254,11 +255,11 @@ These power the CLI inspection commands and make local capsules easy to inspect 
 
 ## Deploy Bundles
 
-`pond deploy` has two modes, depending on whether `--api <url>` is passed:
+`pond deploy` has two modes:
 
-**Local (no `--api`).** Bundles the capsule server to `.pond/deploy-bundle.mjs`, writes `.pond/deploy.json` with a generated deploy ID + bundle hash. Use `pond start` to serve the bundle.
+**Hosted (default).** Uploads the source tree (`server/`, `client/`, `shared/`, `package.json`) to a control plane — `https://pond.run` by default, or whatever was used on the previous deploy of this capsule, or `--api <url>` for a self-hosted host. The host runs esbuild server-side, stores both the source and the produced bundle, forks a worker, and returns the deploy URL + claim token + IDE URL. The on-server source is what backs the browser IDE — edits made in the IDE go through `/api/deploys/:id/files/*` and trigger a server-side rebuild on Deploy.
 
-**Hosted (`--api <url>`).** Uploads the source tree (`server/`, `client/`, `shared/`, `package.json`) to the control plane. The host runs esbuild server-side, stores both the source and the produced bundle, forks a worker, and returns the deploy URL + claim token + IDE URL. The on-server source is what backs the browser IDE — edits made in the IDE go through `/api/deploys/:id/files/*` and trigger a server-side rebuild on Deploy.
+**Local (`--local`).** Bundles the capsule server to `.pond/deploy-bundle.mjs`, writes `.pond/deploy.json` with a generated deploy ID + bundle hash. Use `pond start` to serve the bundle. Use this for airgapped/self-host scenarios where you want to ship the bundle yourself.
 
 ## Hosted control plane (self-hosted MVP)
 

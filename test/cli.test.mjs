@@ -99,7 +99,7 @@ test("`pond new` refuses to overwrite an existing directory", async () => {
   )
 })
 
-test("`pond deploy` (no --api) produces .pond/deploy-bundle.mjs and deploy.json", async () => {
+test("`pond deploy --local` produces .pond/deploy-bundle.mjs and deploy.json", async () => {
   const parent = tmp("pond-cli-deploy-")
   await execFileP(process.execPath, [CLI_PATH, "new", "cap1", "--no-git"], {
     cwd: parent,
@@ -107,7 +107,7 @@ test("`pond deploy` (no --api) produces .pond/deploy-bundle.mjs and deploy.json"
     timeout: 30000,
   })
   const projDir = path.join(parent, "cap1")
-  await execFileP(process.execPath, [CLI_PATH, "deploy"], {
+  await execFileP(process.execPath, [CLI_PATH, "deploy", "--local"], {
     cwd: projDir,
     env: { ...process.env },
     timeout: 30000,
@@ -131,7 +131,7 @@ test("`pond start` serves the bundled output", async () => {
     timeout: 30000,
   })
   const projDir = path.join(parent, "cap2")
-  await execFileP(process.execPath, [CLI_PATH, "deploy"], {
+  await execFileP(process.execPath, [CLI_PATH, "deploy", "--local"], {
     cwd: projDir,
     timeout: 30000,
   })

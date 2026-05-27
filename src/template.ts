@@ -91,13 +91,14 @@ export function App() {
 - Keep everything in \`server/index.ts\` and \`client/index.tsx\`. Add files under \`shared/\` only if both sides import them.
 - No separate API layer. Define mutations/queries on the server; call them by name from the client.
 - No \`fetch\` from the client to your own server — use \`useQuery\` / \`useMutation\`.
-- Tailwind classes are available out of the box; no config needed.
-- A dark base design system is loaded automatically. Prefer these classes for instant polish, override with Tailwind utilities when you need something custom:
-  - \`btn\` + variant (\`btn-primary\` / \`btn-secondary\` / \`btn-ghost\` / \`btn-danger\`) for buttons
-  - \`card\` for content panels (background, border, rounded, padded)
-  - \`input\`, \`textarea\`, \`select\` for form fields; \`label\` for their labels
-  - \`kbd\` for keyboard hints, \`divider\` for horizontal rules
-  - CSS variables \`--bg\`, \`--bg-elev\`, \`--fg\`, \`--fg-muted\`, \`--fg-subtle\`, \`--border\`, \`--accent\`, \`--danger\`, \`--success\`, \`--radius\`, \`--radius-sm\`, \`--radius-lg\` are available for custom styles.
+- Tailwind classes are available out of the box (Tailwind v3 via CDN); no config needed. Use raw Tailwind utilities — there are **no preset \`.btn\` / \`.card\` / \`.input\` classes** and you should not invent any.
+- **Design intentionally — do not produce the AI default.** A pond capsule that looks like every other Claude/Cursor demo is a bug. Specifically avoid:
+  - \`bg-zinc-950\` plus \`bg-zinc-900 border border-zinc-800 rounded-lg\` card stacks. Pick \`bg-black\` or a non-zinc neutral, and use \`divide-y\` / \`border-y\` rows or borderless lists instead of card-per-item.
+  - The white-filled pill button (\`bg-zinc-100 text-zinc-950 rounded-lg px-5 py-3 font-semibold\`). Prefer wireframe buttons (\`border border-white px-4 py-2 font-medium\`) or a real brand color — never the universal AI-default white pill.
+  - One font-family everywhere. Sprinkle \`font-mono\` on timestamps, indices, source tags, IDs — anything machine-flavored.
+  - Timid \`text-2xl\` page titles. Page titles are display type: \`text-4xl\` / \`text-5xl\` \`font-bold tracking-tight\` minimum.
+  - \`rounded-lg\` on everything. Square corners (no \`rounded-*\` except round avatars) read as intentional; universally rounded reads as defaulted.
+- Each capsule should have **one signature move** — a single deliberate choice that makes it not look templated. Examples: numbered mono indices on list rows, oversized \`tabular-nums\` numbers, a serif body type, a bottom-anchored composer, a colored source tag.
 `
 
 function agentsMdContent(prompt: string, templateName: string): string {

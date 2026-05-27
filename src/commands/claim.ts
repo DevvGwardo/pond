@@ -124,7 +124,13 @@ export const claimCommand = defineCommand({
         null,
         2,
       ),
+      { mode: 0o600 },
     )
+    try {
+      fs.chmodSync(deployFile, 0o600)
+    } catch {
+      // best-effort on platforms without chmod
+    }
 
     console.log(`Claimed deploy ${remote.deployId}${savedUsername ? ` for ${savedUsername}` : ""} at ${remote.url}`)
     if (remote.user) {
