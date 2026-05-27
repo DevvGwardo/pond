@@ -1,6 +1,6 @@
 {
   "name": "pondsh",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Agent-native CLI and runtime for building small full-stack TypeScript apps. Hosted Lakebed-style anonymous deploys included.",
   "license": "MIT",
   "homepage": "https://github.com/DevvGwardo/pond#readme",
@@ -37,7 +37,8 @@
     "test": "npm run build && node --test test/*.test.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "prepare": "husky"
   },
   "dependencies": {
     "@hono/node-server": "^2.0.4",
@@ -66,6 +67,8 @@
     "@types/better-sqlite3": "^7.6.0",
     "@types/ws": "^8.18.1",
     "codemirror": "^6.0.2",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.0.5",
     "prettier": "^3.8.3",
     "typescript": "^5.7.0"
   },
@@ -77,5 +80,8 @@
   ],
   "engines": {
     "node": ">=18"
+  },
+  "lint-staged": {
+    "*.{ts,tsx,js,mjs,json,md,yml,yaml,css}": "prettier --write"
   }
 }

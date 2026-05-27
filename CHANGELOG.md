@@ -5,6 +5,23 @@ Versioning: [Semver](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-05-27
+
+### Added
+
+- **`pond signup <username>` — friendly first-account flow.** The previous "create an account on pond.run" path was `pond claim --signup <username>`, hidden under a command name (`claim`) that sounds like ownership transfer, not account creation. New users typed `pond login` instead, hit confusing errors, and bounced. `pond signup` is a one-line wrapper that reads `.pond/deploy.json` from the cwd, calls the same claim endpoint with the signup payload, and saves the resulting token to `~/.pond/credentials.json`. The three-command first-run is now: `pond new my-app`, `pond deploy`, `pond signup torrey`. If there's no `.pond/deploy.json`, signup refuses with a hint pointing at `pond deploy` — signup without an attached deploy is intentionally not supported (it would create a dangling account).
+- The anonymous-deploy success message now prints `Claim with: pond signup <username>` (with `pond claim --signup` listed as the alias) instead of the previous `pond claim` + `pond login --api … --username … --token …` two-line incantation.
+
+### Changed
+
+- **`pond login --api` defaults to `https://pond.run`** (matching `pond deploy` since 0.3.0). Most users want the public host; making them retype it on every login is friction.
+- **`pond login` catches the empty-`--api` footgun.** Citty (like most arg parsers) will consume the next token as a flag's value, even if it starts with `--`. So `pond login --api --username devgwardo` silently assigned `--username` as the api URL and then failed trying to reach a control plane named "--username". `pond login` now detects values that start with `--` (or that are empty) and errors out with a clear explanation pointing at the simpler `--token`-based command form.
+- **`pond login` error message when no token / no bootstrap credentials are available** now lists three concrete next steps (signup, attach existing token, self-hosted bootstrap) instead of just complaining about missing `--admin-token` / `POND_HOST_TOKEN`. Half the people hitting this error want option 1.
+
+### Internal
+
+- **Husky + lint-staged pre-commit hook running `prettier --write` on staged files.** The 0.3.0 and 0.3.1 releases failed CI on formatting — `prepublishOnly` only runs `build`, not `format:check`, so the package shipped fine, but `main` was red. The pre-commit hook prevents this from recurring. Activates after `npm install` via the `prepare` script (husky no-ops for downstream npm installs of `pondsh`).
+
 ## [0.3.1] - 2026-05-27
 
 ### Added

@@ -19,6 +19,7 @@ For the full list of any command's flags, run `pond <command> --help`. This page
 | [`pond db`](#pond-db)           | Inspect, dump, back up, and restore the capsule's SQLite                |
 | [`pond fork`](#pond-fork)       | Clone a public capsule's source from a deploy URL                       |
 | [`pond claim`](#pond-claim)     | Take ownership of an anonymous hosted deploy                            |
+| [`pond signup`](#pond-signup)   | Friendly first-account flow — create a user + claim the current deploy  |
 | [`pond host`](#pond-host)       | Run your own hosted control plane (the thing `pond deploy` deploys to)  |
 | [`pond login`](#pond-login)     | Save a user API token for a control plane                               |
 | [`pond user`](#pond-user)       | Create / list / promote users on a control plane (admin)                |
@@ -115,7 +116,7 @@ After a hosted deploy, the URL + `claimToken` are saved to `.pond/deploy.json` (
 
 ## pond start
 
-Run a local deploy bundle previously produced by `pond deploy` (with no `--api`).
+Run a local deploy bundle previously produced by `pond deploy --local`.
 
 **When to use:** smoke-testing a production build on your machine, or serving the bundle behind your own reverse proxy.
 
@@ -124,7 +125,7 @@ Run a local deploy bundle previously produced by `pond deploy` (with no `--api`)
 - `--port <n>` — port to bind (defaults to the `port` saved in `.pond/deploy.json`; falls back to `3000`).
 
 ```sh
-pond deploy           # produces .pond/deploy-bundle.mjs
+pond deploy --local   # produces .pond/deploy-bundle.mjs
 pond start            # serves it
 PORT=8080 pond start  # env-var override
 ```
@@ -226,23 +227,45 @@ pond fork https://abc.pond.run --name my-copy
 
 ## pond claim
 
-Take ownership of an anonymous hosted deploy by presenting its `claimToken`. Optionally creates a new user in the same step.
+Take ownership of an anonymous hosted deploy by presenting its `claimToken`. Optionally creates a new user in the same step. For the friendliest first-time path, use [`pond signup`](#pond-signup) — it wraps this command.
 
-**When to use:** right after an anonymous `pond deploy --api ...` — the deploy will be reaped after the grace window unless you claim it.
+**When to use:** cross-machine ownership transfer (the `claimToken` is portable), or any time you want explicit control over the claim step. For day-one "I just deployed and want an account," prefer `pond signup`.
 
 **Key flags:**
 
-- `<deployId>` (positional, required) — the deploy to claim. Defaults to the one in `.pond/deploy.json` if you ran deploy from this directory.
-- `--username <name>` — create a new user with this username and claim in one shot.
+- Reads `.pond/deploy.json` from the cwd for `deployId`, `apiUrl`, and `claimToken`.
+- `--signup <name>` — create a new user with this username and claim in one shot.
 - `--api <url>` — override the API URL from `.pond/deploy.json`.
 
 ```sh
-pond deploy --api https://pond.run
+pond deploy
 # → deployId: abc123…, claimToken: tk_…
 
-pond claim                          # uses .pond/deploy.json
-pond claim --username devgwardo     # claim + create user
+pond claim                          # uses .pond/deploy.json (existing user)
+pond claim --signup devgwardo       # claim + create user
 ```
+
+---
+
+## pond signup
+
+Create an account on a pond control plane and claim the current anonymous deploy under it — in one command. Wraps [`pond claim --signup`](#pond-claim) with a name that matches the user's mental model.
+
+**When to use:** day-one. You ran `pond new` and `pond deploy` and now you want an account that owns this deploy. This is the one-line shortcut.
+
+**Key flags:**
+
+- `<username>` (positional, required) — the username to create (matches `/^[a-z0-9_-]{1,32}$/i`).
+- `--api <url>` — override the apiUrl from `.pond/deploy.json` (rarely needed — the deploy already knows where it lives).
+
+```sh
+# Three-command first-run flow
+pond new my-app
+pond deploy                # anonymous deploy on pond.run, gets a URL + claimToken
+pond signup torrey         # account "torrey" created, this deploy claimed under it
+```
+
+If there's no `.pond/deploy.json` (you haven't deployed yet), `pond signup` refuses and points at `pond deploy`. Signup without an attached deploy is intentionally not supported — it would create a dangling account.
 
 ---
 
@@ -285,27 +308,33 @@ On Node 22 LTS and later, anonymous deploys boot inside Node's permission model 
 
 ## pond login
 
-Bootstrap or attach a user identity for a pond control plane. Saves the token to `~/.pond/credentials.json` so `pond deploy --api ...` doesn't need a `--token`.
+Attach an existing user identity for a pond control plane. Saves the token to `~/.pond/credentials.json` so subsequent `pond deploy` calls don't need a `--token`.
 
-**When to use:** first time deploying to a control plane you own a user on, or attaching an existing token.
+**When to use:** you already have a token issued to you (from a previous `pond signup`, an admin minting it for you, or a self-hosted bootstrap). For first-time account creation, use [`pond signup`](#pond-signup) instead — it's a one-command path that doesn't require having a token in advance.
 
 **Key flags:**
 
-- `--api <url>` (required) — control plane base URL.
-- `--username <name>` — username to create or attach.
-- `--token <value>` — attach an existing token instead of creating a new user.
-- `--admin-token <value>` — admin token, used to create a new (non-admin) user as part of login.
+- `--api <url>` — control plane base URL. **Defaults to `https://pond.run`** (matches `pond deploy`).
+- `--username <name>` — label for the saved credential. With `--token`, must match the token's actual user.
+- `--token <value>` — attach an existing token (the common path).
+- `--admin-token <value>` — admin token, used to create a new (non-admin) user on a self-hosted plane. Requires `--username`.
 
 ```sh
-# First-time bootstrap of a brand-new control plane (becomes admin)
-pond login --api https://pond.example.com --username devgwardo
+# Attach an existing token (most common path)
+pond login --username devgwardo --token usr_xxxxxxxx
 
-# Attach an existing token issued to you
-pond login --api https://pond.example.com --token usr_xxxxxxxx
+# Self-hosted control plane
+pond login --api https://pond.example.com --username devgwardo --token usr_xxxxxxxx
 
-# Admin creating someone else's account
-pond login --api https://pond.example.com --username alice --admin-token usr_admin_xxx
+# Self-hosted bootstrap (POND_HOST_TOKEN must be set, or pass --admin-token)
+POND_HOST_TOKEN=<bootstrap-token> pond login --api https://pond.example.com --username admin
 ```
+
+When you don't have a token yet, `pond login` errors with a three-way hint:
+
+1. `pond signup <name>` (if you have an anonymous deploy in this directory),
+2. `pond login --token <token> --username <name>` (if someone gave you a token),
+3. `POND_HOST_TOKEN=…` or `--admin-token` (self-hosted bootstrap).
 
 ---
 

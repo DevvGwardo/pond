@@ -300,8 +300,8 @@ export const deployCommand = defineCommand({
       console.log(`Hosted deploy created at ${remote.url}`)
       console.log(`  IDE: ${ideUrl}`)
       console.log(`  ⚠ Anonymous — terminates in ${terminatesIn}, deleted in ${expiresIn}`)
-      console.log(`  Claim with: pond claim --signup <username>`)
-      console.log(`          or: pond login --api ${effectiveApiUrl} --username <name> first, then \`pond claim\``)
+      console.log(`  Claim with: pond signup <username>`)
+      console.log(`   (or alias: pond claim --signup <username>)`)
     } else {
       console.log(`Hosted deploy ${remote.claimedAt ? "updated" : "created"} at ${remote.url}`)
       console.log(`  IDE: ${ideUrl}`)
