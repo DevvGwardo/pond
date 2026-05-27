@@ -5,6 +5,12 @@ Versioning: [Semver](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.11] - 2026-05-27
+
+### Changed
+
+- **README Quickstart leads with `npx pondsh new …`.** Following the 0.2.8 `pondsh` bin alias and the 0.2.10 hoisting fix, the canonical run-without-install command (`npx pondsh new my-capsule`) actually works on a clean machine — surface it as the primary path. Global install via `npm install -g pondsh` is still documented but moved below. The `--generate` example uses the npx form too and shows what the flag does (invokes the local agent headlessly) instead of just demoing the stub-scaffold path.
+
 ## [0.2.10] - 2026-05-27
 
 ### Fixed

@@ -72,27 +72,36 @@ That one definition becomes:
 
 ## Quickstart
 
+No install required — `npx` runs the latest release:
+
 ```bash
-npm install -g pondsh
-pond new my-capsule
+npx pondsh new my-capsule
 cd my-capsule
-pond dev
+npm install && npm run dev
 ```
 
 Open `http://localhost:3000`.
 
+Prefer a global install? `npm install -g pondsh` then use `pond new …` and `pond dev` directly.
+
 ### Or: describe what you want and let an agent build it
 
-Anything you type after `pond new` that isn't a single slug is treated as a build prompt:
+Anything you type after `pond new` that isn't a single slug is treated as a build prompt. Pass `--generate` to hand the brief to a local coding agent (`hermes`, `claude`, or `codex` — whichever is installed) and have it design the capsule for you:
 
 ```bash
-pond new a dashboard for hermes-agent
-# → creates ./dashboard-hermes-agent/
+npx pondsh new "a habit tracker that is inspired by twitch" --generate
+# → creates ./habit-tracker-that-is-inspired-by-twitch/
 # → writes AGENTS.md + .claude/CLAUDE.md with your prompt + the capsule contract
-# → open in Claude Code / Cursor; the agent reads the brief and edits server/ + client/
+# → invokes the local agent headlessly to fill in server/ + client/
 ```
 
-Pass `--dir my-app` to override the auto-slugged directory name. Pond itself doesn't call any LLM — the scaffolded files just hand the brief to whatever agent you open the capsule in. After the agent finishes, `npm run dev` and `pond deploy --api …` work normally; the IDE URL lets you keep iterating in the browser.
+Without `--generate`, pond just scaffolds the stub + `AGENTS.md` and you open it in Claude Code / Cursor yourself:
+
+```bash
+npx pondsh new "a dashboard for hermes-agent"
+```
+
+Pass `--dir my-app` to override the auto-slugged directory name. Pond itself doesn't call any remote LLM — `--generate` only invokes whatever local agent CLI is on your `$PATH`. After the agent finishes, `npm run dev` and `pond deploy --api …` work normally; the IDE URL lets you keep iterating in the browser.
 
 ### Anonymous hosted deploy (Lakebed-style)
 
