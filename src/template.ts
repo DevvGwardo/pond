@@ -92,6 +92,12 @@ export function App() {
 - No separate API layer. Define mutations/queries on the server; call them by name from the client.
 - No \`fetch\` from the client to your own server — use \`useQuery\` / \`useMutation\`.
 - Tailwind classes are available out of the box; no config needed.
+- A dark base design system is loaded automatically. Prefer these classes for instant polish, override with Tailwind utilities when you need something custom:
+  - \`btn\` + variant (\`btn-primary\` / \`btn-secondary\` / \`btn-ghost\` / \`btn-danger\`) for buttons
+  - \`card\` for content panels (background, border, rounded, padded)
+  - \`input\`, \`textarea\`, \`select\` for form fields; \`label\` for their labels
+  - \`kbd\` for keyboard hints, \`divider\` for horizontal rules
+  - CSS variables \`--bg\`, \`--bg-elev\`, \`--fg\`, \`--fg-muted\`, \`--fg-subtle\`, \`--border\`, \`--accent\`, \`--danger\`, \`--success\`, \`--radius\`, \`--radius-sm\`, \`--radius-lg\` are available for custom styles.
 `
 
 function agentsMdContent(prompt: string, templateName: string): string {

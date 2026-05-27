@@ -3,6 +3,7 @@ import { serve } from "@hono/node-server"
 import { cors } from "hono/cors"
 import { WebSocketServer } from "ws"
 import type { IncomingMessage } from "node:http"
+import * as net from "node:net"
 import type { Socket as NetSocket } from "node:net"
 import chokidar from "chokidar"
 import * as fs from "node:fs"
@@ -11,7 +12,30 @@ import { buildClient } from "./bundler.js"
 import { createRuntime } from "./runtime.js"
 import type { CapsuleContext, SocketHandler, SocketLike } from "./server/index.js"
 
-export async function startDevServer(port: number): Promise<void> {
+function isPortFree(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const srv = net.createServer()
+    srv.once("error", () => resolve(false))
+    srv.once("listening", () => srv.close(() => resolve(true)))
+    srv.listen(port, "127.0.0.1")
+  })
+}
+
+// Walk forward from the requested port until we find one free, so a
+// kanban-bridge (or anything else) squatting on 3000 doesn't crash dev with
+// EADDRINUSE — we just listen on 3001 and tell the user.
+async function findAvailablePort(start: number, maxAttempts = 20): Promise<number> {
+  for (let p = start; p < start + maxAttempts; p++) {
+    if (await isPortFree(p)) return p
+  }
+  throw new Error(`No free port in range ${start}–${start + maxAttempts - 1}`)
+}
+
+export async function startDevServer(requestedPort: number): Promise<void> {
+  const port = await findAvailablePort(requestedPort)
+  if (port !== requestedPort) {
+    console.log(`  port ${requestedPort} in use — using ${port} instead`)
+  }
   const cwd = process.cwd()
   const serverFile = path.join(cwd, "server", "index.ts")
   const clientFile = path.join(cwd, "client", "index.tsx")

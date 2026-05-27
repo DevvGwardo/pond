@@ -7,7 +7,10 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
     ...options,
   })
   if (!res.ok) throw new Error(`API error: ${res.status}`)
-  return res.json()
+  // Mutations that return void send an empty body — calling res.json() on that
+  // throws "Unexpected end of JSON input". Read text first, parse only if present.
+  const text = await res.text()
+  return (text ? JSON.parse(text) : undefined) as T
 }
 
 const activeQueries = new Map<string, Set<() => Promise<void>>>()
