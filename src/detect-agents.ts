@@ -105,9 +105,13 @@ function streamChild(
 ): Promise<{ ok: boolean; error?: string }> {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, { cwd, stdio: ["ignore", "pipe", "pipe"] })
+    // If the caller provides onChunk, *they* own rendering (e.g. they're
+    // drawing a spinner around the stream and need to know when bytes arrive
+    // to clear it). Falling back to direct stdout.write preserves the old
+    // behavior for any caller that just wants the output verbatim.
     const write = (s: string) => {
-      onChunk?.(s)
-      process.stdout.write(s)
+      if (onChunk) onChunk(s)
+      else process.stdout.write(s)
     }
     child.stdout.on("data", (d) => write(d.toString()))
     child.stderr.on("data", (d) => write(d.toString()))

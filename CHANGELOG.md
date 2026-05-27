@@ -5,6 +5,17 @@ Versioning: [Semver](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-05-27
+
+### Changed
+
+- **npm tarball shrunk from ~12.6 MB to ~712 KB** by switching README image references from relative paths (`./docs/branding/*.png`) to absolute GitHub raw URLs and narrowing the `files` array from `docs/` to `docs/*.md` + `docs/*.txt`. The seven branding PNGs were dominating the package size; they now load on the npmjs.com package page from GitHub raw instead of being bundled. Every `npm install pondsh` pulls down ~17× less data. The npm page still renders the imagery (npm fetches the absolute URLs at render time), and the markdown reference docs (`cli-reference.md` et al.) still ship for `pond host`'s `/docs/<slug>.md` agent route.
+
+### Added
+
+- **Live progress feedback during `pond new --generate`.** Previously the CLI printed `Streaming output from <agent>...` and then waited silently until the agent emitted its first byte — which can be 10–30 seconds for hermes/claude/codex booting up. Now on TTYs you see an animated spinner with elapsed time (`⠼ hermes is thinking… 12s`) that clears the moment the first byte arrives and the real streaming output takes over. On completion the CLI prints a summary (`hermes finished in 1m 47s — 4.2 KB streamed`). Falls back to a single `Building with <agent> (this can take 1–3 minutes)…` line on non-TTY runs (CI, pipes) so log output stays clean.
+- `streamChild` in `src/detect-agents.ts` now defers to the caller for rendering when `onChunk` is provided (the heartbeat above needs to coordinate stdout). Callers that don't pass `onChunk` keep the previous direct-to-stdout behavior.
+
 ## [0.3.3] - 2026-05-27
 
 ### Fixed

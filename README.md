@@ -1,11 +1,11 @@
 # Pond
 
 <p align="center">
-  <img src="./docs/branding/pond-title.png" alt="Pond title image" width="100%" />
+  <img src="https://raw.githubusercontent.com/DevvGwardo/pond/main/docs/branding/pond-title.png" alt="Pond title image" width="100%" />
 </p>
 
 <p align="center">
-  <img src="./docs/branding/pond-agent-flow.png" alt="Pond agent flow diagram" width="100%" />
+  <img src="https://raw.githubusercontent.com/DevvGwardo/pond/main/docs/branding/pond-agent-flow.png" alt="Pond agent flow diagram" width="100%" />
 </p>
 
 <p align="center">
@@ -60,7 +60,7 @@ export default capsule({
 ```
 
 <p align="center">
-  <img src="./docs/branding/pond-capsule-anatomy.png" alt="Pond capsule anatomy diagram" width="100%" />
+  <img src="https://raw.githubusercontent.com/DevvGwardo/pond/main/docs/branding/pond-capsule-anatomy.png" alt="Pond capsule anatomy diagram" width="100%" />
 </p>
 
 That one definition becomes:
@@ -108,7 +108,7 @@ Pass `--dir my-app` to override the auto-slugged directory name. Pond itself doe
 If a public Pond host is running (e.g. `pond.example.com`), you can ship anonymously without an account:
 
 <p align="center">
-  <img src="./docs/branding/pond-deploy-claim.png" alt="Pond anonymous deploy and claim flow diagram" width="100%" />
+  <img src="https://raw.githubusercontent.com/DevvGwardo/pond/main/docs/branding/pond-deploy-claim.png" alt="Pond anonymous deploy and claim flow diagram" width="100%" />
 </p>
 
 ```bash
@@ -150,7 +150,7 @@ Pond will:
 - push reload events over `/__pond_reload`
 
 <p align="center">
-  <img src="./docs/branding/pond-workflow.png" alt="Pond workflow image" width="100%" />
+  <img src="https://raw.githubusercontent.com/DevvGwardo/pond/main/docs/branding/pond-workflow.png" alt="Pond workflow image" width="100%" />
 </p>
 
 ## CLI
@@ -180,7 +180,7 @@ Pond will:
 ## Runtime Model
 
 <p align="center">
-  <img src="./docs/branding/pond-how-it-works.png" alt="How Pond works diagram" width="100%" />
+  <img src="https://raw.githubusercontent.com/DevvGwardo/pond/main/docs/branding/pond-how-it-works.png" alt="How Pond works diagram" width="100%" />
 </p>
 
 At runtime, Pond does four things:
@@ -266,7 +266,7 @@ These power the CLI inspection commands and make local capsules easy to inspect 
 Pond ships a self-hostable control plane that fronts multiple capsule deploys behind a single ingress, manages user accounts and per-deploy ownership, and isolates each deploy in its own forked worker process.
 
 <p align="center">
-  <img src="./docs/branding/pond-control-plane.png" alt="Pond self-hosted control plane diagram" width="100%" />
+  <img src="https://raw.githubusercontent.com/DevvGwardo/pond/main/docs/branding/pond-control-plane.png" alt="Pond self-hosted control plane diagram" width="100%" />
 </p>
 
 ### Threat model

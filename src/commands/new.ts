@@ -169,10 +169,56 @@ export const newCommand = defineCommand({
       const generatePrompt = `Read AGENTS.md in the current directory and follow the build instructions. Edit server/index.ts and client/index.tsx in place.`
       const errors: Array<{ name: string; error: string }> = []
       let success = false
+      const isTty = process.stdout.isTTY === true
+      const fmtElapsed = (ms: number) => {
+        const s = Math.floor(ms / 1000)
+        const m = Math.floor(s / 60)
+        return m > 0 ? `${m}m ${s % 60}s` : `${s}s`
+      }
+      const spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
       for (const candidate of detected) {
-        console.log(`\n  Streaming output from ${candidate.name}...\n`)
-        const result = await invokeAgent(candidate, { cwd: projDir, prompt: generatePrompt })
+        const startedAt = Date.now()
+        let firstByteAt: number | null = null
+        let totalBytes = 0
+        let frameIdx = 0
+        let timer: NodeJS.Timeout | null = null
+
+        if (isTty) {
+          process.stdout.write(`\n  ${spinnerFrames[0]} ${candidate.name} is thinking… 0s`)
+          timer = setInterval(() => {
+            if (firstByteAt !== null) return
+            frameIdx = (frameIdx + 1) % spinnerFrames.length
+            process.stdout.write(
+              `\r\x1b[2K  ${spinnerFrames[frameIdx]} ${candidate.name} is thinking… ${fmtElapsed(Date.now() - startedAt)}`,
+            )
+          }, 120)
+        } else {
+          // Non-TTY (CI, pipe, log) — single up-front line, no animation.
+          console.log(`\n  Building with ${candidate.name} (this can take 1–3 minutes)…`)
+        }
+
+        const onChunk = (s: string) => {
+          if (firstByteAt === null) {
+            firstByteAt = Date.now()
+            if (isTty) {
+              process.stdout.write("\r\x1b[2K") // clear spinner line
+              if (timer) {
+                clearInterval(timer)
+                timer = null
+              }
+            }
+          }
+          totalBytes += Buffer.byteLength(s, "utf-8")
+          process.stdout.write(s)
+        }
+
+        const result = await invokeAgent(candidate, { cwd: projDir, prompt: generatePrompt, onChunk })
+        if (timer) clearInterval(timer)
+        if (isTty && firstByteAt === null) process.stdout.write("\r\x1b[2K")
+
         if (result.ok) {
+          const kb = totalBytes > 0 ? ` — ${(totalBytes / 1024).toFixed(1)} KB streamed` : ""
+          console.log(`\n  ${candidate.name} finished in ${fmtElapsed(Date.now() - startedAt)}${kb}`)
           success = true
           break
         }

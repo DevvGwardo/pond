@@ -1,6 +1,6 @@
 {
   "name": "pondsh",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Agent-native CLI and runtime for building small full-stack TypeScript apps. Hosted Lakebed-style anonymous deploys included.",
   "license": "MIT",
   "homepage": "https://github.com/DevvGwardo/pond#readme",
@@ -26,7 +26,8 @@
     "bin/",
     "src/",
     "client/",
-    "docs/",
+    "docs/*.md",
+    "docs/*.txt",
     "templates/"
   ],
   "scripts": {
