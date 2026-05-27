@@ -158,6 +158,33 @@ function createRuntimeFromDefinition(
   }
 
   function mount(app: Hono) {
+    // Tiny inline favicon — a teal water droplet on the same dark background
+    // as the default client shell. Without this, every deployed capsule
+    // returns 404 for /favicon.ico, which is noisy and looks broken.
+    const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#09090b"/><path d="M16 6c-3 5-7 9-7 13a7 7 0 0 0 14 0c0-4-4-8-7-13z" fill="#67e8f9"/></svg>`
+    app.get(
+      "/favicon.svg",
+      (c) =>
+        new Response(FAVICON_SVG, {
+          status: 200,
+          headers: {
+            "content-type": "image/svg+xml",
+            "cache-control": "public, max-age=86400",
+          },
+        }),
+    )
+    app.get(
+      "/favicon.ico",
+      (c) =>
+        new Response(FAVICON_SVG, {
+          status: 200,
+          headers: {
+            "content-type": "image/svg+xml",
+            "cache-control": "public, max-age=86400",
+          },
+        }),
+    )
+
     app.get("/auth/google", async (c) => {
       if (!google) return c.text("Missing Google OAuth configuration", 500)
 

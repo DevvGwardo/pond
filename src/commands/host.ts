@@ -1483,6 +1483,13 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
               headers: { "content-type": "text/plain; charset=utf-8" },
             })
           }
+          if (url.pathname === "/favicon.svg" || url.pathname === "/favicon.ico") {
+            const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#09090b"/><path d="M16 6c-3 5-7 9-7 13a7 7 0 0 0 14 0c0-4-4-8-7-13z" fill="#67e8f9"/></svg>`
+            return new Response(svg, {
+              status: 200,
+              headers: { "content-type": "image/svg+xml", "cache-control": "public, max-age=86400" },
+            })
+          }
         }
         return c.json({ error: "Not found" }, 404)
       }

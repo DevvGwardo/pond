@@ -2,12 +2,23 @@ import * as esbuild from "esbuild"
 import * as path from "node:path"
 
 export async function buildClient(entry: string, options: { liveReload?: boolean } = {}): Promise<string> {
+  // IIFE format with a globalName wraps the user bundle so its identifiers
+  // (preact's `h`, `render`, hooks, the user's `App`) do not leak into the
+  // surrounding HTML shell's module scope. The previous setup imported `h`
+  // from esm.sh in the shell AND inlined another `h` from the bundled
+  // preact in `${js}` — that's a top-level "Identifier 'h' has already been
+  // declared" at parse time. Bundling as IIFE puts everything in a closure
+  // and exposes only the named exports of the user's entry on
+  // `globalThis.__pondApp`. We then mount the App with the SAME preact
+  // instance that the user's hooks use (avoiding the "two preacts" bug
+  // where hooks silently fail).
   const result = await esbuild.build({
     entryPoints: [entry],
     bundle: true,
     minify: false,
     write: false,
-    format: "esm",
+    format: "iife",
+    globalName: "__pondApp",
     target: "es2020",
     jsx: "automatic",
     jsxImportSource: "preact",
@@ -37,6 +48,7 @@ export async function buildClient(entry: string, options: { liveReload?: boolean
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>pond</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
     tailwind.config = {
@@ -65,15 +77,19 @@ export async function buildClient(entry: string, options: { liveReload?: boolean
   </script>`
       : ""
   }
-  <script type="module">
-    import { render, h } from "https://esm.sh/preact@10.24.0";
-    import { htm } from "https://esm.sh/htm@3.1.1";
-    const html = htm.bind(h);
-
-    ${js}
-
-    const root = document.getElementById("root");
-    render(html\`<\${App} />\`, root);
+  <script>
+${js}
+  </script>
+  <script>
+    (function () {
+      var app = (typeof window !== "undefined" && window.__pondApp) || {};
+      var App = app.App || app.default;
+      var render = app.render;
+      var h = app.h;
+      if (!App) { console.error("[pond] client bundle missing exported App"); return; }
+      if (!render || !h) { console.error("[pond] client bundle missing render/h exports from pond/client"); return; }
+      render(h(App, null), document.getElementById("root"));
+    })();
   </script>
 </body>
 </html>`
