@@ -172,12 +172,7 @@ Delete this file (\`AGENTS.md\`) and the \`.claude/\` directory — they were sc
 `
 }
 
-export async function copyTemplate(
-  name: string,
-  _template: string,
-  initGit: boolean,
-  prompt?: string,
-): Promise<void> {
+export async function copyTemplate(name: string, _template: string, initGit: boolean, prompt?: string): Promise<void> {
   const dir = path.resolve(process.cwd(), name)
 
   if (fs.existsSync(dir)) {

@@ -214,7 +214,7 @@ test("bare domain GET / serves landing page", async () => {
   })
   assert.equal(result.status, 200)
   assert.match(result.ct, /text\/html/)
-  assert.match(result.body, /pond deploy --api/)
+  assert.match(result.body, /npm install -g pondsh/)
 })
 
 test("bare domain GET /abuse serves abuse policy", async () => {

@@ -3,8 +3,24 @@ import { copyTemplate } from "../template.js"
 
 const SLUG_RE = /^[a-z][a-z0-9_-]*$/i
 const STOPWORDS = new Set([
-  "a", "an", "the", "for", "with", "to", "in", "of", "on", "my", "our",
-  "app", "site", "thing", "build", "make", "create", "new",
+  "a",
+  "an",
+  "the",
+  "for",
+  "with",
+  "to",
+  "in",
+  "of",
+  "on",
+  "my",
+  "our",
+  "app",
+  "site",
+  "thing",
+  "build",
+  "make",
+  "create",
+  "new",
 ])
 
 function slugify(input: string, max = 40): string {
@@ -49,8 +65,9 @@ export const newCommand = defineCommand({
     let name: string
     let promptText: string | undefined
 
-    const explicitName = (args as unknown as { name_flag?: string; dir?: string }).name_flag
-      ?? (args as unknown as { name_flag?: string; dir?: string }).dir
+    const explicitName =
+      (args as unknown as { name_flag?: string; dir?: string }).name_flag ??
+      (args as unknown as { name_flag?: string; dir?: string }).dir
 
     const isSingleSlug = positionals.length === 1 && SLUG_RE.test(positionals[0]) && !positionals[0].includes(" ")
 
