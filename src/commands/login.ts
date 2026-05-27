@@ -52,6 +52,7 @@ export const loginCommand = defineCommand({
       const me = (await meRes.json()) as { username: string; isAdmin: boolean }
       const saved = saveCredentials({ apiUrl, username: me.username, token, isAdmin: me.isAdmin })
       console.log(`Logged in as ${saved.username}${saved.isAdmin ? " (admin)" : ""} at ${saved.apiUrl}`)
+      console.log(`  Dashboard: ${saved.apiUrl}/dashboard  (or: pond dashboard)`)
       return
     }
 
@@ -101,5 +102,6 @@ export const loginCommand = defineCommand({
     })
     console.log(`Created user ${saved.username}${saved.isAdmin ? " (admin)" : ""} at ${saved.apiUrl}`)
     console.log(`Token saved to ~/.pond/credentials.json (mode 0600).`)
+    console.log(`Dashboard: ${saved.apiUrl}/dashboard  (or: pond dashboard)`)
   },
 })

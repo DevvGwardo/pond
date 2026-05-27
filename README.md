@@ -172,6 +172,7 @@ Pond will:
 | `pond db dump [table]`                     | Dump one table or the full local database                                |
 | `pond auth as <name>`                      | Set the current dev guest identity                                       |
 | `pond login --api <url> --username <name>` | Bootstrap first admin (needs `POND_HOST_TOKEN`) or attach with `--token` |
+| `pond dashboard`                           | Open the project dashboard for the current control plane in a browser    |
 | `pond user create <name> [--admin]`        | Create a new control-plane user (admin only)                             |
 | `pond env list/set/unset <deployId>`       | Manage hosted-deploy server env vars                                     |
 | `pond domains list/add/remove <subdomain>` | Manage custom subdomain aliases for a deploy                             |
@@ -354,6 +355,12 @@ Every hosted deploy ships with a browser-based IDE at `<api>/ide/<deployId>`. Af
 The IDE is a single inlined HTML SPA (~192 KB gzipped) served on the bare host. It talks to the standard control-plane endpoints — no extra deploy surface, same auth (claim token or owner Bearer). Anonymous deploys must be claimed before editing.
 
 Files under `server/`, `client/`, `shared/`, plus `package.json` are addressable. `.env.pond.server` is **not** exposed through the IDE — edit secrets via `pond env` instead.
+
+### Project dashboard
+
+Every control plane also serves a per-user dashboard at `<api>/dashboard` that lists every deploy you own — by project title (parsed from `capsule({ title })` in `server/index.ts`), with live URL, age, status pill (owned / shared / anonymous), and per-project actions: **Open IDE →**, **Open live app**, **Rotate claim**, **Delete**. Auth uses the same account API token `pond login` saves to `~/.pond/credentials.json`.
+
+The fastest way to open it: `pond dashboard`. The CLI resolves the URL from `--api`, then `.pond/deploy.json` in the current directory, then a single saved credential, and launches your platform's URL opener (`open` / `xdg-open` / `start`). `pond deploy`, `pond signup`, `pond claim`, and `pond login` also print the dashboard URL on success so it's never hidden.
 
 ### Env management
 

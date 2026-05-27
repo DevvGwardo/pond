@@ -8,25 +8,26 @@ For the full list of any command's flags, run `pond <command> --help`. This page
 
 ## At a glance
 
-| Command                         | What it does                                                            |
-| ------------------------------- | ----------------------------------------------------------------------- |
-| [`pond new`](#pond-new)         | Scaffold a new capsule from a template or a free-form description       |
-| [`pond dev`](#pond-dev)         | Start the local dev server with hot reload                              |
-| [`pond deploy`](#pond-deploy)   | Ship the capsule — hosted on pond.run by default, `--local` for offline |
-| [`pond start`](#pond-start)     | Run a previously-built local deploy bundle                              |
-| [`pond inspect`](#pond-inspect) | Peek at a running capsule's state (schema, sockets, ai, blob, env)      |
-| [`pond logs`](#pond-logs)       | Stream a capsule's logs                                                 |
-| [`pond db`](#pond-db)           | Inspect, dump, back up, and restore the capsule's SQLite                |
-| [`pond fork`](#pond-fork)       | Clone a public capsule's source from a deploy URL                       |
-| [`pond claim`](#pond-claim)     | Take ownership of an anonymous hosted deploy                            |
-| [`pond signup`](#pond-signup)   | Friendly first-account flow — create a user + claim the current deploy  |
-| [`pond host`](#pond-host)       | Run your own hosted control plane (the thing `pond deploy` deploys to)  |
-| [`pond login`](#pond-login)     | Save a user API token for a control plane                               |
-| [`pond user`](#pond-user)       | Create / list / promote users on a control plane (admin)                |
-| [`pond token`](#pond-token)     | Rotate the saved user token                                             |
-| [`pond domains`](#pond-domains) | Attach a custom subdomain to a hosted deploy                            |
-| [`pond env`](#pond-env)         | Set, unset, or list env vars on a hosted deploy                         |
-| [`pond auth`](#pond-auth)       | Manage your local dev-server guest identity                             |
+| Command                             | What it does                                                            |
+| ----------------------------------- | ----------------------------------------------------------------------- |
+| [`pond new`](#pond-new)             | Scaffold a new capsule from a template or a free-form description       |
+| [`pond dev`](#pond-dev)             | Start the local dev server with hot reload                              |
+| [`pond deploy`](#pond-deploy)       | Ship the capsule — hosted on pond.run by default, `--local` for offline |
+| [`pond start`](#pond-start)         | Run a previously-built local deploy bundle                              |
+| [`pond inspect`](#pond-inspect)     | Peek at a running capsule's state (schema, sockets, ai, blob, env)      |
+| [`pond logs`](#pond-logs)           | Stream a capsule's logs                                                 |
+| [`pond db`](#pond-db)               | Inspect, dump, back up, and restore the capsule's SQLite                |
+| [`pond fork`](#pond-fork)           | Clone a public capsule's source from a deploy URL                       |
+| [`pond claim`](#pond-claim)         | Take ownership of an anonymous hosted deploy                            |
+| [`pond signup`](#pond-signup)       | Friendly first-account flow — create a user + claim the current deploy  |
+| [`pond host`](#pond-host)           | Run your own hosted control plane (the thing `pond deploy` deploys to)  |
+| [`pond login`](#pond-login)         | Save a user API token for a control plane                               |
+| [`pond dashboard`](#pond-dashboard) | Open the per-host project dashboard in your browser                     |
+| [`pond user`](#pond-user)           | Create / list / promote users on a control plane (admin)                |
+| [`pond token`](#pond-token)         | Rotate the saved user token                                             |
+| [`pond domains`](#pond-domains)     | Attach a custom subdomain to a hosted deploy                            |
+| [`pond env`](#pond-env)             | Set, unset, or list env vars on a hosted deploy                         |
+| [`pond auth`](#pond-auth)           | Manage your local dev-server guest identity                             |
 
 ---
 
@@ -335,6 +336,39 @@ When you don't have a token yet, `pond login` errors with a three-way hint:
 1. `pond signup <name>` (if you have an anonymous deploy in this directory),
 2. `pond login --token <token> --username <name>` (if someone gave you a token),
 3. `POND_HOST_TOKEN=…` or `--admin-token` (self-hosted bootstrap).
+
+---
+
+## pond dashboard
+
+Open the per-host project dashboard in your browser. The dashboard is served by `pond host` at `<host>/dashboard` and lists every deploy owned by the signed-in user — project title, live URL, age, status (owned / shared / anonymous), plus per-deploy actions (Open IDE, Open live app, rotate claim token, delete). It's where you go after `pond deploy` to see "what have I shipped."
+
+**When to use:** to see all your hosted projects in one place, jump into the IDE for any of them, or rotate a claim token after sharing a deploy.
+
+**Resolution order** (so you rarely need to pass `--api`):
+
+1. `--api <url>` if passed.
+2. `apiUrl` from `.pond/deploy.json` in the current directory.
+3. The only saved credential in `~/.pond/credentials.json` (if exactly one).
+4. Otherwise: refuses with a list of `pond dashboard --api <url>` invocations, one per saved credential.
+
+**Key flags:**
+
+- `--api <url>` — pick a specific control plane.
+- `--print-url` — print the URL instead of launching a browser. Use in headless / CI environments.
+
+```sh
+# Most common — opens whichever host this project deploys to
+pond dashboard
+
+# Pick a specific control plane
+pond dashboard --api https://pond.run
+
+# Headless / CI
+pond dashboard --print-url --api https://pond.example.com
+```
+
+The dashboard authenticates with your account API token (the same one `pond login` saves to `~/.pond/credentials.json`). The first visit asks you to paste it; subsequent visits remember it in `localStorage`.
 
 ---
 

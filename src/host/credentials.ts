@@ -40,6 +40,10 @@ export function loadCredentials(apiUrl: string): Credential | null {
   return file.credentials.find((c) => normalizeApiUrl(c.apiUrl) === key) ?? null
 }
 
+export function listCredentials(): Credential[] {
+  return readFile().credentials
+}
+
 export function saveCredentials(cred: Omit<Credential, "savedAt"> & { savedAt?: string }): Credential {
   const file = readFile()
   const key = normalizeApiUrl(cred.apiUrl)

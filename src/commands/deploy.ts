@@ -293,6 +293,7 @@ export const deployCommand = defineCommand({
     const ideUrl = isAnonymous
       ? `${effectiveApiUrl}/ide/${remote.deployId}#token=${remote.claimToken}`
       : `${effectiveApiUrl}/ide/${remote.deployId}`
+    const dashboardUrl = `${effectiveApiUrl}/dashboard`
     if (isAnonymous && remote.terminatesAt && remote.expiresAt) {
       const now = Date.now()
       const terminatesIn = formatRelative(remote.terminatesAt, now)
@@ -305,6 +306,7 @@ export const deployCommand = defineCommand({
     } else {
       console.log(`Hosted deploy ${remote.claimedAt ? "updated" : "created"} at ${remote.url}`)
       console.log(`  IDE: ${ideUrl}`)
+      console.log(`  Dashboard: ${dashboardUrl}`)
       console.log(`Manage env with: pond env list ${remote.deployId} --api ${effectiveApiUrl}`)
     }
   },

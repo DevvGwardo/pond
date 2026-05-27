@@ -5,6 +5,18 @@ Versioning: [Semver](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-05-27
+
+### Added
+
+- **`pond dashboard` command — opens the per-host project dashboard in your browser.** The dashboard already existed at `<host>/dashboard` (Preact app served by `pond host`, lists every deploy owned by the signed-in user), but no CLI command pointed at it and `pond deploy` never mentioned it, so end users couldn't find it. `pond dashboard` resolves the control-plane URL from `--api`, then `.pond/deploy.json` in cwd, then a single saved credential in `~/.pond/credentials.json`; refuses with a list of `pond dashboard --api …` invocations when multiple credentials are saved. Spawns the platform's URL opener (`open` / `xdg-open` / `start`) detached with stdio ignored, falls back to a printed URL on failure. `--print-url` skips the browser for headless/CI use.
+- **`pond deploy`, `pond signup`, `pond claim`, `pond login` now print `Dashboard: <host>/dashboard  (or: pond dashboard)`** on successful non-anonymous flows. Discoverability fix — until now the dashboard URL never appeared in any CLI output, so even users who landed on it didn't know it existed.
+
+### Changed
+
+- **`GET /api/deploys` now returns `title`, `description`, and `isPublic`** for each deploy. These were already on the `HostedDeployRecord` (parsed from `capsule({ title, description, public })` by a regex over `server/index.ts` on each build) but the list endpoint dropped them. Additive change — older dashboard bundles ignore the new fields.
+- **Dashboard list rebuilt as project cards led by the capsule title** instead of a hex-id-first table. Each card shows the title (bold), then a single muted subtext line with the deploy URL, short deploy id, and age. Description appears below the subtext when present. Actions ("Open IDE →", "Open live app", "Rotate claim", "Delete") moved to a footer row. Matches the visual reference of a project-name-first dashboard rather than a debug-style listing of opaque IDs. Bundle is still 20.4 KB raw — no size regression.
+
 ## [0.3.5] - 2026-05-27
 
 ### Fixed

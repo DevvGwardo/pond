@@ -60,6 +60,9 @@ interface DeployRow {
   terminatesAt?: string
   expiresAt?: string
   terminated?: boolean
+  title?: string
+  description?: string
+  isPublic?: boolean
 }
 
 function authHeaders(token: string): Record<string, string> {
@@ -262,7 +265,7 @@ function Workspace({
           <h1 class="text-lg font-semibold leading-tight">pond dashboard</h1>
           <p class="text-xs text-zinc-500">
             {me.username}
-            {me.isAdmin ? " · admin" : ""} · {deploys.length} deploy{deploys.length === 1 ? "" : "s"}
+            {me.isAdmin ? " · admin" : ""} · {deploys.length} project{deploys.length === 1 ? "" : "s"}
           </p>
         </div>
         <div class="flex gap-2">
@@ -296,32 +299,20 @@ function Workspace({
           <p class="text-sm text-zinc-500">Loading deploys…</p>
         ) : deploys.length === 0 ? (
           <p class="text-sm text-zinc-500">
-            No deploys yet. Run <code>pond new my-app && cd my-app && pond deploy --api {bootstrap.controlUrl}</code>.
+            No projects yet. Run <code>pond new my-app && cd my-app && pond deploy</code>.
           </p>
         ) : (
-          <div class="overflow-hidden rounded-lg border border-zinc-800">
-            <table class="w-full text-xs">
-              <thead class="bg-zinc-900 text-zinc-400">
-                <tr>
-                  <th class="px-3 py-2 text-left">Deploy</th>
-                  <th class="px-3 py-2 text-left">Status</th>
-                  <th class="px-3 py-2 text-left">Age</th>
-                  <th class="px-3 py-2 text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {deploys.map((d) => (
-                  <DeployRowView
-                    key={d.deployId}
-                    d={d}
-                    me={me}
-                    token={token}
-                    onRotateClaim={() => void handleRotateClaim(d)}
-                    onDelete={() => void handleDelete(d)}
-                  />
-                ))}
-              </tbody>
-            </table>
+          <div class="space-y-3">
+            {deploys.map((d) => (
+              <DeployCard
+                key={d.deployId}
+                d={d}
+                me={me}
+                token={token}
+                onRotateClaim={() => void handleRotateClaim(d)}
+                onDelete={() => void handleDelete(d)}
+              />
+            ))}
           </div>
         )}
       </main>
@@ -329,7 +320,7 @@ function Workspace({
   )
 }
 
-function DeployRowView({
+function DeployCard({
   d,
   me,
   token,
@@ -345,55 +336,85 @@ function DeployRowView({
   const isOwner = d.ownerId === me.id
   const age = humanAge(d.createdAt)
   const ideHref = `/ide/${d.deployId}#bearer=${encodeURIComponent(token)}`
+  const heading = d.title?.trim() || "Untitled project"
+  const shortId = d.deployId.slice(0, 8)
   return (
-    <tr class="border-t border-zinc-800">
-      <td class="px-3 py-2">
-        <div class="font-mono text-zinc-200">{d.deployId}</div>
+    <article class="rounded-xl border border-zinc-800 bg-zinc-950">
+      <header class="flex flex-wrap items-start justify-between gap-4 border-b border-zinc-900 px-5 py-4">
+        <div class="min-w-0">
+          <h2 class="truncate text-lg font-semibold text-zinc-50">{heading}</h2>
+          <p class="mt-1 text-xs text-zinc-500">
+            <a
+              class="font-mono text-zinc-400 underline decoration-zinc-800 hover:text-zinc-200 hover:decoration-zinc-500"
+              href={d.url}
+              target="_blank"
+              rel="noreferrer"
+            >
+              {d.url.replace(/^https?:\/\//, "")}
+            </a>
+            <span class="mx-2 text-zinc-700">·</span>
+            <span class="font-mono text-zinc-600">{shortId}</span>
+            <span class="mx-2 text-zinc-700">·</span>
+            <span>{age}</span>
+          </p>
+          {d.description ? <p class="mt-2 max-w-2xl text-sm text-zinc-400">{d.description}</p> : null}
+        </div>
+        <div class="flex flex-shrink-0 items-center gap-2">
+          <StatusPill d={d} isOwner={isOwner} />
+        </div>
+      </header>
+      <div class="flex flex-wrap items-center justify-end gap-2 px-5 py-3">
         <a
-          class="text-zinc-500 underline decoration-zinc-700 hover:decoration-zinc-400"
+          class="rounded-md border border-zinc-800 bg-black px-3 py-1.5 text-xs text-zinc-300 hover:border-zinc-600"
           href={d.url}
           target="_blank"
           rel="noreferrer"
         >
-          {d.url}
+          Open live app
         </a>
-      </td>
-      <td class="px-3 py-2 text-zinc-300">
-        {d.anonymous ? (
+        <a
+          class="rounded-md bg-zinc-100 px-3 py-1.5 text-xs font-semibold text-zinc-950 hover:bg-zinc-200"
+          href={ideHref}
+        >
+          Open IDE →
+        </a>
+        {isOwner ? (
           <Fragment>
-            <span class="rounded bg-amber-900/40 px-2 py-0.5 text-amber-200">anonymous</span>
-            {d.terminatesAt ? <div class="mt-1 text-zinc-500">terminates {humanAge(d.terminatesAt, true)}</div> : null}
+            <button
+              class="rounded-md border border-zinc-800 bg-black px-3 py-1.5 text-xs text-zinc-300 hover:border-zinc-600"
+              onClick={onRotateClaim}
+              title="Rotate claim token (copied to clipboard)"
+            >
+              Rotate claim
+            </button>
+            <button
+              class="rounded-md border border-red-900 bg-black px-3 py-1.5 text-xs text-red-300 hover:bg-red-950"
+              onClick={onDelete}
+            >
+              Delete
+            </button>
           </Fragment>
-        ) : isOwner ? (
-          <span class="rounded bg-emerald-900/40 px-2 py-0.5 text-emerald-200">owned</span>
-        ) : (
-          <span class="rounded bg-zinc-800 px-2 py-0.5 text-zinc-300">shared</span>
-        )}
-      </td>
-      <td class="px-3 py-2 text-zinc-400">{age}</td>
-      <td class="px-3 py-2 text-right">
-        <div class="flex justify-end gap-2">
-          <a class="rounded border border-zinc-800 px-2 py-1 text-zinc-300 hover:border-zinc-600" href={ideHref}>
-            IDE
-          </a>
-          {isOwner ? (
-            <Fragment>
-              <button
-                class="rounded border border-zinc-800 px-2 py-1 text-zinc-300 hover:border-zinc-600"
-                onClick={onRotateClaim}
-                title="Rotate claim token"
-              >
-                rotate
-              </button>
-              <button class="rounded border border-red-900 px-2 py-1 text-red-300 hover:bg-red-950" onClick={onDelete}>
-                delete
-              </button>
-            </Fragment>
-          ) : null}
-        </div>
-      </td>
-    </tr>
+        ) : null}
+      </div>
+    </article>
   )
+}
+
+function StatusPill({ d, isOwner }: { d: DeployRow; isOwner: boolean }) {
+  if (d.anonymous) {
+    return (
+      <div class="text-right">
+        <span class="rounded bg-amber-900/40 px-2 py-0.5 text-xs text-amber-200">anonymous</span>
+        {d.terminatesAt ? (
+          <div class="mt-1 text-xs text-zinc-500">terminates {humanAge(d.terminatesAt, true)}</div>
+        ) : null}
+      </div>
+    )
+  }
+  if (isOwner) {
+    return <span class="rounded bg-emerald-900/40 px-2 py-0.5 text-xs text-emerald-200">owned</span>
+  }
+  return <span class="rounded bg-zinc-800 px-2 py-0.5 text-xs text-zinc-300">shared</span>
 }
 
 function humanAge(iso: string, future = false): string {

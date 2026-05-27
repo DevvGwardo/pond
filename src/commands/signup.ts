@@ -140,5 +140,6 @@ export const signupCommand = defineCommand({
     console.log(`Signed up as ${saved.username} at ${saved.apiUrl}`)
     console.log(`  Claimed deploy: ${remote.url}`)
     console.log(`  Credentials saved to ~/.pond/credentials.json`)
+    console.log(`  Dashboard: ${saved.apiUrl}/dashboard  (or: pond dashboard)`)
   },
 })

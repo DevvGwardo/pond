@@ -493,6 +493,36 @@ test("claim with existing user token transfers ownership", async () => {
   assert.equal(found.anonymous, false)
 })
 
+test("GET /api/deploys exposes title/description parsed from capsule()", async () => {
+  const titled = `import { capsule, mutation, query, string, table } from "pond/server"
+export default capsule({
+  title: "Guestbook",
+  description: "Public feed where everyone can sign their name.",
+  schema: { items: table({ name: string() }) },
+  queries: { items: query((ctx) => ctx.db.items.all()) },
+  mutations: { add: mutation((ctx, name) => ctx.db.items.insert({ name })) },
+})
+`
+  const create = await fetch(`${apiUrl}/api/deploys`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ sourceFiles: tinySourceFiles(titled) }),
+  })
+  assert.equal(create.status, 201)
+  const cb = await create.json()
+
+  const list = await fetch(`${apiUrl}/api/deploys`, {
+    headers: { authorization: `Bearer ${adminToken}` },
+  })
+  assert.equal(list.status, 200)
+  const lb = await list.json()
+  const found = lb.deploys.find((d) => d.deployId === cb.deployId)
+  assert.ok(found, "newly-deployed titled project should appear in /api/deploys")
+  assert.equal(found.title, "Guestbook")
+  assert.equal(found.description, "Public feed where everyone can sign their name.")
+  assert.equal(found.isPublic, false)
+})
+
 test("anonymous rate limit: 6th request from same IP in an hour returns 429", async () => {
   const h = await startExtraHost({ extraArgs: ["--anonymous-rate-per-hour", "5"] })
   try {

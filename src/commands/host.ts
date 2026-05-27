@@ -917,6 +917,9 @@ export const hostCommand = defineCommand({
             terminatesAt: anon?.terminatesAt,
             expiresAt: anon?.expiresAt,
             terminated: anon?.terminated === 1,
+            title: rec.title,
+            description: rec.description,
+            isPublic: rec.isPublic === true,
           }
         })
       return c.json({ deploys: records })

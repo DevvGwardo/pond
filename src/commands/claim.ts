@@ -136,5 +136,6 @@ export const claimCommand = defineCommand({
     if (remote.user) {
       console.log(`  Saved credentials to ~/.pond/credentials.json`)
     }
+    console.log(`  Dashboard: ${apiUrl}/dashboard  (or: pond dashboard)`)
   },
 })
