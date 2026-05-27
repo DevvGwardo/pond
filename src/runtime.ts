@@ -975,6 +975,14 @@ function assertIdent(name: string) {
   }
 }
 
+// better-sqlite3 rejects boolean values with "SQLite3 can only bind numbers, strings,
+// bigints, buffers, and null". Capsule schemas declare `boolean()` columns and agents
+// naturally pass `true`/`false` — coerce to 1/0 at the binding boundary.
+function coerceBinding(value: any): any {
+  if (typeof value === "boolean") return value ? 1 : 0
+  return value
+}
+
 function buildDbProxy(db: Database.Database): CapsuleContext["db"] {
   function createBuilder(
     tableName: string,
@@ -1037,7 +1045,7 @@ function buildDbProxy(db: Database.Database): CapsuleContext["db"] {
           const id = crypto.randomUUID()
           const keys = Object.keys(data)
           keys.forEach(assertIdent)
-          const values = keys.map((key) => data[key])
+          const values = keys.map((key) => coerceBinding(data[key]))
           db.prepare(
             `INSERT INTO ${tableName} (id, ${keys.join(", ")}) VALUES (?, ${keys.map(() => "?").join(", ")})`,
           ).run(id, ...values)
@@ -1048,7 +1056,7 @@ function buildDbProxy(db: Database.Database): CapsuleContext["db"] {
           keys.forEach(assertIdent)
           const sets = keys.map((key) => `${key} = ?`).join(", ")
           db.prepare(`UPDATE ${tableName} SET ${sets}, updatedAt = datetime('now') WHERE id = ?`).run(
-            ...keys.map((key) => data[key]),
+            ...keys.map((key) => coerceBinding(data[key])),
             id,
           )
           return db.prepare(`SELECT * FROM ${tableName} WHERE id = ?`).get(id)

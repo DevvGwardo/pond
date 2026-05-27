@@ -5,6 +5,12 @@ Versioning: [Semver](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.9] - 2026-05-27
+
+### Fixed
+
+- **`boolean()` columns no longer crash mutations.** `buildDbProxy.insert` / `.update` forwarded JS `true` / `false` straight to better-sqlite3, which rejects boolean bindings with `SQLite3 can only bind numbers, strings, bigints, buffers, and null` — so every `--generate`d capsule with a `boolean()` column 500'd on the first mutation. The runtime now coerces booleans to `1` / `0` at the binding boundary. Backfilled `test/runtime-features.test.mjs` with an end-to-end roundtrip (the previous boolean test only created the column and never inserted into it, which is how the bug shipped).
+
 ## [0.2.8] - 2026-05-27
 
 ### Added

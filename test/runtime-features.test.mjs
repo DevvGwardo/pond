@@ -273,6 +273,58 @@ export default capsule({
   }
 })
 
+test("boolean column accepts true/false from mutations and survives roundtrip", async () => {
+  const parent = tmp("pond-bool-")
+  const serverSrc = `import { capsule, mutation, query, string, boolean, table } from "pond/server"
+export default capsule({
+  schema: { items: table({ body: string(), done: boolean() }) },
+  queries: { items: query((ctx) => ctx.db.items.all()) },
+  mutations: {
+    add: mutation((ctx, body, done) => ctx.db.items.insert({ body, done })),
+    setDone: mutation((ctx, id, done) => ctx.db.items.update(id, { done })),
+  },
+})`
+  const dir = await scaffoldCapsule(parent, "cap-bool", serverSrc)
+  const port = await pickFreePort()
+  const proc = spawnDev(dir, port)
+  try {
+    await waitForUrl(`http://127.0.0.1:${port}/api/query/items`)
+
+    const r1 = await fetch(`http://127.0.0.1:${port}/api/mutation/add`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ args: ["a", true] }),
+    })
+    assert.equal(r1.status, 200, "insert with done=true should succeed")
+    const row1 = await r1.json()
+    assert.equal(row1.body, "a")
+    assert.equal(row1.done, 1, "true should be stored as 1")
+
+    const r2 = await fetch(`http://127.0.0.1:${port}/api/mutation/add`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ args: ["b", false] }),
+    })
+    assert.equal(r2.status, 200, "insert with done=false should succeed")
+    const row2 = await r2.json()
+    assert.equal(row2.done, 0, "false should be stored as 0")
+
+    const r3 = await fetch(`http://127.0.0.1:${port}/api/mutation/setDone`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ args: [row2.id, true] }),
+    })
+    assert.equal(r3.status, 200, "update with boolean should succeed")
+    const updated = await r3.json()
+    assert.equal(updated.done, 1, "update true should be stored as 1")
+
+    const listed = await (await fetch(`http://127.0.0.1:${port}/api/query/items`)).json()
+    assert.equal(listed.length, 2)
+  } finally {
+    await killProc(proc)
+  }
+})
+
 test("`pond new --generate` without an agent fails cleanly + leaves AGENTS.md", async () => {
   const parent = tmp("pond-gen-")
   // No agents available — bypass detection by overriding env vars + HOME
