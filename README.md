@@ -5,6 +5,10 @@
 </p>
 
 <p align="center">
+  <img src="./docs/branding/pond-agent-flow.png" alt="Pond agent flow diagram" width="100%" />
+</p>
+
+<p align="center">
   <strong>Agent-native full-stack TypeScript capsules.</strong><br />
   Scaffold a small app, define your schema and handlers in one file, and run it locally with a built-in Hono + SQLite runtime.
 </p>
@@ -54,6 +58,10 @@ export default capsule({
 })
 ```
 
+<p align="center">
+  <img src="./docs/branding/pond-capsule-anatomy.png" alt="Pond capsule anatomy diagram" width="100%" />
+</p>
+
 That one definition becomes:
 
 - a SQLite-backed `messages` table
@@ -75,6 +83,10 @@ Open `http://localhost:3000`.
 ### Anonymous hosted deploy (Lakebed-style)
 
 If a public Pond host is running (e.g. `pond.example.com`), you can ship anonymously without an account:
+
+<p align="center">
+  <img src="./docs/branding/pond-deploy-claim.png" alt="Pond anonymous deploy and claim flow diagram" width="100%" />
+</p>
 
 ```bash
 pond deploy --api https://pond.example.com
@@ -208,6 +220,10 @@ This is a build artifact flow, not a full hosted deployment platform yet. The ru
 ## Hosted control plane (self-hosted MVP)
 
 Pond ships a self-hostable control plane that fronts multiple capsule deploys behind a single ingress, manages user accounts and per-deploy ownership, and isolates each deploy in its own forked worker process.
+
+<p align="center">
+  <img src="./docs/branding/pond-control-plane.png" alt="Pond self-hosted control plane diagram" width="100%" />
+</p>
 
 ### Threat model
 
