@@ -252,16 +252,21 @@ export const deployCommand = defineCommand({
       // best-effort on platforms without chmod (e.g. Windows)
     }
 
+    const ideUrl = isAnonymous
+      ? `${remote.apiUrl}/ide/${remote.deployId}#token=${remote.claimToken}`
+      : `${remote.apiUrl}/ide/${remote.deployId}`
     if (isAnonymous && remote.terminatesAt && remote.expiresAt) {
       const now = Date.now()
       const terminatesIn = formatRelative(remote.terminatesAt, now)
       const expiresIn = formatRelative(remote.expiresAt, now)
       console.log(`Hosted deploy created at ${remote.url}`)
+      console.log(`  IDE: ${ideUrl}`)
       console.log(`  ⚠ Anonymous — terminates in ${terminatesIn}, deleted in ${expiresIn}`)
       console.log(`  Claim with: pond claim --signup <username>`)
       console.log(`          or: pond login --api ${remote.apiUrl} --username <name> first, then \`pond claim\``)
     } else {
       console.log(`Hosted deploy ${remote.claimedAt ? "updated" : "created"} at ${remote.url}`)
+      console.log(`  IDE: ${ideUrl}`)
       console.log(`Manage env with: pond env list ${remote.deployId} --api ${remote.apiUrl}`)
     }
   },

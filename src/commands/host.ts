@@ -10,6 +10,7 @@ import { openControlDb, DEFAULT_QUOTA, ANONYMOUS_QUOTA, type ControlDb, type Use
 import { createHash } from "node:crypto"
 import { buildForDeploy } from "../runtime.js"
 import { buildClient } from "../bundler.js"
+import { ideHtml } from "../ide/built.js"
 
 const SOURCE_FILE_LIMIT = 200
 const SOURCE_TOTAL_LIMIT = 4 * 1024 * 1024
@@ -1860,6 +1861,20 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
               status: 200,
               headers: { "content-type": "image/svg+xml", "cache-control": "public, max-age=86400" },
             })
+          }
+          const ideMatch = url.pathname.match(/^\/ide\/([a-f0-9]+)\/?$/)
+          if (ideMatch) {
+            const deployId = ideMatch[1]
+            const record = readRecord(deployId)
+            if (!record) return c.json({ error: "Unknown deploy" }, 404)
+            const bootstrap = JSON.stringify({
+              deployId,
+              deployUrl: record.url,
+              publicHost,
+              controlUrl: apiUrl,
+            })
+            const html = ideHtml.replace("__POND_IDE__BOOTSTRAP__", `window.__POND_IDE = ${bootstrap}`)
+            return c.html(html)
           }
         }
         return c.json({ error: "Not found" }, 404)

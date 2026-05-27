@@ -3,7 +3,7 @@
     "target": "ES2022",
     "module": "ES2022",
     "moduleResolution": "bundler",
-    "lib": ["ES2022"],
+    "lib": ["ES2022", "DOM"],
     "outDir": ".",
     "rootDir": ".",
     "strict": true,
@@ -12,8 +12,10 @@
     "forceConsistentCasingInFileNames": true,
     "declaration": true,
     "declarationMap": true,
-    "sourceMap": true
+    "sourceMap": true,
+    "jsx": "react-jsx",
+    "jsxImportSource": "preact"
   },
-  "include": ["src/**/*.ts", "client/**/*.ts", "client/**/*.tsx"],
+  "include": ["src/**/*.ts", "src/**/*.tsx", "client/**/*.ts", "client/**/*.tsx"],
   "exclude": ["node_modules", "templates"]
 }

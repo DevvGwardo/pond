@@ -9,3 +9,4 @@ build
 *.js.map
 package-lock.json
 docs/branding
+src/ide/built.ts

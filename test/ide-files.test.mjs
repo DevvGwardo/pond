@@ -323,3 +323,55 @@ test("POST /build rejects anonymous deploys with 403", async () => {
   })
   assert.equal(res.status, 403)
 })
+
+// ---- /ide/:deployId ----
+
+test("GET /ide/:deployId serves the SPA with bootstrap injected", async () => {
+  const http = await import("node:http")
+  const result = await new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: "127.0.0.1",
+        port,
+        method: "GET",
+        path: `/ide/${ownedDeployId}`,
+        headers: { host: `localhost:${port}` },
+      },
+      (res) => {
+        let data = ""
+        res.on("data", (c) => (data += c))
+        res.on("end", () => resolve({ status: res.statusCode, body: data, ct: res.headers["content-type"] }))
+      },
+    )
+    req.on("error", reject)
+    req.end()
+  })
+  assert.equal(result.status, 200)
+  assert.match(result.ct, /text\/html/)
+  assert.match(result.body, /window\.__POND_IDE/)
+  assert.match(result.body, new RegExp(`"deployId":"${ownedDeployId}"`))
+  assert.match(result.body, /<div id="root"/)
+})
+
+test("GET /ide/unknown returns 404", async () => {
+  const http = await import("node:http")
+  const result = await new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: "127.0.0.1",
+        port,
+        method: "GET",
+        path: "/ide/deadbeefdeadbeef",
+        headers: { host: `localhost:${port}` },
+      },
+      (res) => {
+        let data = ""
+        res.on("data", (c) => (data += c))
+        res.on("end", () => resolve({ status: res.statusCode, body: data }))
+      },
+    )
+    req.on("error", reject)
+    req.end()
+  })
+  assert.equal(result.status, 404)
+})
