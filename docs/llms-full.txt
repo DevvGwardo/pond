@@ -539,7 +539,7 @@ For the full list of any command's flags, run `pond <command> --help`. This page
 | ------------------------------- | ---------------------------------------------------------------------- |
 | [`pond new`](#pond-new)         | Scaffold a new capsule from a template or a free-form description      |
 | [`pond dev`](#pond-dev)         | Start the local dev server with hot reload                             |
-| [`pond deploy`](#pond-deploy)   | Build and ship the capsule (local or to a hosted control plane)        |
+| [`pond deploy`](#pond-deploy)   | Ship the capsule — hosted on pond.run by default, `--local` for offline |
 | [`pond start`](#pond-start)     | Run a previously-built local deploy bundle                             |
 | [`pond inspect`](#pond-inspect) | Peek at a running capsule's state (schema, sockets, ai, blob, env)     |
 | [`pond logs`](#pond-logs)       | Stream a capsule's logs                                                |
@@ -604,33 +604,39 @@ pond dev
 
 ## pond deploy
 
-Build the capsule for production. Two modes, switched by whether you pass `--api`:
+Build and ship the capsule. **Hosted by default** — bare `pond deploy` uploads to `https://pond.run`, prints the live URL, the IDE URL, and a one-time `claimToken` (saved to `.pond/deploy.json`).
 
-1. **Local deploy** — bundles `server/` and `client/` to `.pond/deploy-bundle.mjs` + `.pond/client.html`, writes `.pond/deploy.json`. Run with [`pond start`](#pond-start) to serve.
-2. **Hosted deploy** — uploads the source to a control plane (`--api`). The control plane builds, boots a worker, and returns a public URL + a one-time `claimToken`.
+The CLI picks the deploy target in this order:
 
-**When to use:** shipping. `--api` for a hosted URL anyone can hit; no `--api` for a self-managed local bundle.
+1. `--local` → offline bundle (no upload). Run with [`pond start`](#pond-start).
+2. `--api <url>` → use that control plane.
+3. `.pond/deploy.json` already records an `apiUrl` from a previous deploy → redeploy to the same host. This is how `pond deploy` "remembers" which control plane this capsule lives on after the first deploy.
+4. Otherwise → `https://pond.run` (anonymous). A `→ No deploy target set; uploading to https://pond.run …` notice prints before the upload so the behavior isn't invisible.
 
 **Key flags:**
 
-- `--api <url>` — control plane base URL (e.g. `https://pond.run`). Without it, deploy is local-only.
+- `--local` — build a standalone bundle in `.pond/deploy-bundle.mjs` instead of uploading. Use for airgapped / self-host shipping.
+- `--api <url>` — explicit control plane URL (e.g. `https://my-host.example.com`).
 - `--token <value>` — user API token. Overrides `~/.pond/credentials.json` from `pond login`.
 - `--push-env` — also upload `.env.pond.server` to the control plane (otherwise env stays local).
 - `--public-inspect` — allow `/__pond/inspect` requests without a claim token (default: claim-token required).
-- `--port <n>` — port for local mode (default `3000`).
+- `--port <n>` — port baked into the local bundle (default `3000`, only meaningful with `--local`).
 
 ```sh
-# Local build, run with `pond start`
+# Anonymous hosted deploy on pond.run — returns a live URL + claimToken
 pond deploy
 
-# Anonymous hosted deploy — returns a URL + claimToken
-pond deploy --api https://pond.run
+# Authenticated hosted deploy, env pushed
+pond deploy --push-env
 
-# Authenticated hosted deploy, with env vars pushed
-pond deploy --api https://pond.run --push-env
+# Self-hosted control plane
+pond deploy --api https://my-host.example.com
+
+# Offline bundle for `pond start` / shipping yourself
+pond deploy --local
 ```
 
-After a hosted deploy, the URL + `claimToken` are saved to `.pond/deploy.json`. The token is one-time — claim or rotate immediately.
+After a hosted deploy, the URL + `claimToken` are saved to `.pond/deploy.json` (mode `0o600`). The token is one-time — claim or rotate immediately.
 
 ---
 
@@ -733,13 +739,14 @@ Clone a public capsule from a deploy URL. Pulls the source tree from `/api/deplo
 **Key flags:**
 
 - `<deploy>` (positional, required) — deploy URL like `https://abc.pond.run`, or a raw `deployId`.
-- `--dir <name>` — override the local directory name (default: derived from the capsule title or deployId).
-- `--api <url>` — control-plane base URL (auto-derived from the deploy URL if omitted).
+- `--name <name>` — override the local directory name (default: derived from the capsule title or deployId).
+- `--api <url>` — control-plane base URL. When omitted, the API base is derived from the deploy URL — but only `pond.run` / `*.pond.run` hosts are trusted by default. Pass `--api` explicitly to fork from any other control plane.
 - `--no-git` — skip `git init`.
+- `--allow-scripts` — permit forking a `package.json` that defines npm lifecycle scripts (`preinstall`/`install`/`postinstall`/`prepare`/`postprepare`). **Off by default**: those scripts run automatically on `npm install` and are an RCE vector if the upstream is hostile. The CLI refuses the fork and names the offending scripts unless this flag is passed.
 
 ```sh
 pond fork https://abc.pond.run
-pond fork https://abc.pond.run --dir my-copy
+pond fork https://abc.pond.run --name my-copy
 ```
 
 ---
