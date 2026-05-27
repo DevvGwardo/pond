@@ -5,6 +5,17 @@ Versioning: [Semver](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-05-27
+
+### Added
+
+- **Human-readable docs site at `pond.run/docs`.** The five reference docs (`cli-reference`, `api-reference`, `client-reference`, `mcp`, `operations`) used to be served only as raw `text/markdown` — perfect for the agent flow (Claude/Cursor fetch them as plain text), useless if you opened one in a browser. `pond host` now serves them as rendered HTML too: `/docs` is a curated index, `/docs/<slug>` renders the markdown with sidebar navigation, anchored headings (so `/docs/cli-reference#pond-deploy` deep-links), styled code blocks, GFM tables, and brand-consistent dark styling that matches the 0.3.0 design language (black background, mono accents, no rounded corners, no rainbow syntax-highlighting). The existing `/docs/<slug>.md` route is unchanged — agents and `llms.txt` keep working exactly as before. Markdown parsing is via the `marked` library; rendering is server-side, no JS framework, no client-side hydration.
+- The landing page "Docs" link now points to `/docs` instead of GitHub. A separate "GitHub" link is added next to it.
+
+### Changed
+
+- **`docs/cli-reference.md` brought up to date for 0.3.0.** The `pond deploy` and `pond fork` sections were last revised in 0.2.7 and described the old behavior — local-by-default `pond deploy`, no `--local`, no `--allow-scripts`, fork using a `--dir` flag that was actually named `--name`. Now reflects the actual CLI surface as of 0.3.0.
+
 ## [0.3.0] - 2026-05-27
 
 ### Changed

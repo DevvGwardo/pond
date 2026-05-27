@@ -13,6 +13,84 @@ import { buildForDeploy } from "../runtime.js"
 import { buildClient } from "../bundler.js"
 import { ideHtml } from "../ide/built.js"
 import { dashboardHtml } from "../dashboard/built.js"
+import { marked } from "marked"
+
+// Curated docs catalog. Hand-written titles + summaries beat anything derivable
+// from the markdown's H1 — the index page becomes navigation copy, not a file
+// listing. Order = sidebar order. Slug = URL slug = filename minus `.md`.
+const DOCS_CATALOG: ReadonlyArray<{ slug: string; title: string; summary: string }> = [
+  {
+    slug: "cli-reference",
+    title: "CLI reference",
+    summary: "Every pond subcommand: what it does, when to reach for it, the flags that matter.",
+  },
+  {
+    slug: "api-reference",
+    title: "Server API",
+    summary: "The pond/server surface — capsule, query, mutation, table, types, ctx.db / ctx.ai / ctx.blob.",
+  },
+  {
+    slug: "client-reference",
+    title: "Client API",
+    summary: "The pond/client surface — useQuery, useMutation, useAuth, plus the Preact runtime.",
+  },
+  {
+    slug: "mcp",
+    title: "MCP server",
+    summary: "Drive pond from Claude Code / Cursor / any MCP client. Tools for deploys, source, logs, env.",
+  },
+  {
+    slug: "operations",
+    title: "Operations",
+    summary: "Going from pond host on a laptop to a public service. The launch runbook.",
+  },
+] as const
+
+const DOCS_SLUG_RE = /^[a-z0-9_-]+$/
+
+function htmlEscape(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => {
+    if (c === "&") return "&amp;"
+    if (c === "<") return "&lt;"
+    if (c === ">") return "&gt;"
+    if (c === '"') return "&quot;"
+    return "&#39;"
+  })
+}
+
+function slugifyHeading(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/<[^>]+>/g, "")
+    .replace(/[^\w\s-]/g, "")
+    .trim()
+    .replace(/\s+/g, "-")
+    .slice(0, 80)
+}
+
+// Render markdown to HTML with stable heading IDs and a custom code-block
+// wrapper. We deliberately skip syntax highlighting — the design language
+// established in 0.3.0 ("don't fill everything with rainbow colors, prefer
+// wireframe over fill") implies mono blocks with a thin border, no theming.
+function renderMarkdown(md: string): string {
+  const renderer = new marked.Renderer()
+  const usedIds = new Map<string, number>()
+  renderer.heading = ({ tokens, depth }) => {
+    const text = tokens.map((t) => ("text" in t ? (t.text as string) : "")).join("")
+    const base = slugifyHeading(text) || `section-${depth}`
+    const seen = usedIds.get(base) ?? 0
+    usedIds.set(base, seen + 1)
+    const id = seen === 0 ? base : `${base}-${seen}`
+    const inner = marked.parseInline(text) as string
+    return `<h${depth} id="${id}"><a class="anchor" href="#${id}" aria-hidden="true">#</a>${inner}</h${depth}>\n`
+  }
+  return marked.parse(md, {
+    gfm: true,
+    breaks: false,
+    async: false,
+    renderer,
+  }) as string
+}
 
 const SOURCE_FILE_LIMIT = 200
 const SOURCE_TOTAL_LIMIT = 4 * 1024 * 1024
@@ -1858,7 +1936,8 @@ export const hostCommand = defineCommand({
       <span class="copy-state" aria-live="polite">Copy</span>
     </button>
     <div class="links">
-      <a href="https://github.com/DevvGwardo/pond">Docs</a>
+      <a href="/docs">Docs</a>
+      <a href="https://github.com/DevvGwardo/pond" rel="noreferrer">GitHub</a>
     </div>
     <p class="fine">
       Anonymous deploys are sandboxed and may be terminated at any time. <a href="/abuse">Abuse policy</a> · <a href="/.well-known/security.txt">Security</a>
@@ -1965,6 +2044,291 @@ function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({"&":"&amp
 </html>`
     }
 
+    // Shared CSS + chrome for the /docs surface. Same palette / type as
+    // landingHtml() — black, mono accents, no rounded corners, no rainbow
+    // code highlighting. The sidebar collapses to a top-bar <details> on
+    // mobile via media query, no JS.
+    function docsChrome(opts: { title: string; activeSlug: string | null; bodyHtml: string }): string {
+      const navItems = DOCS_CATALOG.map(
+        (d) =>
+          `<li><a href="/docs/${d.slug}" ${d.slug === opts.activeSlug ? 'class="current" aria-current="page"' : ""}>${htmlEscape(d.title)}</a></li>`,
+      ).join("\n          ")
+      return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>${htmlEscape(opts.title)}</title>
+<meta name="description" content="Pond documentation — CLI, server API, client API, MCP, operations." />
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+<style>
+  :root {
+    --bg: #000;
+    --bg-elev: #050505;
+    --text: #f5f5f5;
+    --muted: #aaa;
+    --subtle: #5a5a5a;
+    --line: #242424;
+    --line-soft: #161616;
+    --code-bg: #080808;
+    --code: #ededed;
+    --link: #8ab4ff;
+    --sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--sans); -webkit-font-smoothing: antialiased; }
+  body { min-height: 100vh; }
+  a { color: var(--link); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+  a:hover { text-decoration-thickness: 2px; }
+
+  .topbar {
+    border-bottom: 1px solid var(--line);
+    padding: 18px 28px;
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--muted);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .topbar a { color: var(--muted); text-decoration: none; }
+  .topbar a:hover { color: var(--text); }
+  .topbar .sep { color: var(--subtle); margin: 0 8px; }
+
+  .layout {
+    display: grid;
+    grid-template-columns: 260px minmax(0, 1fr);
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 48px 28px 96px;
+    gap: 56px;
+  }
+
+  aside.nav {
+    position: sticky;
+    top: 32px;
+    align-self: start;
+    border-right: 1px solid var(--line-soft);
+    padding-right: 24px;
+  }
+  aside.nav h2 {
+    margin: 0 0 14px;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.18em;
+    color: var(--subtle);
+    text-transform: uppercase;
+    font-weight: 500;
+  }
+  aside.nav ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+  aside.nav a {
+    display: block;
+    padding: 6px 0;
+    color: var(--muted);
+    text-decoration: none;
+    font-size: 14px;
+    border-left: 2px solid transparent;
+    padding-left: 10px;
+    margin-left: -10px;
+    transition: color 120ms ease, border-color 120ms ease;
+  }
+  aside.nav a:hover { color: var(--text); }
+  aside.nav a.current { color: var(--text); border-left-color: var(--text); }
+  aside.nav .external { margin-top: 24px; padding-top: 18px; border-top: 1px solid var(--line-soft); display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
+
+  main.doc { min-width: 0; }
+  main.doc h1 {
+    margin: 0 0 28px;
+    font-size: 44px;
+    line-height: 1.05;
+    letter-spacing: -0.01em;
+    font-weight: 700;
+  }
+  main.doc h2 {
+    margin: 56px 0 14px;
+    padding-top: 16px;
+    border-top: 1px solid var(--line-soft);
+    font-size: 22px;
+    letter-spacing: -0.005em;
+    font-weight: 600;
+  }
+  main.doc h3 { margin: 36px 0 12px; font-size: 17px; font-weight: 600; }
+  main.doc h4 { margin: 28px 0 10px; font-size: 14px; font-weight: 600; font-family: var(--mono); color: var(--muted); letter-spacing: 0.04em; text-transform: uppercase; }
+  main.doc p, main.doc li { font-size: 15px; line-height: 1.65; color: var(--text); }
+  main.doc p { margin: 0 0 16px; }
+  main.doc ul, main.doc ol { padding-left: 22px; margin: 0 0 18px; }
+  main.doc li { margin: 4px 0; }
+  main.doc strong { color: var(--text); font-weight: 600; }
+  main.doc hr { border: 0; border-top: 1px solid var(--line); margin: 40px 0; }
+
+  main.doc :is(h1, h2, h3, h4, h5, h6) .anchor {
+    color: var(--subtle);
+    text-decoration: none;
+    margin-right: 10px;
+    font-weight: 400;
+    opacity: 0;
+    transition: opacity 120ms ease;
+  }
+  main.doc :is(h1, h2, h3, h4, h5, h6):hover .anchor { opacity: 1; }
+  main.doc :is(h1, h2, h3, h4, h5, h6) .anchor:hover { color: var(--text); }
+
+  main.doc code {
+    font-family: var(--mono);
+    font-size: 0.875em;
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    padding: 1px 6px;
+    color: var(--code);
+  }
+  main.doc pre {
+    margin: 18px 0 22px;
+    padding: 16px 18px;
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    overflow-x: auto;
+    font-size: 13.5px;
+    line-height: 1.55;
+  }
+  main.doc pre code { background: transparent; border: 0; padding: 0; font-size: inherit; color: var(--code); }
+
+  main.doc blockquote {
+    margin: 18px 0;
+    padding: 12px 18px;
+    border-left: 2px solid var(--muted);
+    color: var(--muted);
+    background: var(--bg-elev);
+  }
+  main.doc blockquote p { margin: 0; color: inherit; }
+
+  main.doc table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 18px 0 24px;
+    font-size: 14px;
+    border: 1px solid var(--line);
+  }
+  main.doc th, main.doc td {
+    text-align: left;
+    padding: 9px 14px;
+    border-bottom: 1px solid var(--line-soft);
+    vertical-align: top;
+  }
+  main.doc th {
+    font-weight: 600;
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--muted);
+    background: var(--bg-elev);
+  }
+  main.doc td code { white-space: nowrap; }
+  main.doc tr:last-child td { border-bottom: 0; }
+
+  main.doc :target { scroll-margin-top: 80px; }
+
+  .footer-meta {
+    margin-top: 64px;
+    padding-top: 18px;
+    border-top: 1px solid var(--line-soft);
+    color: var(--subtle);
+    font-size: 12px;
+    font-family: var(--mono);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px;
+  }
+  .footer-meta a { color: var(--subtle); }
+  .footer-meta a:hover { color: var(--muted); }
+
+  @media (max-width: 820px) {
+    .layout { grid-template-columns: 1fr; padding: 24px 20px 64px; gap: 24px; }
+    aside.nav { position: static; border-right: 0; padding-right: 0; border-bottom: 1px solid var(--line-soft); padding-bottom: 18px; }
+    aside.nav h2 { margin-bottom: 8px; }
+    aside.nav ul { flex-direction: row; flex-wrap: wrap; gap: 4px 14px; }
+    aside.nav a { padding: 4px 0; margin-left: 0; padding-left: 0; border-left: 0; border-bottom: 2px solid transparent; }
+    aside.nav a.current { border-left: 0; border-bottom-color: var(--text); }
+    aside.nav .external { flex-direction: row; gap: 16px; }
+    main.doc h1 { font-size: 34px; }
+    main.doc h2 { font-size: 19px; }
+    main.doc pre { padding: 12px 14px; font-size: 12.5px; }
+    .topbar { padding: 14px 20px; }
+  }
+</style>
+</head>
+<body>
+<nav class="topbar">
+  <a href="/">pond</a><span class="sep">/</span><a href="/docs">docs</a>${
+    opts.activeSlug
+      ? `<span class="sep">/</span><span>${htmlEscape(opts.activeSlug)}</span>`
+      : ""
+  }
+</nav>
+<div class="layout">
+  <aside class="nav">
+    <h2>Reference</h2>
+    <ul>
+          ${navItems}
+    </ul>
+    <div class="external">
+      <a href="/">Home</a>
+      <a href="https://github.com/DevvGwardo/pond" rel="noreferrer">GitHub</a>
+      <a href="/llms-full.txt">llms-full.txt</a>
+    </div>
+  </aside>
+  <main class="doc">
+${opts.bodyHtml}
+    <div class="footer-meta">
+      ${opts.activeSlug ? `<span>source: <a href="/docs/${opts.activeSlug}.md">/docs/${opts.activeSlug}.md</a></span>` : ""}
+      <span><a href="https://github.com/DevvGwardo/pond/blob/main/docs/${opts.activeSlug ?? ""}${opts.activeSlug ? ".md" : ""}" rel="noreferrer">Edit on GitHub</a></span>
+    </div>
+  </main>
+</div>
+</body>
+</html>`
+    }
+
+    function docsIndexHtml(): string {
+      const cards = DOCS_CATALOG.map(
+        (d) => `
+      <a class="card" href="/docs/${d.slug}">
+        <span class="card-eyebrow">${htmlEscape(d.slug)}</span>
+        <h2>${htmlEscape(d.title)}</h2>
+        <p>${htmlEscape(d.summary)}</p>
+      </a>`,
+      ).join("")
+      const body = `
+    <p class="doc-eyebrow">pond / docs</p>
+    <h1>Everything pond can do.</h1>
+    <p class="lede">Five short references. The CLI and the runtime, the MCP server, and the operations guide for when you outgrow a laptop.</p>
+    <style>
+      main.doc .doc-eyebrow { font-family: var(--mono); font-size: 11px; letter-spacing: 0.22em; text-transform: uppercase; color: var(--subtle); margin: 0 0 16px; }
+      main.doc .lede { font-size: 18px; color: var(--muted); line-height: 1.5; margin-bottom: 40px; max-width: 580px; }
+      main.doc .cards { display: grid; grid-template-columns: 1fr; gap: 0; border-top: 1px solid var(--line-soft); }
+      main.doc .card { display: block; padding: 22px 0; border-bottom: 1px solid var(--line-soft); text-decoration: none; color: inherit; transition: padding-left 160ms ease; }
+      main.doc .card:hover { padding-left: 10px; }
+      main.doc .card-eyebrow { display: inline-block; margin-bottom: 6px; font-family: var(--mono); font-size: 11px; color: var(--subtle); letter-spacing: 0.12em; text-transform: uppercase; }
+      main.doc .card h2 { margin: 0 0 6px; padding: 0; border: 0; font-size: 22px; font-weight: 600; }
+      main.doc .card p { margin: 0; color: var(--muted); font-size: 14.5px; line-height: 1.5; max-width: 620px; }
+    </style>
+    <div class="cards">${cards}
+    </div>
+`
+      return docsChrome({ title: "Docs · Pond", activeSlug: null, bodyHtml: body })
+    }
+
+    function docsPageHtml(slug: string, markdown: string): string | null {
+      const meta = DOCS_CATALOG.find((d) => d.slug === slug)
+      if (!meta) return null
+      const body = renderMarkdown(markdown)
+      return docsChrome({
+        title: `${meta.title} · Pond docs`,
+        activeSlug: slug,
+        bodyHtml: body,
+      })
+    }
+
     function abuseHtml(): string {
       const contact = abuseEmail ? `<a href="mailto:${abuseEmail}">${abuseEmail}</a>` : "the host operator"
       return `<!doctype html>
@@ -2058,6 +2422,25 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
                   "cache-control": "public, max-age=300",
                 },
               })
+            }
+            return c.json({ error: "Not found" }, 404)
+          }
+          // Human-readable docs index. /docs and /docs/ both land here.
+          if (url.pathname === "/docs" || url.pathname === "/docs/") {
+            return c.html(docsIndexHtml())
+          }
+          // Human-readable docs page. /docs/<slug> with no .md suffix renders
+          // the markdown to HTML. We deliberately fall through to the raw-
+          // markdown handler below for /docs/<slug>.md so agents (and llms.txt)
+          // keep working unchanged.
+          const docHtmlMatch = url.pathname.match(/^\/docs\/([a-z0-9_-]+)\/?$/)
+          if (docHtmlMatch) {
+            const slug = docHtmlMatch[1]
+            if (!DOCS_SLUG_RE.test(slug)) return c.json({ error: "Not found" }, 404)
+            const abs = path.join(pondDocsDir, `${slug}.md`)
+            if (fs.existsSync(abs) && fs.statSync(abs).isFile()) {
+              const rendered = docsPageHtml(slug, fs.readFileSync(abs, "utf-8"))
+              if (rendered) return c.html(rendered)
             }
             return c.json({ error: "Not found" }, 404)
           }
