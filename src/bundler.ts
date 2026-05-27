@@ -1,5 +1,14 @@
 import * as esbuild from "esbuild"
 import * as path from "node:path"
+import { createRequire } from "node:module"
+
+// Resolve preact via Node's module resolution so we work regardless of npm's
+// hoisting choice. The old code aliased to `../node_modules/preact/...`
+// relative to this file, which only resolved when preact was nested under
+// pondsh/node_modules — modern npm hoists peer copies up to the consumer's
+// root node_modules, leaving that path nonexistent.
+const moduleRequire = createRequire(import.meta.url)
+const preactDir = path.dirname(moduleRequire.resolve("preact/package.json"))
 
 export async function buildClient(entry: string, options: { liveReload?: boolean } = {}): Promise<string> {
   // IIFE format with a globalName wraps the user bundle so its identifiers
@@ -40,16 +49,10 @@ export { render, h } from "preact";
     jsxImportSource: "preact",
     alias: {
       "pond/client": path.resolve(import.meta.dirname, "../client/index.ts"),
-      "preact/jsx-runtime": path.resolve(
-        import.meta.dirname,
-        "../node_modules/preact/jsx-runtime/dist/jsxRuntime.module.js",
-      ),
-      "preact/jsx-dev-runtime": path.resolve(
-        import.meta.dirname,
-        "../node_modules/preact/jsx-runtime/dist/jsxRuntime.module.js",
-      ),
-      "preact/hooks": path.resolve(import.meta.dirname, "../node_modules/preact/hooks/dist/hooks.module.js"),
-      preact: path.resolve(import.meta.dirname, "../node_modules/preact/dist/preact.module.js"),
+      "preact/jsx-runtime": path.join(preactDir, "jsx-runtime/dist/jsxRuntime.module.js"),
+      "preact/jsx-dev-runtime": path.join(preactDir, "jsx-runtime/dist/jsxRuntime.module.js"),
+      "preact/hooks": path.join(preactDir, "hooks/dist/hooks.module.js"),
+      preact: path.join(preactDir, "dist/preact.module.js"),
     },
     define: {
       "process.env.NODE_ENV": '"development"',

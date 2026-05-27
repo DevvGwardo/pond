@@ -5,6 +5,12 @@ Versioning: [Semver](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.10] - 2026-05-27
+
+### Fixed
+
+- **Client bundler resolves `preact` regardless of npm hoisting.** `buildClient` in `src/bundler.ts` aliased `preact`, `preact/hooks`, and `preact/jsx-runtime` to `path.resolve(import.meta.dirname, "../node_modules/preact/...")` — that path only resolves when preact is nested under `pondsh/node_modules`, which modern npm doesn't do because it hoists peers up to the consumer's root `node_modules`. Every fresh `npm install pondsh` produced `ERROR: Could not resolve "...pondsh/node_modules/preact/dist/preact.module.js"` on first `pond dev`. Now uses `createRequire(import.meta.url).resolve("preact/package.json")` to find preact wherever Node's module resolution puts it (root, nested, pnpm symlinks, all fine).
+
 ## [0.2.9] - 2026-05-27
 
 ### Fixed
