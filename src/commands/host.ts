@@ -478,8 +478,12 @@ export const hostCommand = defineCommand({
       const quota = controlDb.getQuota(record.deployId)
       const execArgv = [`--max-old-space-size=${quota.maxMemoryMb}`]
       if (opts.useSandbox && sandboxAvailable) {
+        // Node 24 removed `--experimental-permission`; the stable `--permission`
+        // is available on Node 23+. Node 22 (LTS) shipped before the rename so
+        // we keep the experimental form there.
+        const permissionFlag = nodeMajor >= 23 ? "--permission" : "--experimental-permission"
         execArgv.push(
-          "--experimental-permission",
+          permissionFlag,
           `--allow-fs-read=${realDir}`,
           `--allow-fs-read=${fs.realpathSync(pondSrcDir)}`,
           `--allow-fs-read=${fs.realpathSync(pondNodeModulesDir)}`,

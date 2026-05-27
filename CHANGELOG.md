@@ -5,6 +5,12 @@ Versioning: [Semver](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-05-27
+
+### Fixed
+
+- **`pond host` sandbox boot on Node 24.** Node 24 removed the `--experimental-permission` flag (renamed to `--permission` in Node 23, stable). `forkDeploy` was hard-coding the experimental form, so forked workers exited with `code=9 (bad option)` before booting and every sandboxed/anonymous deploy failed. Now selects `--permission` for Node 23+ and keeps `--experimental-permission` for Node 22 LTS. CI's Node 24 matrix lane is green again.
+
 ## [0.2.5] - 2026-05-27
 
 ### Fixed
