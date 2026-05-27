@@ -209,15 +209,21 @@ async function invokeClaude(agent: DetectedAgent, opts: InvokeOptions): Promise<
   const cli = agent.detail.endsWith("claude") || agent.detail.includes("/bin/") ? agent.detail : "claude"
   // `claude -p` runs a one-shot, non-interactive prompt.
   // `--permission-mode bypassPermissions` skips the interactive approval gate.
+  // `--disallowed-tools Bash` is the load-bearing constraint for `pond new
+  // --generate`: a Windows tester clocked 40+ minutes because claude kept
+  // spawning `npm run dev` in the background and looping on
+  // `curl localhost:3000 | python -c ...` to "verify" the app. Soft prompts
+  // (AGENTS.md, CLI args) say "don't"; --disallowed-tools enforces it. The
+  // headless scaffold flow only needs Read / Edit / Write to do its job.
   // When the caller subscribes to onEvent, switch to stream-json so we can
-  // surface tool calls (Edit, Bash, Read…) live instead of a generic spinner.
-  // Without onEvent we fall back to the original raw-text mode.
+  // surface tool calls live instead of a generic spinner.
+  const baseArgs = ["-p", "--permission-mode", "bypassPermissions", "--disallowed-tools", "Bash"]
   if (!opts.onEvent) {
-    return streamChild(cli, ["-p", "--permission-mode", "bypassPermissions", opts.prompt], opts.cwd, opts.onChunk)
+    return streamChild(cli, [...baseArgs, opts.prompt], opts.cwd, opts.onChunk)
   }
   return streamClaudeJsonl(
     cli,
-    ["-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions", opts.prompt],
+    [...baseArgs, "--output-format", "stream-json", "--verbose", opts.prompt],
     opts.cwd,
     opts.onEvent,
     opts.onChunk,

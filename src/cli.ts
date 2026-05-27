@@ -17,6 +17,7 @@ import { tokenCommand } from "./commands/token.js"
 import { forkCommand } from "./commands/fork.js"
 import { signupCommand } from "./commands/signup.js"
 import { dashboardCommand } from "./commands/dashboard.js"
+import { uninstallCommand } from "./commands/uninstall.js"
 
 const main = defineCommand({
   meta: {
@@ -42,6 +43,7 @@ const main = defineCommand({
     token: tokenCommand,
     fork: forkCommand,
     dashboard: dashboardCommand,
+    uninstall: uninstallCommand,
   },
 })
 

@@ -252,3 +252,29 @@ test("`pond dev` /__pond/auth/guest accepts loopback POST", async () => {
     clearTimeout(t)
   }
 })
+
+test("`pond uninstall` dry-run lists steps without deleting", async () => {
+  const fakeHome = tmp("pond-uninstall-dry-")
+  mkdirSync(path.join(fakeHome, ".pond"), { recursive: true })
+  writeFileSync(path.join(fakeHome, ".pond", "credentials.json"), '{"token":"x"}')
+  const { stdout } = await execFileP(process.execPath, [CLI_PATH, "uninstall"], {
+    env: { ...process.env, HOME: fakeHome, USERPROFILE: fakeHome },
+    timeout: 5000,
+  })
+  assert.match(stdout, /Dry run/)
+  assert.match(stdout, /npm uninstall -g pondsh/)
+  assert.ok(existsSync(path.join(fakeHome, ".pond", "credentials.json")), "dry run must not delete state")
+})
+
+test("`pond uninstall --yes` wipes ~/.pond and tells user to run npm uninstall", async () => {
+  const fakeHome = tmp("pond-uninstall-yes-")
+  mkdirSync(path.join(fakeHome, ".pond"), { recursive: true })
+  writeFileSync(path.join(fakeHome, ".pond", "credentials.json"), '{"token":"x"}')
+  const { stdout } = await execFileP(process.execPath, [CLI_PATH, "uninstall", "--yes"], {
+    env: { ...process.env, HOME: fakeHome, USERPROFILE: fakeHome },
+    timeout: 5000,
+  })
+  assert.match(stdout, /Removed/)
+  assert.match(stdout, /npm uninstall -g pondsh/)
+  assert.ok(!existsSync(path.join(fakeHome, ".pond")), "~/.pond should be gone")
+})
