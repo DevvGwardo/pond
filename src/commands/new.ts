@@ -150,16 +150,33 @@ export const newCommand = defineCommand({
         console.error(`  AGENTS.md remains in ${name}/ — re-run after starting one of those agents.`)
         process.exit(1)
       }
-      const agent = detected[0]
-      console.log(`\n  Streaming output from ${agent.name}...\n`)
+      // Cascade through every detected agent. Detection passing for hermes
+      // doesn't guarantee the model is loaded or the token is valid, so a
+      // failure on the first candidate falls through to the next instead of
+      // wasting the scaffold.
       const projDir = path.resolve(process.cwd(), name)
-      const result = await invokeAgent(agent, {
-        cwd: projDir,
-        prompt: `Read AGENTS.md in the current directory and follow the build instructions. Edit server/index.ts and client/index.tsx in place.`,
-      })
-      if (!result.ok) {
-        console.error(`\n  Agent invocation failed: ${result.error}`)
-        console.error(`  AGENTS.md preserved in ${name}/ — re-run after fixing the agent or with a different one.`)
+      const generatePrompt = `Read AGENTS.md in the current directory and follow the build instructions. Edit server/index.ts and client/index.tsx in place.`
+      const errors: Array<{ name: string; error: string }> = []
+      let success = false
+      for (const candidate of detected) {
+        console.log(`\n  Streaming output from ${candidate.name}...\n`)
+        const result = await invokeAgent(candidate, { cwd: projDir, prompt: generatePrompt })
+        if (result.ok) {
+          success = true
+          break
+        }
+        errors.push({ name: candidate.name, error: result.error ?? "unknown" })
+        console.error(`\n  ${candidate.name} failed: ${result.error}`)
+        const remaining = detected.slice(detected.indexOf(candidate) + 1)
+        if (remaining.length) {
+          console.error(`  Falling back to: ${remaining.map((a) => a.name).join(" → ")}`)
+        }
+      }
+      if (!success) {
+        console.error(
+          `\n  --generate: all detected agents failed (${errors.map((e) => `${e.name}: ${e.error}`).join("; ")}).`,
+        )
+        console.error(`  AGENTS.md preserved in ${name}/ — fix one of the agents and re-run.`)
         process.exit(1)
       }
       console.log(`\n  Agent finished. Review the changes, then:`)

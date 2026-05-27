@@ -5,6 +5,13 @@ Versioning: [Semver](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-05-27
+
+### Fixed
+
+- **`pond new --generate`**: when the first detected agent fails (e.g. hermes returns an unauthenticated response or the model is unloaded), the CLI now falls through to the next candidate in the cascade instead of bailing. The AGENTS.md still survives a total failure for retry.
+- **Hermes detection**: a `401` from `127.0.0.1:8642/v1/models` no longer counts as "alive" — that indicates an unusable instance, so the cascade skips straight to `claude` / `codex`.
+
 ## [0.2.0] - 2026-05-27
 
 A capability + ergonomics release. New capsule primitives (`ctx.ai`, `ctx.blob`, `socket()`, per-route `rateLimit`), additional auth providers, a template library, IDE polish, an MCP server, and a per-user `/dashboard`.

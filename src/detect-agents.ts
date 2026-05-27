@@ -41,7 +41,11 @@ export async function detectHermes(deps: DetectionDeps = {}): Promise<DetectedAg
     const t = setTimeout(() => ac.abort(), 350)
     const res = await f("http://127.0.0.1:8642/v1/models", { signal: ac.signal })
     clearTimeout(t)
-    if (res.ok || res.status === 401 || res.status === 404 || res.status === 405) {
+    // Only count hermes as usable if the endpoint answers cleanly. A 401/403
+    // means there's a server listening but it requires credentials we don't
+    // have — falling through to the next agent in the cascade is cheaper
+    // than failing the whole `--generate` call.
+    if (res.ok || res.status === 404 || res.status === 405) {
       return { name: "hermes", detail: "http://127.0.0.1:8642" }
     }
   } catch {

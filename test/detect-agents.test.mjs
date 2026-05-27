@@ -25,13 +25,20 @@ test("detectHermes returns null when nothing responds", async () => {
   assert.equal(result, null)
 })
 
-test("detectHermes returns positive on 200 / 401 / 404 / 405", async () => {
-  for (const status of [200, 401, 404, 405]) {
+test("detectHermes returns positive on 200 / 404 / 405", async () => {
+  for (const status of [200, 404, 405]) {
     const result = await detectHermes({
       fetch: async () => new Response("", { status }),
     })
     assert.equal(result?.name, "hermes", `status ${status}`)
   }
+})
+
+test("detectHermes returns null on 401 (auth-gated → unusable)", async () => {
+  const result = await detectHermes({
+    fetch: async () => new Response("", { status: 401 }),
+  })
+  assert.equal(result, null)
 })
 
 test("detectClaude finds ~/.claude when present", async () => {
