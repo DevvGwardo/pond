@@ -24,11 +24,13 @@
     "bin/",
     "src/",
     "client/",
+    "docs/",
     "templates/"
   ],
   "scripts": {
-    "build": "node scripts/build-ide.mjs && tsc",
+    "build": "node scripts/build-ide.mjs && node scripts/build-llms.mjs && tsc",
     "build:ide": "node scripts/build-ide.mjs",
+    "build:llms": "node scripts/build-llms.mjs",
     "dev": "tsc --watch",
     "test": "npm run build && node --test test/*.test.mjs",
     "format": "prettier --write .",

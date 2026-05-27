@@ -1,0 +1,32 @@
+# Pond Docs
+
+> Pond is an agent-native CLI and runtime for building small full-stack TypeScript apps called capsules. A capsule is one server file (schema, queries, mutations), one client file (Preact UI), and a shared/ dir, deployed to a hosted control plane that gives back a public URL and a one-time claim token.
+
+The docs are plain Markdown so an agent can ingest them with one fetch. Prefer `/llms-full.txt` if you want the whole reference in a single request.
+
+## For agents building a capsule
+
+If you are an agent writing a capsule, treat the capsule directory as the whole app. Write the server contract, write the Preact client, run `pond dev`, inspect with `pond inspect` / `pond logs`, and deploy with `pond deploy --api <url>`. Do not leave the directory.
+
+Hard constraints — non-negotiable:
+
+- `server/index.ts` imports only from `pond/server`, plain relative TypeScript, and Node built-ins shipped with the runtime. No arbitrary npm packages.
+- `client/index.tsx` imports only from `pond/client` and plain relative TypeScript. Use Tailwind classes for styling; the runtime injects Tailwind via CDN.
+- `shared/` contains pure TypeScript shared by both sides. It must not read env, secrets, DOM APIs, Node APIs, or any pond runtime API.
+- Every `server/index.ts` ends with `export default capsule({ ... })`.
+- Every `client/index.tsx` exports a Preact component named `App`.
+- Authorization is your responsibility inside handlers. Filter by `ctx.auth.userId`; re-check ownership on update / delete.
+
+## Docs
+
+- [Pond Server API Reference](https://pond.run/docs/api-reference.md): the surface of `pond/server` — `capsule()`, `table()`, `query()`, `mutation()`, `endpoint()`, column types, the `ctx.db` data API, lifecycle.
+- [Pond Client API Reference](https://pond.run/docs/client-reference.md): the surface of `pond/client` — `useQuery`, `useMutation`, `useAuth`, `SignInWithGoogle`, `signOut`, plus the re-exported `render` and `h` from Preact.
+- [README](https://pond.run/docs/README.md): overall introduction, capsule example, CLI commands, in-browser IDE, hosted control plane, anonymous deploys, threat model.
+
+## Examples
+
+- [todo-style capsule](https://pond.run/docs/api-reference.md#capsule-def-capsuledefinition): the smallest useful pattern — one table, one query, one mutation, server-owned writes.
+
+## Machine-readable
+
+- [llms-full.txt](https://pond.run/llms-full.txt) — full reference concatenated in one file.

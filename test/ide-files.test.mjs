@@ -375,3 +375,54 @@ test("GET /ide/unknown returns 404", async () => {
   })
   assert.equal(result.status, 404)
 })
+
+// ---- agent docs ----
+
+async function getBare(p) {
+  const http = await import("node:http")
+  return await new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: "127.0.0.1",
+        port,
+        method: "GET",
+        path: p,
+        headers: { host: `localhost:${port}` },
+      },
+      (res) => {
+        let data = ""
+        res.on("data", (c) => (data += c))
+        res.on("end", () => resolve({ status: res.statusCode, body: data, ct: res.headers["content-type"] }))
+      },
+    )
+    req.on("error", reject)
+    req.end()
+  })
+}
+
+test("GET /llms.txt serves the agent docs index", async () => {
+  const r = await getBare("/llms.txt")
+  assert.equal(r.status, 200)
+  assert.match(r.ct, /text\/plain/)
+  assert.match(r.body, /# Pond Docs/)
+  assert.match(r.body, /llms-full\.txt/)
+})
+
+test("GET /llms-full.txt serves the consolidated reference", async () => {
+  const r = await getBare("/llms-full.txt")
+  assert.equal(r.status, 200)
+  assert.match(r.body, /Pond Server API Reference/)
+  assert.match(r.body, /Pond Client API Reference/)
+})
+
+test("GET /docs/api-reference.md serves the canonical server reference", async () => {
+  const r = await getBare("/docs/api-reference.md")
+  assert.equal(r.status, 200)
+  assert.match(r.ct, /text\/markdown/)
+  assert.match(r.body, /pond\/server/)
+})
+
+test("GET /docs/../etc/passwd is rejected", async () => {
+  const r = await getBare("/docs/..%2Fetc%2Fpasswd")
+  assert.ok(r.status === 404 || r.status === 400, `expected 404/400, got ${r.status}`)
+})

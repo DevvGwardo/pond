@@ -1,5 +1,7 @@
 # Pond Client API Reference
 
+**Use this as the quick contract when building a Pond capsule client.** If you are an agent writing the UI, this page is the authoritative list of the hooks and components you may import from `pond/client`. Stick to the exports listed here — do not bring in React directly, do not pull in routing or query libraries from npm. Preact is the renderer; Tailwind classes are available without configuration.
+
 This is the surface exported from `pond/client`. A capsule's `client/index.tsx` imports it to call queries, run mutations, and read auth state.
 
 ```ts

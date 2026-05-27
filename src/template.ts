@@ -164,6 +164,14 @@ The user ran \`pond new\` with this description:
 
 Your job: implement this inside the scaffolded capsule. Edit \`server/index.ts\` and \`client/index.tsx\`. Add tables, queries, mutations, and UI to satisfy the description. When you're done, run \`npm install && npm run dev\` and verify the app works in a browser.
 
+### Canonical references
+
+If you need more detail than the contract below, fetch:
+
+- https://pond.run/llms-full.txt — full server + client API in one file
+- https://pond.run/docs/api-reference.md — server (\`pond/server\`)
+- https://pond.run/docs/client-reference.md — client (\`pond/client\`)
+
 ${CAPSULE_CONTRACT}
 
 ### When you're done

@@ -18,6 +18,7 @@ RUN npm ci --omit=dev
 COPY src ./src
 COPY client ./client
 COPY bin ./bin
+COPY docs ./docs
 COPY README.md LICENSE ./
 
 ENV NODE_ENV=production

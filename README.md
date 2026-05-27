@@ -188,6 +188,26 @@ The client runtime exposes:
 - `SignInWithGoogle`
 - `signOut()`
 
+## For coding agents
+
+If you are a coding agent reading this and the user just asked you to build a pond capsule, fetch one of these and follow it:
+
+- `https://pond.run/llms.txt` — the agent docs index (small)
+- `https://pond.run/llms-full.txt` — full server + client reference in one fetch (~15 KB)
+- `https://pond.run/docs/api-reference.md` — server (`pond/server`)
+- `https://pond.run/docs/client-reference.md` — client (`pond/client`)
+
+Hard rules for a pond capsule:
+
+- `server/index.ts` imports only from `pond/server`, plain relative TypeScript, and Node built-ins. No arbitrary npm packages.
+- `client/index.tsx` imports only from `pond/client`. Preact + Tailwind classes; do not bring in React, react-router, react-query, etc.
+- Every `server/index.ts` ends with `export default capsule({ ... })`.
+- Every `client/index.tsx` exports a component named `App`.
+- Authorization is your responsibility inside handlers (filter by `ctx.auth.userId`; re-check ownership on update / delete).
+- Do not delete `server/index.ts` or `package.json`. They are required.
+
+When you scaffold a capsule via `pond new "<description>"`, the CLI writes an `AGENTS.md` + `.claude/CLAUDE.md` that already point at these URLs.
+
 ## Authentication
 
 Pond supports guest mode and Google OAuth in the local runtime.

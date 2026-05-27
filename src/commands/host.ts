@@ -293,6 +293,7 @@ export const hostCommand = defineCommand({
     const workerPath = path.resolve(import.meta.dirname, "../host/deploy-worker.js")
     const pondSrcDir = path.resolve(import.meta.dirname, "..")
     const pondNodeModulesDir = path.resolve(import.meta.dirname, "../../node_modules")
+    const pondDocsDir = path.resolve(import.meta.dirname, "../../docs")
 
     const anonymousEnabled = args["anonymous-deploys"] !== false
     const graceStr =
@@ -1861,6 +1862,34 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
               status: 200,
               headers: { "content-type": "image/svg+xml", "cache-control": "public, max-age=86400" },
             })
+          }
+          if (url.pathname === "/llms.txt" || url.pathname === "/llms-full.txt") {
+            const filename = url.pathname.slice(1)
+            const abs = path.join(pondDocsDir, filename)
+            if (fs.existsSync(abs)) {
+              return new Response(fs.readFileSync(abs), {
+                status: 200,
+                headers: {
+                  "content-type": "text/plain; charset=utf-8",
+                  "cache-control": "public, max-age=300",
+                },
+              })
+            }
+            return c.json({ error: "Not found" }, 404)
+          }
+          const docMatch = url.pathname.match(/^\/docs\/([a-zA-Z0-9_-]+\.md)$/)
+          if (docMatch) {
+            const abs = path.join(pondDocsDir, docMatch[1])
+            if (fs.existsSync(abs) && fs.statSync(abs).isFile()) {
+              return new Response(fs.readFileSync(abs), {
+                status: 200,
+                headers: {
+                  "content-type": "text/markdown; charset=utf-8",
+                  "cache-control": "public, max-age=300",
+                },
+              })
+            }
+            return c.json({ error: "Not found" }, 404)
           }
           const ideMatch = url.pathname.match(/^\/ide\/([a-f0-9]+)\/?$/)
           if (ideMatch) {
