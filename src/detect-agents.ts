@@ -128,13 +128,17 @@ function streamChild(
 async function invokeClaude(agent: DetectedAgent, opts: InvokeOptions): Promise<{ ok: boolean; error?: string }> {
   const cli = agent.detail.endsWith("claude") || agent.detail.includes("/bin/") ? agent.detail : "claude"
   // `claude -p` runs a one-shot, non-interactive prompt that streams to stdout.
-  return streamChild(cli, ["-p", opts.prompt], opts.cwd, opts.onChunk)
+  // `--permission-mode bypassPermissions` skips the interactive Edit/Write/Bash
+  // approval gate — required for headless use. The user explicitly invoked
+  // `--generate` knowing it will modify the scaffold, so this is a fair trade.
+  return streamChild(cli, ["-p", "--permission-mode", "bypassPermissions", opts.prompt], opts.cwd, opts.onChunk)
 }
 
 async function invokeCodex(agent: DetectedAgent, opts: InvokeOptions): Promise<{ ok: boolean; error?: string }> {
   const cli = agent.detail.endsWith("codex") || agent.detail.includes("/bin/") ? agent.detail : "codex"
-  // `codex exec "<prompt>"` runs a non-interactive Codex CLI session.
-  return streamChild(cli, ["exec", opts.prompt], opts.cwd, opts.onChunk)
+  // `codex exec` is non-interactive. `--full-auto` (Codex CLI 0.30+) skips
+  // approval prompts in the same spirit as Claude's bypassPermissions.
+  return streamChild(cli, ["exec", "--full-auto", opts.prompt], opts.cwd, opts.onChunk)
 }
 
 async function invokeHermes(_agent: DetectedAgent, opts: InvokeOptions): Promise<{ ok: boolean; error?: string }> {

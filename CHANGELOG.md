@@ -5,6 +5,12 @@ Versioning: [Semver](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-05-27
+
+### Fixed
+
+- **`pond new --generate`** previously hung against Claude Code / Codex CLI because the headless `-p` / `exec` modes still gated Edit, Write, and Bash on an interactive approval that no one was watching. Now passes `--permission-mode bypassPermissions` (Claude) and `--full-auto` (Codex) so the headless invocation can actually write the files it was asked to write.
+
 ## [0.2.1] - 2026-05-27
 
 ### Fixed
