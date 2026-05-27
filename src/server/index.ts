@@ -58,11 +58,37 @@ export interface CapsuleDb {
   [tableName: string]: CapsuleDbTable
 }
 
+export interface AiCompleteOptions {
+  prompt: string
+  model?: string
+  system?: string
+  maxTokens?: number
+  temperature?: number
+}
+
+export interface CapsuleAi {
+  complete(opts: AiCompleteOptions): Promise<string>
+  stream(opts: AiCompleteOptions): AsyncIterable<string>
+}
+
+export interface CapsuleBlob {
+  put(
+    key: string,
+    bytes: Uint8Array | ArrayBuffer | Buffer | string,
+    options?: { contentType?: string },
+  ): Promise<{ key: string; size: number }>
+  get(key: string): Promise<{ bytes: Buffer; contentType: string } | null>
+  delete(key: string): Promise<void>
+  list(prefix?: string): Promise<Array<{ key: string; size: number; contentType: string }>>
+}
+
 export interface CapsuleContext {
   auth: CapsuleAuth
   db: CapsuleDb
   env: Record<string, string>
   log: CapsuleLog
+  ai: CapsuleAi
+  blob: CapsuleBlob
 }
 
 // ── Handlers ───────────────────────────────────────────────
@@ -93,6 +119,20 @@ export type EndpointHandler = (
   req: EndpointRequest,
 ) => EndpointResponse | Promise<EndpointResponse>
 
+export interface SocketLike {
+  send(data: string): void
+  close(code?: number, reason?: string): void
+  on(event: "message", listener: (data: string) => void): void
+  on(event: "close", listener: () => void): void
+}
+
+export type SocketHandler = (ctx: CapsuleContext, socket: SocketLike) => void | Promise<void>
+
+interface SocketDefinition {
+  _kind: "socket"
+  handler: SocketHandler
+}
+
 // ── Response helpers ───────────────────────────────────────
 
 export function json(body: any, init?: { status?: number; headers?: Record<string, string> }): EndpointResponse {
@@ -111,6 +151,14 @@ export function text(body: string, init?: { status?: number; headers?: Record<st
   }
 }
 
+// ── Rate limits ────────────────────────────────────────────
+
+export interface RouteRateLimit {
+  perMinute?: number
+  perHour?: number
+  by?: "ip" | "user"
+}
+
 // ── Capsule definition ─────────────────────────────────────
 
 export interface CapsuleDefinition {
@@ -118,7 +166,12 @@ export interface CapsuleDefinition {
   queries: Record<string, QueryHandler>
   mutations: Record<string, MutationHandler>
   endpoints?: Record<string, EndpointDefinition>
+  sockets?: Record<string, SocketDefinition>
   allowedOrigins?: string[]
+  rateLimit?: Record<string, RouteRateLimit>
+  public?: boolean
+  title?: string
+  description?: string
 }
 
 interface EndpointDefinition {
@@ -133,16 +186,26 @@ export function capsule(def: {
   mutations: Record<string, MutationHandler>
   endpoints?: Record<
     string,
-    (ctx: CapsuleContext, req: EndpointRequest) => EndpointResponse | Promise<EndpointResponse>
+    EndpointDefinition | ((ctx: CapsuleContext, req: EndpointRequest) => EndpointResponse | Promise<EndpointResponse>)
   >
+  sockets?: Record<string, SocketDefinition>
   allowedOrigins?: string[]
+  rateLimit?: Record<string, RouteRateLimit>
+  public?: boolean
+  title?: string
+  description?: string
 }): CapsuleDefinition {
   return {
     schema: def.schema,
     queries: def.queries,
     mutations: def.mutations,
     endpoints: def.endpoints as unknown as Record<string, EndpointDefinition>,
+    sockets: def.sockets,
     allowedOrigins: def.allowedOrigins,
+    rateLimit: def.rateLimit,
+    public: def.public,
+    title: def.title,
+    description: def.description,
   }
 }
 
@@ -162,4 +225,8 @@ export function endpoint(opts: { method: string; path: string }, handler: Endpoi
     _path: opts.path,
     handler,
   }
+}
+
+export function socket(handler: SocketHandler): SocketDefinition {
+  return { _kind: "socket", handler }
 }

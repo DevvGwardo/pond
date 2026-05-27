@@ -1484,6 +1484,183 @@ export default capsule({
   },
 )
 
+test("WebSocket upgrade proxies through host to deploy", async () => {
+  const wsSrc = `import { capsule, socket, string, table } from "pond/server"
+export default capsule({
+  schema: { x: table({ name: string() }) },
+  queries: {},
+  mutations: {},
+  sockets: {
+    echo: socket((ctx, ws) => {
+      ws.on("message", (data) => ws.send("echo:" + data))
+    }),
+  },
+})
+`
+  const created = await fetch(`${apiUrl}/api/deploys`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({
+      sourceFiles: {
+        "server/index.ts": wsSrc,
+        "package.json": '{"name":"ws-cap","private":true,"type":"module"}\n',
+      },
+    }),
+  })
+  assert.equal(created.status, 201)
+  const { deployId: wsDeployId } = await created.json()
+
+  // Wait until the deploy worker is actually accepting on the API route
+  const deployUrl = `http://${wsDeployId}.${publicHost}:${port}`
+  // Connect to the proxy via the host header — the ws library passes Host
+  // through the Origin header, but the upgrade request still carries Host
+  // set by the URL's host. We force the URL itself to point at the proxy.
+  const { WebSocket } = await import("ws")
+  const wsClient = new WebSocket(`ws://${wsDeployId}.${publicHost}:${port}/api/socket/echo`)
+  const opened = new Promise((resolve, reject) => {
+    wsClient.once("open", resolve)
+    wsClient.once("error", reject)
+  })
+  await opened
+  const msg = new Promise((resolve) => wsClient.once("message", (m) => resolve(m.toString())))
+  wsClient.send("hello")
+  const out = await msg
+  wsClient.close()
+  assert.equal(out, "echo:hello")
+})
+
+test("public capsule appears in /api/public-deploys and source is exportable", async () => {
+  const publicSrc = `import { capsule, query, string, table } from "pond/server"
+export default capsule({
+  schema: { items: table({ name: string() }) },
+  queries: { items: query((ctx) => ctx.db.items.all()) },
+  mutations: {},
+  public: true,
+  title: "My Public Capsule",
+  description: "A sample capsule shared via the gallery",
+})
+`
+  const created = await fetch(`${apiUrl}/api/deploys`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({
+      sourceFiles: {
+        "server/index.ts": publicSrc,
+        "package.json": '{"name":"public-cap","private":true,"type":"module"}\n',
+      },
+    }),
+  })
+  assert.equal(created.status, 201)
+  const { deployId: publicId } = await created.json()
+  assert.ok(publicId)
+
+  // Listed in the public-deploys feed
+  const list = await fetch(`${apiUrl}/api/public-deploys`)
+  assert.equal(list.status, 200)
+  const { deploys: pub } = await list.json()
+  const match = pub.find((d) => d.deployId === publicId)
+  assert.ok(match, "public deploy should be listed")
+  assert.equal(match.title, "My Public Capsule")
+  assert.match(match.description, /sample capsule/)
+
+  // Source export works without auth
+  const src = await fetch(`${apiUrl}/api/public-deploys/${publicId}/source`)
+  assert.equal(src.status, 200)
+  const exp = await src.json()
+  assert.equal(exp.deployId, publicId)
+  assert.ok(exp.files["server/index.ts"], "server/index.ts in export")
+  assert.match(exp.files["server/index.ts"], /public:\s*true/)
+
+  // A non-public deploy should 404 from this endpoint
+  const privSrc = await fetch(`${apiUrl}/api/public-deploys/${deployId}/source`)
+  assert.equal(privSrc.status, 404)
+})
+
+test("bare domain GET /dashboard serves the SPA shell", async () => {
+  const http = await import("node:http")
+  const result = await new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: "127.0.0.1",
+        port,
+        method: "GET",
+        path: "/dashboard",
+        headers: { host: `${publicHost}:${port}` },
+      },
+      (res) => {
+        let data = ""
+        res.on("data", (c) => (data += c))
+        res.on("end", () => resolve({ status: res.statusCode, body: data, ct: res.headers["content-type"] }))
+      },
+    )
+    req.on("error", reject)
+    req.end()
+  })
+  assert.equal(result.status, 200)
+  assert.match(result.ct ?? "", /text\/html/)
+  assert.match(result.body, /pond Dashboard/)
+  assert.match(result.body, /window\.__POND_DASHBOARD/)
+})
+
+test("bare domain GET /gallery serves the listing page", async () => {
+  const http = await import("node:http")
+  const result = await new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: "127.0.0.1",
+        port,
+        method: "GET",
+        path: "/gallery",
+        headers: { host: `${publicHost}:${port}` },
+      },
+      (res) => {
+        let data = ""
+        res.on("data", (c) => (data += c))
+        res.on("end", () => resolve({ status: res.statusCode, body: data, ct: res.headers["content-type"] }))
+      },
+    )
+    req.on("error", reject)
+    req.end()
+  })
+  assert.equal(result.status, 200)
+  assert.match(result.ct ?? "", /text\/html/)
+  assert.match(result.body, /Pond gallery/)
+  assert.match(result.body, /\/api\/public-deploys/)
+})
+
+test("`pond fork <url>` scaffolds a local copy from a public deploy", async () => {
+  // Find a public deploy id from the listing
+  const list = await fetch(`${apiUrl}/api/public-deploys`)
+  const { deploys: pub } = await list.json()
+  assert.ok(pub.length >= 1, "need at least one public deploy")
+  const target = pub[0]
+
+  const parent = mkdtempSync(path.join(tmpdir(), "pond-fork-"))
+  try {
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const execFileP = promisify(execFile)
+    const { stdout } = await execFileP(
+      process.execPath,
+      [CLI_PATH, "fork", target.deployId, "--api", apiUrl, "--no-git", "--name", "my-fork"],
+      {
+        cwd: parent,
+        env: { ...process.env },
+        timeout: 30000,
+      },
+    )
+    assert.match(stdout, /Forked/)
+    const dest = path.join(parent, "my-fork")
+    assert.ok(existsSync(path.join(dest, "server", "index.ts")), "server/index.ts copied")
+    const { readFileSync } = await import("node:fs")
+    const server = readFileSync(path.join(dest, "server", "index.ts"), "utf-8")
+    assert.match(server, /public:\s*true/)
+    assert.ok(existsSync(path.join(dest, ".env.pond.server")), "env file scaffolded")
+  } finally {
+    rmSync(parent, { recursive: true, force: true })
+  }
+})
+
 test("SIGINT host leaves no orphan deploy-worker processes", async () => {
   await stopHost()
   // After stop, no deploy-worker.js child of the host should remain.

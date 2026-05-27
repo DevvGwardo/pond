@@ -1,11 +1,15 @@
 import { Hono } from "hono"
 import { serve } from "@hono/node-server"
 import { cors } from "hono/cors"
+import { WebSocketServer } from "ws"
+import type { IncomingMessage } from "node:http"
+import type { Socket as NetSocket } from "node:net"
 import chokidar from "chokidar"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { buildClient } from "./bundler.js"
 import { createRuntime } from "./runtime.js"
+import type { CapsuleContext, SocketHandler, SocketLike } from "./server/index.js"
 
 export async function startDevServer(port: number): Promise<void> {
   const cwd = process.cwd()
@@ -20,6 +24,10 @@ export async function startDevServer(port: number): Promise<void> {
 
   let guestName = "guest"
   let currentApp = new Hono()
+  let currentRuntime: {
+    def: { sockets?: Record<string, { _kind: "socket"; handler: SocketHandler }> }
+    buildContext: (cookieHeader: string | null | undefined) => Promise<CapsuleContext>
+  } | null = null
   let clientHtml = ""
   const reloadClients = new Set<ReadableStreamDefaultController<Uint8Array>>()
   const logClients = new Set<ReadableStreamDefaultController<Uint8Array>>()
@@ -137,6 +145,7 @@ export async function startDevServer(port: number): Promise<void> {
     })
 
     currentApp = nextApp
+    currentRuntime = runtime
   }
 
   const rebuild = async (reason: "server" | "client" | "env") => {
@@ -223,5 +232,63 @@ export async function startDevServer(port: number): Promise<void> {
 
   console.log(`\n  pond dev server running at http://localhost:${port}\n`)
 
-  serve({ fetch: app.fetch, port, hostname: "127.0.0.1" })
+  const httpServer = serve({ fetch: app.fetch, port, hostname: "127.0.0.1" })
+
+  // Same /api/socket/<name> upgrade flow as start-server.ts, except hot-reload
+  // aware — each connection looks up the live capsule definition rather than
+  // capturing the one we had at boot.
+  const wss = new WebSocketServer({ noServer: true })
+  httpServer.on("upgrade", (req: IncomingMessage, socket: NetSocket, head: Buffer) => {
+    const url = new URL(req.url ?? "/", "http://localhost")
+    const match = url.pathname.match(/^\/api\/socket\/([a-zA-Z_][a-zA-Z0-9_]*)$/)
+    if (!match || !currentRuntime) {
+      socket.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n")
+      socket.destroy()
+      return
+    }
+    const def = currentRuntime.def.sockets?.[match[1]]
+    if (!def) {
+      socket.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n")
+      socket.destroy()
+      return
+    }
+    wss.handleUpgrade(req, socket, head, async (ws) => {
+      try {
+        const ctx = await currentRuntime!.buildContext(req.headers.cookie ?? null)
+        const wrapped: SocketLike = {
+          send: (data) => {
+            try {
+              ws.send(data)
+            } catch {
+              // best effort
+            }
+          },
+          close: (code, reason) => {
+            try {
+              ws.close(code, reason)
+            } catch {
+              // best effort
+            }
+          },
+          on: (event, listener) => {
+            if (event === "message") {
+              ws.on("message", (raw) => {
+                const text = typeof raw === "string" ? raw : Buffer.isBuffer(raw) ? raw.toString("utf-8") : String(raw)
+                ;(listener as (data: string) => void)(text)
+              })
+            } else if (event === "close") {
+              ws.on("close", () => (listener as () => void)())
+            }
+          },
+        }
+        await def.handler(ctx, wrapped)
+      } catch (err) {
+        try {
+          ws.close(1011, err instanceof Error ? err.message.slice(0, 120) : "handler error")
+        } catch {
+          // best effort
+        }
+      }
+    })
+  })
 }

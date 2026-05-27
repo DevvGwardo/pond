@@ -1,4 +1,16 @@
-export { capsule, query, mutation, endpoint, table, string, number, boolean } from "./server/index.js"
+export {
+  capsule,
+  query,
+  mutation,
+  endpoint,
+  socket,
+  table,
+  string,
+  number,
+  boolean,
+  json,
+  text,
+} from "./server/index.js"
 export type {
   CapsuleDefinition,
   CapsuleContext,
@@ -6,10 +18,16 @@ export type {
   CapsuleDbTable,
   CapsuleAuth,
   CapsuleLog,
+  CapsuleAi,
+  CapsuleBlob,
+  AiCompleteOptions,
   QueryHandler,
   MutationHandler,
   EndpointHandler,
   EndpointRequest,
   EndpointResponse,
+  SocketHandler,
+  SocketLike,
+  RouteRateLimit,
   ColumnType,
 } from "./server/index.js"

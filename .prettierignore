@@ -10,3 +10,4 @@ build
 package-lock.json
 docs/branding
 src/ide/built.ts
+src/dashboard/built.ts

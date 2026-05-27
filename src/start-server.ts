@@ -1,8 +1,12 @@
 import { Hono } from "hono"
 import { serve } from "@hono/node-server"
+import { WebSocketServer, type WebSocket } from "ws"
+import type { IncomingMessage } from "node:http"
+import type { Socket as NetSocket } from "node:net"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { createRuntimeFromDeployBundle } from "./runtime.js"
+import type { SocketHandler, SocketLike } from "./server/index.js"
 
 interface StartBundleServerOptions {
   bundlePath: string
@@ -82,6 +86,13 @@ function readRecentLogsFromDisk(logFile: string, cap: number): LogEntry[] {
 }
 
 export async function createBundleServerApp(options: StartBundleServerOptions): Promise<Hono> {
+  const { app } = await createBundleServerAppInternal(options)
+  return app
+}
+
+async function createBundleServerAppInternal(
+  options: StartBundleServerOptions,
+): Promise<{ app: Hono; runtime: RuntimeShape }> {
   const app = new Hono()
   const encoder = new TextEncoder()
   const logClients = new Set<ReadableStreamDefaultController<Uint8Array>>()
@@ -197,6 +208,56 @@ export async function createBundleServerApp(options: StartBundleServerOptions): 
     return c.json(runtime.db.prepare(`SELECT * FROM ${table}`).all())
   })
 
+  app.get("/__pond/db/backup", (c) => {
+    if (!canInspect(c.req.header("x-pond-claim-token"))) {
+      return c.json({ error: "Forbidden" }, 403)
+    }
+    // VACUUM INTO produces a clean, consistent SQLite snapshot in one statement
+    // without locking the live db. The temp file is deleted after the response
+    // body is read out into memory.
+    const tmp = path.join(options.cwd, ".pond", `backup-${Date.now()}-${process.pid}.db`)
+    try {
+      runtime.db.exec(`VACUUM INTO '${tmp.replace(/'/g, "''")}'`)
+      const buf = fs.readFileSync(tmp)
+      return new Response(buf as any, {
+        status: 200,
+        headers: {
+          "content-type": "application/x-sqlite3",
+          "content-disposition": `attachment; filename="pond-backup-${new Date().toISOString().slice(0, 10)}.db"`,
+        },
+      })
+    } finally {
+      try {
+        fs.unlinkSync(tmp)
+      } catch {
+        // best effort
+      }
+    }
+  })
+
+  app.post("/__pond/db/restore", async (c) => {
+    if (!canInspect(c.req.header("x-pond-claim-token"))) {
+      return c.json({ error: "Forbidden" }, 403)
+    }
+    // We deliberately do NOT swap the live db handle here — restoring on a
+    // running process is fraught (open WAL, in-flight queries). Instead, write
+    // the candidate to .pond/data.db.restored and tell the caller to restart.
+    const body = await c.req.arrayBuffer()
+    if (body.byteLength < 16) return c.json({ error: "bundle too small" }, 400)
+    // Lightweight SQLite header check
+    const header = Buffer.from(body).slice(0, 16).toString("utf-8")
+    if (!header.startsWith("SQLite format 3")) return c.json({ error: "not a SQLite db file" }, 400)
+    const dst = path.join(options.cwd, ".pond", "data.db")
+    const staging = path.join(options.cwd, ".pond", "data.db.restored")
+    fs.writeFileSync(staging, Buffer.from(body))
+    return c.json({
+      ok: true,
+      message: `Wrote ${body.byteLength} bytes to ${staging}. Stop the server, atomically replace ${dst}, then restart.`,
+      staging,
+      target: dst,
+    })
+  })
+
   app.get("/__pond/logs", (c) => {
     if (!canInspect(c.req.header("x-pond-claim-token"))) {
       return c.json({ error: "Forbidden" }, 403)
@@ -229,16 +290,91 @@ export async function createBundleServerApp(options: StartBundleServerOptions): 
     )
   })
 
-  return app
+  return { app, runtime: runtime as unknown as RuntimeShape }
 }
 
 export async function serveBundleServer(options: StartBundleServerOptions) {
-  const app = await createBundleServerApp(options)
+  const built = await createBundleServerAppInternal(options)
   const { server, port } = await new Promise<{ server: ReturnType<typeof serve>; port: number }>((resolve, reject) => {
-    const s = serve({ fetch: app.fetch, port: options.port, hostname: options.hostname }, (info) => {
+    const s = serve({ fetch: built.app.fetch, port: options.port, hostname: options.hostname }, (info) => {
       resolve({ server: s, port: info.port })
     })
     s.once("error", reject)
   })
-  return { app, server, port }
+  attachSocketUpgrade(server, built.runtime)
+  return { app: built.app, server, port }
+}
+
+interface RuntimeShape {
+  def: { sockets?: Record<string, { _kind: "socket"; handler: SocketHandler }> }
+  buildContext: (cookieHeader: string | null | undefined) => Promise<unknown>
+}
+
+// Hooks WebSocket upgrade requests to the named handlers declared on the
+// capsule definition. Each upgrade request is matched against the path
+// /api/socket/<name>; mismatched paths are rejected with HTTP 404.
+function attachSocketUpgrade(server: { on: (ev: string, fn: (...a: any[]) => void) => void }, runtime: RuntimeShape) {
+  const sockets = runtime.def.sockets ?? {}
+  if (Object.keys(sockets).length === 0) return
+  const wss = new WebSocketServer({ noServer: true })
+
+  server.on("upgrade", (req: IncomingMessage, socket: NetSocket, head: Buffer) => {
+    const url = new URL(req.url ?? "/", "http://localhost")
+    const match = url.pathname.match(/^\/api\/socket\/([a-zA-Z_][a-zA-Z0-9_]*)$/)
+    if (!match) {
+      socket.write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+      socket.destroy()
+      return
+    }
+    const name = match[1]
+    const def = sockets[name]
+    if (!def) {
+      socket.write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+      socket.destroy()
+      return
+    }
+    wss.handleUpgrade(req, socket, head, async (ws) => {
+      try {
+        const ctx = await runtime.buildContext(req.headers.cookie ?? null)
+        const wrapped = wrapWebSocket(ws)
+        await def.handler(ctx as any, wrapped)
+      } catch (err) {
+        // Surface the failure to the client with a clean close.
+        try {
+          ws.close(1011, err instanceof Error ? err.message.slice(0, 120) : "handler error")
+        } catch {
+          // best effort
+        }
+      }
+    })
+  })
+}
+
+function wrapWebSocket(ws: WebSocket): SocketLike {
+  return {
+    send(data) {
+      try {
+        ws.send(data)
+      } catch {
+        // best effort — close happens via the ws event
+      }
+    },
+    close(code, reason) {
+      try {
+        ws.close(code, reason)
+      } catch {
+        // best effort
+      }
+    },
+    on(event, listener) {
+      if (event === "message") {
+        ws.on("message", (data) => {
+          const text = typeof data === "string" ? data : Buffer.isBuffer(data) ? data.toString("utf-8") : String(data)
+          ;(listener as (data: string) => void)(text)
+        })
+      } else if (event === "close") {
+        ws.on("close", () => (listener as () => void)())
+      }
+    },
+  }
 }

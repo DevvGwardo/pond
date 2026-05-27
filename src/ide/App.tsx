@@ -1,6 +1,20 @@
 import { h, Fragment } from "preact"
-import { useEffect, useMemo, useState } from "preact/hooks"
-import { fetchFiles, fetchFile, putFile, deleteFile, moveFile, build, type FileEntry, type BuildResult } from "./api.js"
+import { useEffect, useMemo, useRef, useState } from "preact/hooks"
+import {
+  fetchFiles,
+  fetchFile,
+  putFile,
+  deleteFile,
+  moveFile,
+  build,
+  fetchEnv,
+  putEnv,
+  deleteEnvKey,
+  streamLogs,
+  type FileEntry,
+  type BuildResult,
+  type LogEntry,
+} from "./api.js"
 import { CodeMirrorEditor } from "./Editor.js"
 
 declare global {
@@ -214,6 +228,10 @@ function Workspace({ bootstrap, token, onSignOut }: WorkspaceProps) {
   const [lastBuild, setLastBuild] = useState<BuildResult | null>(null)
   const [previewKey, setPreviewKey] = useState(0)
   const [showPreview, setShowPreview] = useState(true)
+  const [rightTab, setRightTab] = useState<"preview" | "logs" | "env">("preview")
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [diffOpen, setDiffOpen] = useState(false)
 
   // Load file list on mount / token change.
   useEffect(() => {
@@ -358,6 +376,30 @@ function Workspace({ bootstrap, token, onSignOut }: WorkspaceProps) {
     return out
   }, [contents])
 
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const meta = e.metaKey || e.ctrlKey
+      if (meta && !e.shiftKey && e.key.toLowerCase() === "k") {
+        e.preventDefault()
+        setPaletteOpen(true)
+      } else if (meta && e.shiftKey && e.key.toLowerCase() === "f") {
+        e.preventDefault()
+        setSearchOpen(true)
+      } else if (e.key === "Escape") {
+        setPaletteOpen(false)
+        setSearchOpen(false)
+        setDiffOpen(false)
+      }
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [])
+
+  function attemptDeploy() {
+    if (dirty.size > 0) setDiffOpen(true)
+    else void handleDeploy()
+  }
+
   const outline = useMemo(() => parseOutline(contents["server/index.ts"]?.draft ?? ""), [contents])
   const bundleBytes = lastBuild?.ok ? lastBuild.bundleBytes : null
   const totalSize = useMemo(() => files.reduce((n, f) => n + f.size, 0), [files])
@@ -371,8 +413,9 @@ function Workspace({ bootstrap, token, onSignOut }: WorkspaceProps) {
         totalSourceBytes={totalSize}
         dirtyCount={dirty.size}
         building={building}
-        onDeploy={() => void handleDeploy()}
+        onDeploy={attemptDeploy}
         onSignOut={onSignOut}
+        onOpenPalette={() => setPaletteOpen(true)}
       />
       <div class="grid flex-1 grid-cols-[14rem_minmax(0,1fr)_22rem] overflow-hidden">
         <FileTreePane
@@ -402,8 +445,65 @@ function Workspace({ bootstrap, token, onSignOut }: WorkspaceProps) {
           previewKey={previewKey}
           showPreview={showPreview}
           onTogglePreview={() => setShowPreview((s) => !s)}
+          activeTab={rightTab}
+          onTab={setRightTab}
+          apiOpts={opts}
         />
       </div>
+      {paletteOpen ? (
+        <CommandPalette
+          files={files}
+          onClose={() => setPaletteOpen(false)}
+          onOpenFile={(p) => {
+            void openFile(p)
+            setPaletteOpen(false)
+          }}
+          onDeploy={() => {
+            setPaletteOpen(false)
+            attemptDeploy()
+          }}
+          onTogglePreview={() => {
+            setShowPreview((s) => !s)
+            setPaletteOpen(false)
+          }}
+          onSearch={() => {
+            setPaletteOpen(false)
+            setSearchOpen(true)
+          }}
+          onSignOut={() => {
+            setPaletteOpen(false)
+            onSignOut()
+          }}
+        />
+      ) : null}
+      {searchOpen ? (
+        <GlobalSearch
+          contents={contents}
+          onClose={() => setSearchOpen(false)}
+          onOpenFile={(p) => {
+            void openFile(p)
+            setSearchOpen(false)
+          }}
+          onPrefetch={async (path) => {
+            if (!(path in contents)) {
+              const r = await fetchFile(opts, path)
+              if (!("error" in r)) setContents((c) => ({ ...c, [path]: { saved: r.text, draft: r.text } }))
+            }
+          }}
+          files={files}
+        />
+      ) : null}
+      {diffOpen ? (
+        <DeployDiff
+          contents={contents}
+          dirty={dirty}
+          onCancel={() => setDiffOpen(false)}
+          onConfirm={async () => {
+            setDiffOpen(false)
+            await handleDeploy()
+          }}
+        />
+      ) : null}
       {loadError ? (
         <div class="border-t border-red-900 bg-red-950 px-4 py-2 text-xs text-red-200">
           {loadError}
@@ -425,6 +525,7 @@ interface HeaderProps {
   building: boolean
   onDeploy: () => void
   onSignOut: () => void
+  onOpenPalette: () => void
 }
 
 function Header(p: HeaderProps) {
@@ -451,6 +552,13 @@ function Header(p: HeaderProps) {
         ) : (
           <span class="text-xs text-zinc-600">saved</span>
         )}
+        <button
+          class="rounded-md border border-zinc-800 bg-black px-3 py-1.5 text-xs text-zinc-300 hover:border-zinc-600"
+          onClick={p.onOpenPalette}
+          title="Cmd/Ctrl-K"
+        >
+          ⌘K
+        </button>
         <button
           class="rounded-md border border-zinc-800 bg-black px-3 py-1.5 text-xs text-zinc-300 hover:border-zinc-600"
           onClick={p.onSignOut}
@@ -601,6 +709,9 @@ interface RightPaneProps {
   previewKey: number
   showPreview: boolean
   onTogglePreview: () => void
+  activeTab: "preview" | "logs" | "env"
+  onTab: (t: "preview" | "logs" | "env") => void
+  apiOpts: { deployId: string; token: string; isClaim: boolean }
 }
 
 function RightPane(p: RightPaneProps) {
@@ -608,13 +719,260 @@ function RightPane(p: RightPaneProps) {
     <aside class="flex flex-col overflow-y-auto border-l border-zinc-800 bg-zinc-950">
       <OutlineSection outline={p.outline} />
       <DiagnosticsSection lastBuild={p.lastBuild} building={p.building} />
-      <PreviewSection
-        deployUrl={p.deployUrl}
-        previewKey={p.previewKey}
-        showPreview={p.showPreview}
-        onToggle={p.onTogglePreview}
-      />
+      <div class="flex border-b border-zinc-800 text-[10px] uppercase tracking-wide text-zinc-500">
+        {(["preview", "logs", "env"] as const).map((t) => (
+          <button
+            class={`flex-1 py-2 ${p.activeTab === t ? "bg-black text-zinc-100" : "hover:bg-zinc-900"}`}
+            onClick={() => p.onTab(t)}
+          >
+            {t}
+          </button>
+        ))}
+      </div>
+      {p.activeTab === "preview" ? (
+        <PreviewSection
+          deployUrl={p.deployUrl}
+          previewKey={p.previewKey}
+          showPreview={p.showPreview}
+          onToggle={p.onTogglePreview}
+        />
+      ) : p.activeTab === "logs" ? (
+        <LogsSection deployUrl={p.deployUrl} apiOpts={p.apiOpts} />
+      ) : (
+        <EnvSection apiOpts={p.apiOpts} />
+      )}
     </aside>
+  )
+}
+
+function LogsSection({
+  deployUrl,
+  apiOpts,
+}: {
+  deployUrl: string
+  apiOpts: { deployId: string; token: string; isClaim: boolean }
+}) {
+  const [entries, setEntries] = useState<LogEntry[]>([])
+  const [paused, setPaused] = useState(false)
+  const [filter, setFilter] = useState<"all" | "info" | "error">("all")
+  const [err, setErr] = useState<string | null>(null)
+  const scrollRef = useRef<HTMLDivElement | null>(null)
+  const queuedRef = useRef<LogEntry[]>([])
+  const pausedRef = useRef(paused)
+  pausedRef.current = paused
+
+  useEffect(() => {
+    if (!deployUrl) return
+    setEntries([])
+    setErr(null)
+    queuedRef.current = []
+    const stop = streamLogs(
+      deployUrl,
+      apiOpts,
+      (entry) => {
+        if (pausedRef.current) {
+          queuedRef.current.push(entry)
+          return
+        }
+        setEntries((es) => [...es.slice(-499), entry])
+      },
+      (e) => setErr(e instanceof Error ? e.message : String(e)),
+    )
+    return stop
+  }, [deployUrl, apiOpts.deployId, apiOpts.token])
+
+  useEffect(() => {
+    if (!paused && queuedRef.current.length) {
+      const flushed = queuedRef.current
+      queuedRef.current = []
+      setEntries((es) => [...es.slice(-(500 - flushed.length)), ...flushed])
+    }
+  }, [paused])
+
+  useEffect(() => {
+    if (paused) return
+    const el = scrollRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [entries, paused])
+
+  const filtered = filter === "all" ? entries : entries.filter((e) => e.level === filter)
+
+  return (
+    <div
+      class="flex min-h-[18rem] flex-col px-3 py-3"
+      onMouseEnter={() => setPaused(true)}
+      onMouseLeave={() => setPaused(false)}
+    >
+      <div class="mb-2 flex items-center justify-between text-xs uppercase tracking-wide text-zinc-500">
+        <span>Logs {paused ? "(paused)" : ""}</span>
+        <div class="flex gap-1 text-[10px]">
+          {(["all", "info", "error"] as const).map((f) => (
+            <button
+              class={`rounded px-2 py-0.5 ${filter === f ? "bg-zinc-700 text-zinc-50" : "text-zinc-400 hover:text-zinc-200"}`}
+              onClick={() => setFilter(f)}
+            >
+              {f}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div
+        ref={scrollRef as any}
+        class="h-72 overflow-y-auto rounded border border-zinc-800 bg-black p-2 font-mono text-[10px]"
+      >
+        {err ? <div class="text-red-400">{err}</div> : null}
+        {filtered.length === 0 ? <div class="text-zinc-600">No log entries yet.</div> : null}
+        {filtered.map((e, i) => (
+          <div key={i} class={e.level === "error" ? "text-red-300" : "text-zinc-300"}>
+            <span class="text-zinc-600">{e.timestamp.slice(11, 19)} </span>
+            {e.message}
+            {e.data ? <span class="text-zinc-500"> {JSON.stringify(e.data)}</span> : null}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function EnvSection({ apiOpts }: { apiOpts: { deployId: string; token: string; isClaim: boolean } }) {
+  const [entries, setEntries] = useState<Record<string, string>>({})
+  const [loading, setLoading] = useState(true)
+  const [err, setErr] = useState<string | null>(null)
+  const [editing, setEditing] = useState<{ key: string; value: string } | null>(null)
+  const [newKey, setNewKey] = useState("")
+  const [newValue, setNewValue] = useState("")
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    void fetchEnv(apiOpts).then((res) => {
+      if (cancelled) return
+      if ("error" in res) {
+        setErr(res.error)
+      } else {
+        setEntries(res.entries)
+      }
+      setLoading(false)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [apiOpts.deployId, apiOpts.token])
+
+  async function save(key: string, value: string) {
+    setErr(null)
+    const res = await putEnv(apiOpts, { [key]: value })
+    if ("error" in res) {
+      setErr(res.error)
+      return
+    }
+    setEntries(res.entries)
+  }
+
+  async function remove(key: string) {
+    if (!confirm(`Delete ${key}?`)) return
+    setErr(null)
+    const res = await deleteEnvKey(apiOpts, key)
+    if ("error" in res) {
+      setErr(res.error)
+      return
+    }
+    setEntries(res.entries)
+  }
+
+  function mask(v: string): string {
+    if (v.length <= 4) return "•".repeat(v.length)
+    return v.slice(0, 2) + "…" + v.slice(-2)
+  }
+
+  return (
+    <div class="flex min-h-[18rem] flex-col px-3 py-3">
+      <div class="mb-2 text-xs uppercase tracking-wide text-zinc-500">Env (.env.pond.server)</div>
+      {err ? (
+        <div class="mb-2 rounded border border-red-900 bg-red-950 px-2 py-1 text-[10px] text-red-200">{err}</div>
+      ) : null}
+      {loading ? <div class="text-xs text-zinc-500">Loading…</div> : null}
+      <div class="space-y-1">
+        {Object.keys(entries)
+          .sort()
+          .map((k) => {
+            const isEditing = editing?.key === k
+            return (
+              <div
+                key={k}
+                class="flex items-center gap-2 rounded border border-zinc-800 bg-black px-2 py-1 text-[11px]"
+              >
+                <span class="w-28 truncate text-zinc-300">{k}</span>
+                {isEditing ? (
+                  <input
+                    class="flex-1 rounded border border-zinc-700 bg-black px-2 py-0.5 text-zinc-100"
+                    value={editing!.value}
+                    onInput={(e) => setEditing({ key: k, value: (e.target as HTMLInputElement).value })}
+                  />
+                ) : (
+                  <span class="flex-1 truncate text-zinc-500">{mask(entries[k])}</span>
+                )}
+                {isEditing ? (
+                  <Fragment>
+                    <button
+                      class="rounded bg-zinc-100 px-2 py-0.5 text-[10px] font-semibold text-zinc-950"
+                      onClick={async () => {
+                        await save(k, editing!.value)
+                        setEditing(null)
+                      }}
+                    >
+                      save
+                    </button>
+                    <button class="text-[10px] text-zinc-500" onClick={() => setEditing(null)}>
+                      cancel
+                    </button>
+                  </Fragment>
+                ) : (
+                  <Fragment>
+                    <button
+                      class="text-[10px] text-zinc-400 hover:text-zinc-100"
+                      onClick={() => setEditing({ key: k, value: entries[k] })}
+                    >
+                      edit
+                    </button>
+                    <button class="text-[10px] text-red-400 hover:text-red-300" onClick={() => void remove(k)}>
+                      ×
+                    </button>
+                  </Fragment>
+                )}
+              </div>
+            )
+          })}
+      </div>
+      <div class="mt-3 border-t border-zinc-800 pt-3">
+        <div class="mb-1 text-[10px] uppercase text-zinc-500">Add new</div>
+        <div class="flex flex-wrap items-center gap-1">
+          <input
+            class="w-28 rounded border border-zinc-700 bg-black px-2 py-0.5 text-[11px]"
+            placeholder="KEY"
+            value={newKey}
+            onInput={(e) => setNewKey((e.target as HTMLInputElement).value.toUpperCase())}
+          />
+          <input
+            class="flex-1 rounded border border-zinc-700 bg-black px-2 py-0.5 text-[11px]"
+            placeholder="value"
+            value={newValue}
+            onInput={(e) => setNewValue((e.target as HTMLInputElement).value)}
+          />
+          <button
+            class="rounded bg-zinc-100 px-2 py-0.5 text-[10px] font-semibold text-zinc-950 disabled:opacity-40"
+            disabled={!newKey || !newValue}
+            onClick={async () => {
+              await save(newKey, newValue)
+              setNewKey("")
+              setNewValue("")
+            }}
+          >
+            add
+          </button>
+        </div>
+      </div>
+    </div>
   )
 }
 
@@ -721,6 +1079,283 @@ function PreviewSection({
       ) : (
         <div class="rounded border border-zinc-800 bg-black p-3 text-xs text-zinc-500">Preview hidden.</div>
       )}
+    </div>
+  )
+}
+
+interface PaletteCommand {
+  label: string
+  hint: string
+  run: () => void
+}
+
+function CommandPalette({
+  files,
+  onClose,
+  onOpenFile,
+  onDeploy,
+  onTogglePreview,
+  onSearch,
+  onSignOut,
+}: {
+  files: FileEntry[]
+  onClose: () => void
+  onOpenFile: (path: string) => void
+  onDeploy: () => void
+  onTogglePreview: () => void
+  onSearch: () => void
+  onSignOut: () => void
+}) {
+  const [q, setQ] = useState("")
+  const [idx, setIdx] = useState(0)
+  const inputRef = useRef<HTMLInputElement | null>(null)
+
+  useEffect(() => {
+    inputRef.current?.focus()
+  }, [])
+
+  const commands: PaletteCommand[] = [
+    { label: "Deploy", hint: "build + restart", run: onDeploy },
+    { label: "Toggle preview", hint: "show/hide iframe", run: onTogglePreview },
+    { label: "Global search", hint: "Cmd-Shift-F", run: onSearch },
+    { label: "Sign out", hint: "clear token", run: onSignOut },
+  ]
+
+  const items = useMemo(() => {
+    const fq = q.toLowerCase()
+    const fileMatches = files
+      .filter((f) => f.path.toLowerCase().includes(fq))
+      .slice(0, 20)
+      .map((f) => ({ kind: "file" as const, path: f.path, label: f.path, hint: "open" }))
+    const cmdMatches = commands
+      .filter((c) => c.label.toLowerCase().includes(fq))
+      .map((c) => ({ kind: "cmd" as const, ...c }))
+    return q ? [...fileMatches, ...cmdMatches] : [...cmdMatches, ...fileMatches]
+  }, [q, files])
+
+  function run(i: number) {
+    const item = items[i]
+    if (!item) return
+    if (item.kind === "file") onOpenFile(item.path)
+    else item.run()
+  }
+
+  return (
+    <div class="fixed inset-0 z-50 flex items-start justify-center bg-black/60 pt-24" onClick={onClose}>
+      <div
+        class="w-full max-w-xl overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <input
+          ref={inputRef as any}
+          class="w-full border-b border-zinc-800 bg-black px-4 py-3 text-sm outline-none"
+          placeholder="Search files or commands..."
+          value={q}
+          onInput={(e) => {
+            setQ((e.target as HTMLInputElement).value)
+            setIdx(0)
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowDown") {
+              setIdx((i) => Math.min(items.length - 1, i + 1))
+              e.preventDefault()
+            } else if (e.key === "ArrowUp") {
+              setIdx((i) => Math.max(0, i - 1))
+              e.preventDefault()
+            } else if (e.key === "Enter") {
+              run(idx)
+            }
+          }}
+        />
+        <ul class="max-h-96 overflow-y-auto">
+          {items.map((it, i) => (
+            <li
+              key={i}
+              class={`flex cursor-pointer items-center justify-between px-4 py-2 text-sm ${i === idx ? "bg-zinc-800 text-zinc-50" : "text-zinc-300 hover:bg-zinc-900"}`}
+              onMouseEnter={() => setIdx(i)}
+              onClick={() => run(i)}
+            >
+              <span class="truncate">{it.label}</span>
+              <span class="ml-3 text-[10px] text-zinc-500">{it.hint}</span>
+            </li>
+          ))}
+          {items.length === 0 ? <li class="px-4 py-2 text-sm text-zinc-500">No matches</li> : null}
+        </ul>
+      </div>
+    </div>
+  )
+}
+
+function GlobalSearch({
+  contents,
+  files,
+  onClose,
+  onOpenFile,
+  onPrefetch,
+}: {
+  contents: Record<string, { saved: string; draft: string }>
+  files: FileEntry[]
+  onClose: () => void
+  onOpenFile: (path: string) => void
+  onPrefetch: (path: string) => Promise<void>
+}) {
+  const [q, setQ] = useState("")
+  const [results, setResults] = useState<Array<{ path: string; line: number; text: string }>>([])
+  const inputRef = useRef<HTMLInputElement | null>(null)
+
+  useEffect(() => {
+    inputRef.current?.focus()
+  }, [])
+
+  useEffect(() => {
+    if (!q || q.length < 2) {
+      setResults([])
+      return
+    }
+    let cancelled = false
+    void (async () => {
+      // Lazily load any files we don't have yet so search covers the whole tree.
+      for (const f of files) {
+        if (!(f.path in contents)) await onPrefetch(f.path)
+        if (cancelled) return
+      }
+      const next: Array<{ path: string; line: number; text: string }> = []
+      const ql = q.toLowerCase()
+      for (const [path, v] of Object.entries(contents)) {
+        const lines = v.draft.split("\n")
+        for (let i = 0; i < lines.length && next.length < 200; i++) {
+          if (lines[i].toLowerCase().includes(ql)) {
+            next.push({ path, line: i + 1, text: lines[i].trim().slice(0, 200) })
+          }
+        }
+      }
+      if (!cancelled) setResults(next)
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [q, files, contents])
+
+  return (
+    <div class="fixed inset-0 z-50 flex items-start justify-center bg-black/60 pt-16" onClick={onClose}>
+      <div
+        class="w-full max-w-2xl overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <input
+          ref={inputRef as any}
+          class="w-full border-b border-zinc-800 bg-black px-4 py-3 text-sm outline-none"
+          placeholder="Search across all source files..."
+          value={q}
+          onInput={(e) => setQ((e.target as HTMLInputElement).value)}
+        />
+        <ul class="max-h-[28rem] overflow-y-auto">
+          {results.map((r, i) => (
+            <li
+              key={i}
+              class="cursor-pointer border-b border-zinc-900 px-4 py-2 text-xs text-zinc-300 hover:bg-zinc-900"
+              onClick={() => onOpenFile(r.path)}
+            >
+              <div class="text-zinc-500">
+                {r.path}:{r.line}
+              </div>
+              <div class="truncate font-mono text-zinc-100">{r.text}</div>
+            </li>
+          ))}
+          {q && results.length === 0 ? <li class="px-4 py-3 text-xs text-zinc-500">No matches.</li> : null}
+        </ul>
+      </div>
+    </div>
+  )
+}
+
+function DeployDiff({
+  contents,
+  dirty,
+  onCancel,
+  onConfirm,
+}: {
+  contents: Record<string, { saved: string; draft: string }>
+  dirty: Set<string>
+  onCancel: () => void
+  onConfirm: () => void
+}) {
+  return (
+    <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6" onClick={onCancel}>
+      <div
+        class="flex h-full w-full max-w-5xl flex-col overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <header class="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
+          <div>
+            <h2 class="text-sm font-semibold">
+              Deploy {dirty.size} unsaved file{dirty.size === 1 ? "" : "s"}?
+            </h2>
+            <p class="text-[11px] text-zinc-500">Review changes — confirm to save + build.</p>
+          </div>
+          <div class="flex gap-2">
+            <button
+              class="rounded-md border border-zinc-800 bg-black px-3 py-1.5 text-xs text-zinc-300 hover:border-zinc-600"
+              onClick={onCancel}
+            >
+              Cancel
+            </button>
+            <button
+              class="rounded-md bg-zinc-100 px-3 py-1.5 text-xs font-semibold text-zinc-950 hover:bg-zinc-200"
+              onClick={onConfirm}
+            >
+              Save + Deploy →
+            </button>
+          </div>
+        </header>
+        <div class="flex-1 overflow-y-auto">
+          {[...dirty].map((path) => (
+            <DiffBlock key={path} path={path} saved={contents[path]?.saved ?? ""} draft={contents[path]?.draft ?? ""} />
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function DiffBlock({ path, saved, draft }: { path: string; saved: string; draft: string }) {
+  const savedLines = saved.split("\n")
+  const draftLines = draft.split("\n")
+  // Tiny inline diff: collect adds/removes line-by-line. Not a real LCS — fast
+  // enough and good enough for the typical pre-deploy review window.
+  const maxLen = Math.max(savedLines.length, draftLines.length)
+  const rows: Array<{ kind: "same" | "add" | "del"; text: string }> = []
+  for (let i = 0; i < maxLen; i++) {
+    const a = savedLines[i]
+    const b = draftLines[i]
+    if (a === b) {
+      rows.push({ kind: "same", text: a ?? "" })
+    } else {
+      if (a != null) rows.push({ kind: "del", text: a })
+      if (b != null) rows.push({ kind: "add", text: b })
+    }
+  }
+
+  return (
+    <div class="border-b border-zinc-800">
+      <div class="bg-zinc-900 px-4 py-2 text-xs text-zinc-300">{path}</div>
+      <pre class="overflow-x-auto bg-black px-4 py-2 font-mono text-[11px] leading-relaxed">
+        {rows.map((r, i) => (
+          <div
+            key={i}
+            class={
+              r.kind === "add"
+                ? "bg-emerald-950/60 text-emerald-200"
+                : r.kind === "del"
+                  ? "bg-red-950/60 text-red-200"
+                  : "text-zinc-500"
+            }
+          >
+            {r.kind === "add" ? "+ " : r.kind === "del" ? "- " : "  "}
+            {r.text}
+          </div>
+        ))}
+      </pre>
     </div>
   )
 }

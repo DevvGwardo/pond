@@ -2,99 +2,29 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { execSync } from "node:child_process"
 import { randomBytes } from "node:crypto"
-
-const TODO_SERVER_TS = `import { capsule, mutation, query, string, table } from "pond/server";
-
-export default capsule({
-  schema: {
-    messages: table({
-      body: string(),
-    }),
-  },
-
-  queries: {
-    messages: query((ctx) =>
-      ctx.db.messages.orderBy("createdAt", "desc").all()
-    ),
-  },
-
-  mutations: {
-    sendMessage: mutation((ctx, body: string) =>
-      ctx.db.messages.insert({ body })
-    ),
-  },
-});
-`
-
-const TODO_CLIENT_TSX = `import { useMutation, useQuery } from "pond/client";
-
-type Message = {
-  id: string;
-  body: string;
-  createdAt: string;
-};
-
-export function App() {
-  const { data: messages, isLoading } = useQuery<Message[]>("messages");
-  const [sendMessage, { isLoading: isSending }] = useMutation<[body: string], void>("sendMessage");
-
-  return (
-    <main class="min-h-screen bg-zinc-950 p-8 text-zinc-100 font-sans">
-      <h1 class="text-2xl font-bold mb-6">pond / todo</h1>
-
-      <form
-        class="flex gap-2 mb-8"
-        onSubmit={(e) => {
-          e.preventDefault();
-          const input = e.currentTarget.elements.namedItem("body") as HTMLInputElement;
-          if (input.value.trim()) {
-            void sendMessage(input.value.trim());
-            input.value = "";
-          }
-        }}
-      >
-        <input
-          name="body"
-          class="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-4 py-3 text-sm outline-none focus:border-zinc-600 transition-colors"
-          placeholder="What needs doing?"
-        />
-        <button
-          type="submit"
-          disabled={isSending}
-          class="bg-zinc-100 text-zinc-950 px-5 py-3 rounded-lg text-sm font-semibold hover:bg-zinc-200 transition-colors"
-        >
-          {isSending ? "Sending..." : "Send"}
-        </button>
-      </form>
-
-      {isLoading ? <p class="text-sm text-zinc-500 mb-4">Loading...</p> : null}
-
-      <ul class="space-y-2">
-        {messages?.map((m) => (
-          <li key={m.id} class="bg-zinc-900 border border-zinc-800 rounded-lg px-4 py-3 text-sm">
-            {m.body}
-          </li>
-        ))}
-      </ul>
-    </main>
-  );
-}
-`
-
-const TODO_ENV_TEMPLATE = `# Server-only environment variables
-# POND_SESSION_SECRET={{SESSION_SECRET}}
-# OPENAI_API_KEY=sk-...
-# GOOGLE_CLIENT_ID=
-# GOOGLE_CLIENT_SECRET=
-# GOOGLE_REDIRECT_URI=http://localhost:3000/auth/google/callback
-`
-
-const TODO_GITIGNORE = `node_modules
-.pond
-`
+import { getTemplate, pickTemplateForPrompt, TEMPLATES, Template } from "./templates.js"
 
 const POND_VERSION = JSON.parse(fs.readFileSync(path.resolve(import.meta.dirname, "../package.json"), "utf-8"))
   .version as string
+
+const BASE_ENV_TEMPLATE = `# Server-only environment variables
+# POND_SESSION_SECRET={{SESSION_SECRET}}
+# OPENAI_API_KEY=sk-...
+# ANTHROPIC_API_KEY=sk-...
+# HERMES_BASE_URL=http://127.0.0.1:8642
+# GOOGLE_CLIENT_ID=
+# GOOGLE_CLIENT_SECRET=
+# GOOGLE_REDIRECT_URI=http://localhost:3000/auth/google/callback
+# GITHUB_CLIENT_ID=
+# GITHUB_CLIENT_SECRET=
+# GITHUB_REDIRECT_URI=http://localhost:3000/auth/github/callback
+# EMAIL_FROM=
+# RESEND_API_KEY=
+`
+
+const GITIGNORE = `node_modules
+.pond
+`
 
 const CAPSULE_CONTRACT = `## Pond capsule contract
 
@@ -115,18 +45,20 @@ export default capsule({
   mutations: {
     addItem: mutation((ctx, body: string) => ctx.db.items.insert({ body, done: false })),
     toggleItem: mutation((ctx, id: string) => {
-      const row = ctx.db.items.where({ id }).first()
-      if (row) ctx.db.items.where({ id }).update({ done: !row.done })
+      const row = ctx.db.items.get(id)
+      if (row) ctx.db.items.update(id, { done: !row.done })
     }),
   },
 })
 \`\`\`
 
-Every table auto-gets \`id\` (uuid), \`createdAt\`, \`updatedAt\`. Column helpers: \`string()\`, \`number()\`, \`boolean()\`, \`json()\`, \`text()\`. SQLite under the hood — booleans round-trip as 0/1.
+Every table auto-gets \`id\` (uuid), \`createdAt\`, \`updatedAt\`. Column helpers: \`string()\`, \`number()\`, \`boolean()\`. SQLite under the hood — booleans round-trip as 0/1.
 
-\`ctx.db.<table>\` exposes \`.all() / .first() / .where({...}) / .orderBy(col, dir) / .insert({...}) / .update({...}) / .delete()\`.
+\`ctx.db.<table>\` exposes \`.all() / .get(id) / .where(col, val) / .orderBy(col, dir) / .limit(n) / .insert({...}) / .update(id, {...}) / .delete(id)\`.
 
 Queries return data and re-run reactively on the client. Mutations take \`(ctx, ...args)\` — the args after \`ctx\` are the wire payload.
+
+\`ctx.ai\`, \`ctx.blob\` and per-route \`rateLimit\` are first-class — see https://pond.run/docs/api-reference.md.
 
 ### client/index.tsx
 
@@ -155,14 +87,16 @@ export function App() {
 - Tailwind classes are available out of the box; no config needed.
 `
 
-function agentsMdContent(prompt: string): string {
+function agentsMdContent(prompt: string, templateName: string): string {
   return `# Build instructions
 
 The user ran \`pond new\` with this description:
 
 > ${prompt.replace(/\n/g, "\n> ")}
 
-Your job: implement this inside the scaffolded capsule. Edit \`server/index.ts\` and \`client/index.tsx\`. Add tables, queries, mutations, and UI to satisfy the description. When you're done, run \`npm install && npm run dev\` and verify the app works in a browser.
+You're starting from the **${templateName}** template — read \`server/index.ts\` and \`client/index.tsx\` to see what's already there.
+
+Your job: implement the description by editing those two files. Add tables, queries, mutations, and UI to satisfy what the user asked for. When you're done, run \`npm install && npm run dev\` and verify the app works in a browser.
 
 ### Canonical references
 
@@ -176,15 +110,56 @@ ${CAPSULE_CONTRACT}
 
 ### When you're done
 
-Delete this file (\`AGENTS.md\`) and the \`.claude/\` directory — they were scaffolding for the build, not part of the app.
+Delete this file (\`AGENTS.md\`) and the \`.claude/\` / \`.cursor/\` directories — they were scaffolding for the build, not part of the app.
 `
 }
 
-export async function copyTemplate(name: string, _template: string, initGit: boolean, prompt?: string): Promise<void> {
-  const dir = path.resolve(process.cwd(), name)
+const CURSOR_RULES_HEADER = `---
+description: Pond capsule contract — server + client API
+alwaysApply: true
+---
+
+`
+
+export interface CopyTemplateOptions {
+  name: string
+  templateName: string
+  initGit: boolean
+  prompt?: string
+}
+
+export async function copyTemplate(opts: CopyTemplateOptions): Promise<{ template: Template; dir: string }>
+export async function copyTemplate(
+  name: string,
+  templateName: string,
+  initGit: boolean,
+  prompt?: string,
+): Promise<{ template: Template; dir: string }>
+export async function copyTemplate(
+  nameOrOpts: string | CopyTemplateOptions,
+  templateName?: string,
+  initGit?: boolean,
+  prompt?: string,
+): Promise<{ template: Template; dir: string }> {
+  const o: CopyTemplateOptions =
+    typeof nameOrOpts === "string"
+      ? { name: nameOrOpts, templateName: templateName ?? "todo", initGit: Boolean(initGit), prompt }
+      : nameOrOpts
+
+  const chosen =
+    o.prompt && (o.templateName === "todo" || !o.templateName)
+      ? pickTemplateForPrompt(o.prompt)
+      : (getTemplate(o.templateName) ?? null)
+
+  if (!chosen) {
+    console.error(`Unknown template: ${o.templateName}. Try one of: ${TEMPLATES.map((t) => t.name).join(", ")}`)
+    process.exit(1)
+  }
+
+  const dir = path.resolve(process.cwd(), o.name)
 
   if (fs.existsSync(dir)) {
-    console.error(`Directory ${name} already exists`)
+    console.error(`Directory ${o.name} already exists`)
     process.exit(1)
   }
 
@@ -217,23 +192,34 @@ export async function copyTemplate(name: string, _template: string, initGit: boo
       2,
     ),
   )
-  fs.writeFileSync(path.join(dir, "server", "index.ts"), TODO_SERVER_TS)
-  fs.writeFileSync(path.join(dir, "client", "index.tsx"), TODO_CLIENT_TSX)
+  fs.writeFileSync(path.join(dir, "server", "index.ts"), chosen.serverTs)
+  fs.writeFileSync(path.join(dir, "client", "index.tsx"), chosen.clientTsx)
   fs.writeFileSync(path.join(dir, "shared", ".gitkeep"), "")
-  const envContents = TODO_ENV_TEMPLATE.replace("{{SESSION_SECRET}}", randomBytes(32).toString("hex"))
+  const envContents =
+    BASE_ENV_TEMPLATE.replace("{{SESSION_SECRET}}", randomBytes(32).toString("hex")) + (chosen.envExtra ?? "")
   fs.writeFileSync(path.join(dir, ".env.pond.server"), envContents, { mode: 0o600 })
-  fs.writeFileSync(path.join(dir, ".gitignore"), TODO_GITIGNORE)
+  fs.writeFileSync(path.join(dir, ".gitignore"), GITIGNORE)
 
-  if (prompt) {
-    const agents = agentsMdContent(prompt)
+  // Always scaffold .cursor/rules + .claude/CLAUDE.md with the capsule contract
+  // so any agent opening the folder picks up the rules. The AGENTS.md is only
+  // written when a prompt was passed (i.e. the user wants a build kicked off).
+  fs.mkdirSync(path.join(dir, ".cursor", "rules"), { recursive: true })
+  fs.writeFileSync(path.join(dir, ".cursor", "rules", "pond.mdc"), CURSOR_RULES_HEADER + CAPSULE_CONTRACT)
+  fs.mkdirSync(path.join(dir, ".claude"), { recursive: true })
+
+  if (o.prompt) {
+    const agents = agentsMdContent(o.prompt, chosen.name)
     fs.writeFileSync(path.join(dir, "AGENTS.md"), agents)
-    fs.mkdirSync(path.join(dir, ".claude"), { recursive: true })
     fs.writeFileSync(path.join(dir, ".claude", "CLAUDE.md"), agents)
+  } else {
+    fs.writeFileSync(path.join(dir, ".claude", "CLAUDE.md"), `# Pond capsule\n\n${CAPSULE_CONTRACT}`)
   }
 
-  if (initGit) {
+  if (o.initGit) {
     execSync("git init", { cwd: dir, stdio: "ignore" })
     execSync("git add -A", { cwd: dir, stdio: "ignore" })
     execSync('git commit -m "init"', { cwd: dir, stdio: "ignore" })
   }
+
+  return { template: chosen, dir }
 }

@@ -14,6 +14,7 @@ import { userCommand } from "./commands/user.js"
 import { envCommand } from "./commands/env.js"
 import { domainsCommand } from "./commands/domains.js"
 import { tokenCommand } from "./commands/token.js"
+import { forkCommand } from "./commands/fork.js"
 
 const main = defineCommand({
   meta: {
@@ -36,6 +37,7 @@ const main = defineCommand({
     env: envCommand,
     domains: domainsCommand,
     token: tokenCommand,
+    fork: forkCommand,
   },
 })
 

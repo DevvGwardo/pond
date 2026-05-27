@@ -84,7 +84,13 @@ interface CapsuleAuth {
 
 `isGuest: true` means the caller has no signed session — either no cookie, an invalid JWT, or an expired session. The runtime fills in a guest identity via the dev server's guest switcher or a default `{ userId: "guest", displayName: "Guest" }` in production.
 
-When Google OAuth is configured (`GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` + `GOOGLE_REDIRECT_URI` in `.env.pond.server`), users who complete the `/auth/google` flow get an `isGuest: false` auth with `userId` set to the Google `sub` claim.
+Sign-in providers, all opt-in via env vars on `.env.pond.server`:
+
+- **Google** — set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI`. Users hit `/auth/google`. `userId` becomes `<google-sub>`.
+- **GitHub** — set `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, optional `GITHUB_REDIRECT_URI`. Users hit `/auth/github`. `userId` becomes `github:<gh-id>`.
+- **Email magic links** — no extra config required. Capsule client `POST`s `{ email }` to `/auth/email/request`, the runtime stores a one-time 15-minute token in `_pond_magic_links`, then prints the verification link to logs unless `RESEND_API_KEY` + `EMAIL_FROM` are set (in which case it ships the link via Resend). The link lands on `/auth/email/verify?token=…` and creates a session. `userId` becomes `email:<addr>`.
+
+You can enable any combination — sessions are JWT-signed against `POND_SESSION_SECRET` so they survive provider swaps.
 
 ### `ctx.db`
 
@@ -117,6 +123,36 @@ All column references go through the same identifier validation as schema defini
 ### `ctx.env`
 
 Plain object loaded from `.env.pond.server` (KEY=VALUE format, `#` comments). Includes a derived `GOOGLE_REDIRECT_URI` when not set explicitly.
+
+### `ctx.ai`
+
+Built-in LLM primitive. Routes to the first provider configured in `.env.pond.server`:
+
+1. `ANTHROPIC_API_KEY` → Claude
+2. `OPENAI_API_KEY` → OpenAI
+3. `HERMES_BASE_URL` → a local OpenAI-compatible endpoint (Hermes / vLLM / Ollama)
+
+Force a provider with `AI_PROVIDER=anthropic|openai|hermes`.
+
+```ts
+const text = await ctx.ai.complete({ prompt: "Summarize this:", system: "Be terse." })
+for await (const chunk of ctx.ai.stream({ prompt: "...", model: "claude-sonnet-4-6" })) {
+  // yields one full string today; streaming wire format will land per-provider.
+}
+```
+
+### `ctx.blob`
+
+Per-deploy key/value blob store. Files live under `<deploy-dir>/.pond/blobs/`. Metadata (key, contentType, size) is mirrored in the `_pond_blobs` table.
+
+```ts
+await ctx.blob.put("avatars/me.png", bytes, { contentType: "image/png" })
+const got = await ctx.blob.get("avatars/me.png")
+await ctx.blob.delete("avatars/me.png")
+const all = await ctx.blob.list("avatars/")
+```
+
+Capsule users can read blobs via `GET /api/blob/<key>` (subject to whatever auth you wrap on top — there is no built-in ACL).
 
 ### `ctx.log`
 
@@ -198,11 +234,76 @@ export default capsule({
   queries: { ... },
   mutations: { ... },
   endpoints: { ... },        // optional
+  sockets: {                 // optional — WebSocket handlers
+    chat: socket((ctx, ws) => {
+      ws.on("message", (data) => ws.send(`heard: ${data}`))
+    }),
+  },
   allowedOrigins: ["..."],   // optional — additional CORS origins
+  rateLimit: {               // optional — enforced before the handler runs
+    addItem: { perMinute: 60, by: "user" },
+    "/api/webhook": { perMinute: 1000, by: "ip" },
+  },
+  public: true,              // optional — opt into /gallery + pond fork
+  title: "...",              // optional — public listing title
+  description: "...",        // optional — public listing description
 })
 ```
 
 By default the capsule's HTTP endpoints reject cross-origin browser requests. List extra origins in `allowedOrigins` to opt them in.
+
+### WebSockets
+
+Each entry in `sockets` mounts at `/api/socket/<name>` on the same port as the rest of the capsule. The handler receives the same `ctx` your queries and mutations get (so `ctx.auth`, `ctx.db`, `ctx.ai`, `ctx.blob` all work) plus a `SocketLike`:
+
+```ts
+interface SocketLike {
+  send(data: string): void
+  close(code?: number, reason?: string): void
+  on(event: "message", listener: (data: string) => void): void
+  on(event: "close", listener: () => void): void
+}
+```
+
+Clients connect at `wss://<deployId>.pond.run/api/socket/<name>`. The hosted control plane forwards the HTTP Upgrade to the deploy via a raw TCP pipe — no special config needed.
+
+### Public capsules + fork
+
+When you mark a capsule `public: true`, the host exposes:
+
+- `GET /api/public-deploys` — listed at `/gallery` (the bare host renders a small JS client over this).
+- `GET /api/public-deploys/:id/source` — unauthenticated source-tree export.
+
+Anyone with the URL can run `pond fork https://<id>.pond.run` to scaffold a local copy ready for `pond dev`.
+
+### Rate limits
+
+`rateLimit[routeName]` matches query/mutation/endpoint names. `by: "user"` keys on the session cookie; `by: "ip"` (default) keys on the client IP. Buckets are rolling, in-process — restart resets them. Over-limit requests get a `429 Rate limited` with `Retry-After: 60`.
+
+### Schema migrations
+
+The runtime tracks tables in `_pond_migrations`. On boot:
+
+- New tables are created with `CREATE TABLE IF NOT EXISTS …`.
+- New columns are added via `ALTER TABLE ADD COLUMN`.
+- Removing a column from your schema raises an error — to actually drop or rename a column you must run `pond db migrate --drop <table>.<col>` (or `--rename …`) explicitly. The runtime refuses destructive changes silently.
+
+### Schema additive change example
+
+```ts
+// Before
+schema: {
+  items: table({ body: string() })
+}
+// After — adds `done` automatically the next time the capsule boots
+schema: {
+  items: table({ body: string(), done: boolean() })
+}
+```
+
+### `/__pond/metrics`
+
+Every running capsule exposes a Prometheus text-format snapshot at `/__pond/metrics`. Counters: `pond_route_requests_total`, `pond_route_errors_total`, `pond_route_duration_ms` (rolling p50/p95/p99). No auth — wrap with whatever proxy auth you use externally.
 
 ---
 

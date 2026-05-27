@@ -6,11 +6,13 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { randomBytes, timingSafeEqual } from "node:crypto"
 import { fork, type ChildProcess } from "node:child_process"
+import * as net from "node:net"
 import { openControlDb, DEFAULT_QUOTA, ANONYMOUS_QUOTA, type ControlDb, type UserRow } from "../host/control-db.js"
 import { createHash } from "node:crypto"
 import { buildForDeploy } from "../runtime.js"
 import { buildClient } from "../bundler.js"
 import { ideHtml } from "../ide/built.js"
+import { dashboardHtml } from "../dashboard/built.js"
 
 const SOURCE_FILE_LIMIT = 200
 const SOURCE_TOTAL_LIMIT = 4 * 1024 * 1024
@@ -54,7 +56,11 @@ function writeSourceTree(deployDir: string, files: Record<string, string>): void
   }
 }
 
-async function buildDeployFromSource(deployDir: string): Promise<{ bundleBytes: number; bundleHash: string }> {
+async function buildDeployFromSource(deployDir: string): Promise<{
+  bundleBytes: number
+  bundleHash: string
+  meta: { isPublic: boolean; title?: string; description?: string }
+}> {
   const sourceDir = path.join(deployDir, "source")
   const serverFile = path.join(sourceDir, "server", "index.ts")
   const clientFile = path.join(sourceDir, "client", "index.tsx")
@@ -69,7 +75,25 @@ async function buildDeployFromSource(deployDir: string): Promise<{ bundleBytes: 
   }
   const bundleBuf = fs.readFileSync(outfile)
   const bundleHash = createHash("sha256").update(bundleBuf).digest("hex")
-  return { bundleBytes: bundleBuf.length, bundleHash }
+  const meta = extractCapsuleMeta(serverFile)
+  return { bundleBytes: bundleBuf.length, bundleHash, meta }
+}
+
+// Best-effort static parse of the capsule({ public, title, description }) call.
+// We deliberately don't import the bundle to read these — that would execute
+// arbitrary code on the host. Regex is brittle but the surface is small and
+// any false-negative just means the deploy doesn't show in /gallery.
+function extractCapsuleMeta(serverFile: string): { isPublic: boolean; title?: string; description?: string } {
+  if (!fs.existsSync(serverFile)) return { isPublic: false }
+  const src = fs.readFileSync(serverFile, "utf-8")
+  const isPublic = /\bpublic\s*:\s*true\b/.test(src)
+  const titleMatch = src.match(/\btitle\s*:\s*(["'`])([^"'`]{1,200})\1/)
+  const descMatch = src.match(/\bdescription\s*:\s*(["'`])([^"'`]{1,500})\1/)
+  return {
+    isPublic,
+    title: titleMatch?.[2],
+    description: descMatch?.[2],
+  }
 }
 
 interface HostedDeployRecord {
@@ -83,6 +107,12 @@ interface HostedDeployRecord {
   updatedAt: string
   claimedAt?: string
   bootError?: string
+  // Capsule-declared metadata. Populated from a regex scan of server/index.ts
+  // on each successful build — see extractCapsuleMeta(). Absent on records
+  // that haven't been rebuilt since this field was introduced.
+  isPublic?: boolean
+  title?: string
+  description?: string
 }
 
 const MAX_BUNDLE_BYTES = 64 * 1024 * 1024
@@ -848,7 +878,11 @@ export const hostCommand = defineCommand({
         const dir = deployDirFor(deployId)
         fs.mkdirSync(dir, { recursive: true })
         writeSourceTree(dir, validated.files)
-        let buildResult: { bundleBytes: number; bundleHash: string }
+        let buildResult: {
+          bundleBytes: number
+          bundleHash: string
+          meta: { isPublic: boolean; title?: string; description?: string }
+        }
         try {
           buildResult = await buildDeployFromSource(dir)
         } catch (err: any) {
@@ -878,6 +912,9 @@ export const hostCommand = defineCommand({
           publicInspect: Boolean(body.publicInspect),
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
+          isPublic: buildResult.meta.isPublic,
+          title: buildResult.meta.title,
+          description: buildResult.meta.description,
         }
         writeRecord(record)
         let extra: { terminatesAt?: string; expiresAt?: string } = {}
@@ -953,7 +990,11 @@ export const hostCommand = defineCommand({
         const quota = controlDb.getQuota(deployId)
         const dir = deployDirFor(deployId)
         writeSourceTree(dir, validated.files)
-        let buildResult: { bundleBytes: number; bundleHash: string }
+        let buildResult: {
+          bundleBytes: number
+          bundleHash: string
+          meta: { isPublic: boolean; title?: string; description?: string }
+        }
         try {
           buildResult = await buildDeployFromSource(dir)
         } catch (err: any) {
@@ -973,6 +1014,9 @@ export const hostCommand = defineCommand({
         }
         record.publicInspect = Boolean(body.publicInspect)
         record.updatedAt = new Date().toISOString()
+        record.isPublic = buildResult.meta.isPublic
+        record.title = buildResult.meta.title
+        record.description = buildResult.meta.description
         writeRecord(record)
         try {
           await forkDeploy(record)
@@ -1427,7 +1471,11 @@ export const hostCommand = defineCommand({
         return c.json({ ok: false, errors: [{ text: "source/server/index.ts missing on host" }] }, 200)
       }
       const start = Date.now()
-      let result: { bundleBytes: number; bundleHash: string }
+      let result: {
+        bundleBytes: number
+        bundleHash: string
+        meta: { isPublic: boolean; title?: string; description?: string }
+      }
       try {
         result = await buildDeployFromSource(dir)
       } catch (err: any) {
@@ -1456,6 +1504,9 @@ export const hostCommand = defineCommand({
         )
       }
       r.record.updatedAt = new Date().toISOString()
+      r.record.isPublic = result.meta.isPublic
+      r.record.title = result.meta.title
+      r.record.description = result.meta.description
       writeRecord(r.record)
       try {
         await forkDeploy(r.record)
@@ -1501,6 +1552,70 @@ export const hostCommand = defineCommand({
         metadata: { from: body.from, to: body.to },
       })
       return c.json({ ok: true })
+    })
+
+    // ---- PUBLIC GALLERY + FORK ----
+
+    // Unauthenticated. Lists deploys whose capsule declared `public: true` in
+    // its last build. Anonymous deploys are excluded — there's no "owner" to
+    // attribute them to, and they have a short retention window.
+    app.get("/api/public-deploys", (c) => {
+      const out: Array<{
+        deployId: string
+        url: string
+        title?: string
+        description?: string
+        createdAt: string
+      }> = []
+      const ids = fs
+        .readdirSync(deploysDir, { withFileTypes: true })
+        .filter((e) => e.isDirectory())
+        .map((e) => e.name)
+      for (const id of ids) {
+        const rec = readRecord(id)
+        if (!rec?.isPublic) continue
+        if (controlDb.findAnonymous(id)) continue
+        out.push({
+          deployId: rec.deployId,
+          url: rec.url,
+          title: rec.title,
+          description: rec.description,
+          createdAt: rec.createdAt,
+        })
+      }
+      out.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+      return c.json({ deploys: out })
+    })
+
+    // Returns all source files for a public capsule as { path: content } so
+    // `pond fork` can scaffold a copy. Owner-private deploys 404 here even
+    // if they exist — non-public capsules don't show up in any listing and
+    // their source is unreachable through this surface.
+    app.get("/api/public-deploys/:deployId/source", (c) => {
+      const deployId = c.req.param("deployId")
+      const rec = readRecord(deployId)
+      if (!rec?.isPublic) return c.json({ error: "Not found" }, 404)
+      const sourceDir = path.join(deployDirFor(deployId), "source")
+      if (!fs.existsSync(sourceDir)) return c.json({ error: "Not found" }, 404)
+      const files: Record<string, string> = {}
+      const walk = (rel: string) => {
+        const abs = path.join(sourceDir, rel)
+        const stat = fs.statSync(abs)
+        if (stat.isDirectory()) {
+          for (const entry of fs.readdirSync(abs).sort()) walk(rel ? `${rel}/${entry}` : entry)
+        } else if (stat.isFile()) {
+          // 1 MB per file ceiling — same as the IDE
+          if (stat.size > 1 * 1024 * 1024) return
+          files[rel] = fs.readFileSync(abs, "utf-8")
+        }
+      }
+      for (const entry of fs.readdirSync(sourceDir).sort()) walk(entry)
+      return c.json({
+        deployId,
+        title: rec.title,
+        description: rec.description,
+        files,
+      })
     })
 
     // ---- CUSTOM DOMAINS ----
@@ -1781,6 +1896,71 @@ export const hostCommand = defineCommand({
 </html>`
     }
 
+    function galleryHtml(): string {
+      // Tiny client-side renderer: hits /api/public-deploys + draws cards.
+      // No bundler, no SPA — the page is one HTML file and 30 lines of inline JS.
+      return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Pond Gallery</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="icon" href="/favicon.svg" />
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #09090b; color: #e4e4e7; font-family: ui-sans-serif, system-ui, sans-serif; }
+  header { padding: 32px 24px 16px; max-width: 980px; margin: 0 auto; }
+  h1 { margin: 0; font-size: 22px; }
+  p.lede { color: #a1a1aa; font-size: 14px; margin-top: 4px; }
+  main { max-width: 980px; margin: 0 auto; padding: 16px 24px 48px; display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
+  article { background: #18181b; border: 1px solid #27272a; border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 8px; }
+  article h2 { margin: 0; font-size: 15px; }
+  article p { color: #a1a1aa; font-size: 13px; margin: 0; flex: 1; }
+  .row { display: flex; gap: 8px; align-items: center; justify-content: space-between; font-size: 11px; color: #71717a; }
+  a.btn { color: #09090b; background: #fafafa; padding: 6px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; text-decoration: none; }
+  a.btn:hover { background: #e4e4e7; }
+  a.ghost { color: #d4d4d8; padding: 6px 10px; border: 1px solid #3f3f46; border-radius: 6px; font-size: 12px; text-decoration: none; }
+  .empty { color: #71717a; padding: 24px; text-align: center; grid-column: 1 / -1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Pond gallery</h1>
+  <p class="lede">Capsules whose authors opted into <code>capsule({ public: true })</code>. Fork to spin up your own copy.</p>
+</header>
+<main id="grid"><div class="empty">Loading…</div></main>
+<script>
+(async () => {
+  const grid = document.getElementById("grid");
+  try {
+    const r = await fetch("/api/public-deploys");
+    const { deploys } = await r.json();
+    if (!deploys.length) { grid.innerHTML = '<div class="empty">No public capsules yet.</div>'; return; }
+    grid.innerHTML = "";
+    for (const d of deploys) {
+      const card = document.createElement("article");
+      card.innerHTML = \`
+        <h2>\${escapeHtml(d.title || d.deployId)}</h2>
+        <p>\${escapeHtml(d.description || "")}</p>
+        <div class="row">
+          <span>\${new Date(d.createdAt).toLocaleDateString()}</span>
+          <div style="display:flex;gap:6px;">
+            <a class="ghost" href="\${d.url}" target="_blank" rel="noreferrer">Open</a>
+            <a class="btn" href="\${d.url}" onclick="navigator.clipboard.writeText('pond fork ' + this.href); this.textContent='Copied ✓'; setTimeout(()=>this.textContent='Fork',1400); event.preventDefault();">Fork</a>
+          </div>
+        </div>\`;
+      grid.appendChild(card);
+    }
+  } catch (err) {
+    grid.innerHTML = '<div class="empty">Failed to load: ' + escapeHtml(String(err)) + '</div>';
+  }
+})();
+function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+</script>
+</body>
+</html>`
+    }
+
     function abuseHtml(): string {
       const contact = abuseEmail ? `<a href="mailto:${abuseEmail}">${abuseEmail}</a>` : "the host operator"
       return `<!doctype html>
@@ -1891,6 +2071,17 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
             }
             return c.json({ error: "Not found" }, 404)
           }
+          if (url.pathname === "/gallery") {
+            return c.html(galleryHtml())
+          }
+          if (url.pathname === "/dashboard" || url.pathname === "/dashboard/") {
+            const bootstrap = JSON.stringify({ controlUrl: apiUrl, publicHost })
+            const html = dashboardHtml.replace(
+              "__POND_DASHBOARD__BOOTSTRAP__",
+              `window.__POND_DASHBOARD = ${bootstrap}`,
+            )
+            return c.html(html)
+          }
           const ideMatch = url.pathname.match(/^\/ide\/([a-f0-9]+)\/?$/)
           if (ideMatch) {
             const deployId = ideMatch[1]
@@ -1940,6 +2131,63 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
     })
 
     const controlServer = serve({ fetch: app.fetch, port, hostname })
+
+    // ── WebSocket upgrade proxy ─────────────────────────────────────────
+    // The bare control plane bypasses Hono for HTTP Upgrade requests and pipes
+    // them raw to the matching deploy's local port. This lets capsules expose
+    // socket() handlers at /api/socket/<name> and have wscat / browser clients
+    // reach them through <deployId>.pond.run just like a regular request.
+    controlServer.on("upgrade", (req, clientSocket, head) => {
+      const hostHeader = (req.headers.host ?? "").toString()
+      const deployId = deployIdFromHost(hostHeader)
+      if (!deployId) {
+        clientSocket.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n")
+        clientSocket.destroy()
+        return
+      }
+      const entry = runningChildren.get(deployId)
+      if (!entry) {
+        clientSocket.write("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
+        clientSocket.destroy()
+        return
+      }
+      // Open a TCP connection to the deploy worker, re-serialize the original
+      // upgrade request (parsed headers + any head bytes already buffered),
+      // then full-duplex pipe both directions until either end closes.
+      const upstream = net.connect({ host: "127.0.0.1", port: entry.port })
+      upstream.once("connect", () => {
+        const lines: string[] = [`${req.method} ${req.url} HTTP/${req.httpVersion}`]
+        for (const [name, value] of Object.entries(req.headers)) {
+          if (value == null) continue
+          if (Array.isArray(value)) {
+            for (const v of value) lines.push(`${name}: ${v}`)
+          } else {
+            lines.push(`${name}: ${value}`)
+          }
+        }
+        lines.push("", "")
+        upstream.write(lines.join("\r\n"))
+        if (head && head.length > 0) upstream.write(head)
+        upstream.pipe(clientSocket)
+        clientSocket.pipe(upstream)
+      })
+      const destroyBoth = () => {
+        try {
+          upstream.destroy()
+        } catch {
+          // best effort
+        }
+        try {
+          clientSocket.destroy()
+        } catch {
+          // best effort
+        }
+      }
+      upstream.on("error", destroyBoth)
+      clientSocket.on("error", destroyBoth)
+      clientSocket.on("close", () => upstream.destroy())
+      upstream.on("close", () => clientSocket.destroy())
+    })
 
     const shutdown = async () => {
       console.log("\n[pond host] shutting down")

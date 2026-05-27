@@ -72,6 +72,90 @@ export async function moveFile(opts: ApiOptions, from: string, to: string): Prom
   return { ok: true }
 }
 
+export async function fetchEnv(opts: ApiOptions): Promise<{ entries: Record<string, string> } | { error: string }> {
+  const r = await fetch(`/api/deploys/${opts.deployId}/env`, { headers: headers(opts) })
+  if (!r.ok) return { error: (await r.json().catch(() => ({}))).error ?? "request failed" }
+  return r.json()
+}
+
+export async function putEnv(
+  opts: ApiOptions,
+  patch: Record<string, string>,
+): Promise<{ entries: Record<string, string> } | { error: string }> {
+  const r = await fetch(`/api/deploys/${opts.deployId}/env`, {
+    method: "PUT",
+    headers: headers(opts, { "content-type": "application/json" }),
+    body: JSON.stringify({ entries: patch }),
+  })
+  if (!r.ok) return { error: (await r.json().catch(() => ({}))).error ?? "save failed" }
+  return r.json()
+}
+
+export async function deleteEnvKey(
+  opts: ApiOptions,
+  key: string,
+): Promise<{ entries: Record<string, string> } | { error: string }> {
+  const r = await fetch(`/api/deploys/${opts.deployId}/env/${encodeURIComponent(key)}`, {
+    method: "DELETE",
+    headers: headers(opts),
+  })
+  if (!r.ok) return { error: (await r.json().catch(() => ({}))).error ?? "delete failed" }
+  return r.json()
+}
+
+export interface LogEntry {
+  timestamp: string
+  level: "info" | "error"
+  message: string
+  data?: unknown
+}
+
+export function streamLogs(
+  deployUrl: string,
+  opts: ApiOptions,
+  onEntry: (entry: LogEntry) => void,
+  onError: (err: unknown) => void,
+): () => void {
+  // The capsule's SSE log stream is served at /__pond/logs on the deploy origin,
+  // not the control plane. We pass the same claim/bearer token via the standard
+  // header — anonymous deploys gate on `x-pond-claim-token`, owned ones on Bearer.
+  const ac = new AbortController()
+  void (async () => {
+    try {
+      const res = await fetch(`${deployUrl.replace(/\/$/, "")}/__pond/logs`, {
+        headers: headers(opts),
+        signal: ac.signal,
+      })
+      if (!res.ok || !res.body) {
+        onError(`logs: ${res.status}`)
+        return
+      }
+      const reader = res.body.getReader()
+      const dec = new TextDecoder()
+      let buf = ""
+      while (true) {
+        const { value, done } = await reader.read()
+        if (done) break
+        buf += dec.decode(value, { stream: true })
+        const parts = buf.split("\n\n")
+        buf = parts.pop() ?? ""
+        for (const part of parts) {
+          const line = part.split("\n").find((l) => l.startsWith("data: "))
+          if (!line) continue
+          try {
+            onEntry(JSON.parse(line.slice(6)) as LogEntry)
+          } catch {
+            // skip malformed
+          }
+        }
+      }
+    } catch (err) {
+      if ((err as { name?: string }).name !== "AbortError") onError(err)
+    }
+  })()
+  return () => ac.abort()
+}
+
 export async function build(opts: ApiOptions): Promise<BuildResult> {
   const r = await fetch(`/api/deploys/${opts.deployId}/build`, { method: "POST", headers: headers(opts) })
   if (!r.ok) {
