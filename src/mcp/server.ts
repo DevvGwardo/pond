@@ -143,52 +143,18 @@ function tools(opts: McpServerOptions): ToolDef[] {
     },
     {
       name: "tail_logs",
-      description: "Fetch the last N log entries for a deploy by reading the replayed history from its SSE feed.",
+      description: "Fetch the last N log entries for a deploy from the control plane.",
       inputSchema: {
         type: "object",
         properties: {
           deployId: { type: "string" },
-          limit: { type: "number", description: "Max entries (default 100)" },
+          limit: { type: "number", description: "Max entries (default 100, max 500)" },
         },
         required: ["deployId"],
       },
       handler: async ({ deployId, limit }) => {
         const n = typeof limit === "number" ? Math.min(Math.max(limit, 1), 500) : 100
-        const deploys = (await api(opts, "/api/deploys")) as Array<{ deployId: string; url?: string }>
-        const found = deploys.find((d) => d.deployId === deployId)
-        if (!found?.url) throw new Error(`No URL for deploy ${deployId}`)
-        const ac = new AbortController()
-        const t = setTimeout(() => ac.abort(), 1500)
-        try {
-          const res = await fetch(`${found.url}/__pond/logs`, {
-            headers: { authorization: `Bearer ${opts.token}` },
-            signal: ac.signal,
-          })
-          if (!res.ok || !res.body) throw new Error(`logs: ${res.status}`)
-          const reader = res.body.getReader()
-          const dec = new TextDecoder()
-          let buf = ""
-          const events: any[] = []
-          while (events.length < n) {
-            const { value, done } = await reader.read()
-            if (done) break
-            buf += dec.decode(value, { stream: true })
-            const parts = buf.split("\n\n")
-            buf = parts.pop() ?? ""
-            for (const part of parts) {
-              const dl = part.split("\n").find((l) => l.startsWith("data: "))
-              if (!dl) continue
-              try {
-                events.push(JSON.parse(dl.slice(6)))
-              } catch {
-                // skip malformed
-              }
-            }
-          }
-          return events.slice(-n)
-        } finally {
-          clearTimeout(t)
-        }
+        return api(opts, `/api/deploys/${deployId}/logs?limit=${n}`)
       },
     },
     {

@@ -1339,6 +1339,37 @@ export const hostCommand = defineCommand({
       return c.json({ entries })
     })
 
+    // Bearer-authed proxy for the deploy's recent log buffer. Deploy workers
+    // write to `<deployDir>/.pond/logs.ndjson` (cwd is the deploy dir — see
+    // `forkDeploy`). The worker also exposes `GET /__pond/logs` as an SSE
+    // stream, but that endpoint is gated on `x-pond-claim-token`, which only
+    // the deploying machine ever sees in plaintext. MCP tools authenticate
+    // with the account bearer, so they cannot reach the worker directly —
+    // hence this control-plane proxy that owner-checks via bearer and reads
+    // the same on-disk replay buffer.
+    app.get("/api/deploys/:deployId/logs", (c) => {
+      const deployId = c.req.param("deployId")
+      const r = requireDeployOwner(c, deployId)
+      if (r instanceof Response) return r
+      const raw = c.req.query("limit")
+      const parsed = raw === undefined ? 100 : Number.parseInt(raw, 10)
+      const limit = Number.isFinite(parsed) ? Math.min(Math.max(parsed, 1), 500) : 100
+      const logFile = path.join(deployDirFor(deployId), ".pond", "logs.ndjson")
+      if (!fs.existsSync(logFile)) return c.json({ entries: [] })
+      const text = fs.readFileSync(logFile, "utf-8")
+      const lines = text.split("\n").filter((l) => l.length > 0)
+      const start = Math.max(0, lines.length - limit)
+      const entries: unknown[] = []
+      for (let i = start; i < lines.length; i++) {
+        try {
+          entries.push(JSON.parse(lines[i]))
+        } catch {
+          // skip malformed lines (rotation race, partial write)
+        }
+      }
+      return c.json({ entries })
+    })
+
     app.put("/api/deploys/:deployId/env", async (c) => {
       const deployId = c.req.param("deployId")
       const r = requireDeployOwner(c, deployId)

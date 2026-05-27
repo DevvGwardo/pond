@@ -432,6 +432,52 @@ test("anonymous PUT /env returns 403", async () => {
   assert.equal(res.status, 403)
 })
 
+test("GET /api/deploys/:id/logs returns last N entries with owner bearer", async () => {
+  const res = await fetch(`${apiUrl}/api/deploys/${deployId}/logs?limit=5`, {
+    headers: { authorization: `Bearer ${adminToken}` },
+  })
+  assert.equal(res.status, 200)
+  const body = await res.json()
+  assert.ok(Array.isArray(body.entries), `entries should be an array, got: ${JSON.stringify(body)}`)
+  assert.ok(body.entries.length <= 5, `limit should be respected, got ${body.entries.length}`)
+})
+
+test("GET /api/deploys/:id/logs without auth returns 401", async () => {
+  const res = await fetch(`${apiUrl}/api/deploys/${deployId}/logs`)
+  assert.equal(res.status, 401)
+})
+
+test("GET /api/deploys/:id/logs as a non-owner returns 403", async () => {
+  const signup = await fetch(`${apiUrl}/api/users`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${hostToken}` },
+    body: JSON.stringify({ username: `log-snooper-${randomBytes(4).toString("hex")}` }),
+  })
+  assert.equal(signup.status, 201)
+  const { token: snoopToken } = await signup.json()
+  const res = await fetch(`${apiUrl}/api/deploys/${deployId}/logs`, {
+    headers: { authorization: `Bearer ${snoopToken}` },
+  })
+  assert.equal(res.status, 403)
+})
+
+test("GET /api/deploys/:id/logs on an anonymous (unclaimed) deploy returns 403", async () => {
+  const res = await fetch(`${apiUrl}/api/deploys/${anonDeployId}/logs`, {
+    headers: { authorization: `Bearer ${adminToken}` },
+  })
+  assert.equal(res.status, 403)
+})
+
+test("GET /api/deploys/:id/logs caps limit at 500", async () => {
+  const res = await fetch(`${apiUrl}/api/deploys/${deployId}/logs?limit=99999`, {
+    headers: { authorization: `Bearer ${adminToken}` },
+  })
+  assert.equal(res.status, 200)
+  const body = await res.json()
+  assert.ok(Array.isArray(body.entries))
+  assert.ok(body.entries.length <= 500, `cap should be 500, got ${body.entries.length}`)
+})
+
 test("claim with --signup creates user and transfers ownership", async () => {
   // Deploy anonymously, then claim with signup.
   const create = await fetch(`${apiUrl}/api/deploys`, {
