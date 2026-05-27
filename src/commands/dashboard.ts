@@ -1,24 +1,16 @@
 import { defineCommand } from "citty"
-import * as fs from "node:fs"
-import * as path from "node:path"
 import { spawn } from "node:child_process"
 import { listCredentials } from "../host/credentials.js"
+import { readDeployRecord } from "../host/deploy-record.js"
 
 function resolveApiUrl(arg: string | undefined): { apiUrl: string; source: string } | { error: string } {
   if (arg) {
     return { apiUrl: arg.replace(/\/$/, ""), source: "--api" }
   }
 
-  const deployFile = path.join(process.cwd(), ".pond", "deploy.json")
-  if (fs.existsSync(deployFile)) {
-    try {
-      const deploy = JSON.parse(fs.readFileSync(deployFile, "utf-8")) as { apiUrl?: string }
-      if (deploy.apiUrl) {
-        return { apiUrl: deploy.apiUrl.replace(/\/$/, ""), source: ".pond/deploy.json" }
-      }
-    } catch {
-      // fall through to credentials lookup
-    }
+  const deploy = readDeployRecord(process.cwd())
+  if (deploy?.apiUrl) {
+    return { apiUrl: deploy.apiUrl.replace(/\/$/, ""), source: ".pond/deploy.json" }
   }
 
   const creds = listCredentials()

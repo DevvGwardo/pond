@@ -5,6 +5,7 @@ import { randomBytes } from "node:crypto"
 import { buildForDeploy } from "../runtime.js"
 import { buildClient } from "../bundler.js"
 import { loadCredentials } from "../host/credentials.js"
+import { readDeployRecord } from "../host/deploy-record.js"
 
 const SOURCE_ROOTS = ["server", "client", "shared"]
 const SOURCE_FILE_LIMIT = 200
@@ -111,14 +112,7 @@ export const deployCommand = defineCommand({
 
     fs.mkdirSync(deployDir, { recursive: true })
 
-    const localRecord = fs.existsSync(deployFile)
-      ? (JSON.parse(fs.readFileSync(deployFile, "utf-8")) as {
-          apiUrl?: string
-          deployId?: string
-          claimToken?: string
-          claimedAt?: string
-        })
-      : null
+    const localRecord = readDeployRecord(cwd)
 
     // Decide the deploy target:
     //   --local              → offline build, no upload
@@ -244,7 +238,7 @@ export const deployCommand = defineCommand({
 
     const remote = (await response.json()) as {
       deployId: string
-      claimToken: string
+      claimToken?: string
       url: string
       apiUrl: string
       publicInspect: boolean
@@ -272,7 +266,10 @@ export const deployCommand = defineCommand({
           bundleHash: remote.bundleHash,
           apiUrl: effectiveApiUrl,
           url: remote.url,
-          claimToken: remote.claimToken,
+          // PUT responses no longer echo the plaintext claimToken (server
+          // stores only the hash). Fall back to the locally cached token —
+          // it didn't rotate.
+          claimToken: remote.claimToken ?? localRecord?.claimToken,
           publicInspect: remote.publicInspect,
           claimedAt: remote.claimedAt,
           terminatesAt: remote.terminatesAt,

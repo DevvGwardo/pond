@@ -5,6 +5,7 @@ import type { IncomingMessage } from "node:http"
 import type { Socket as NetSocket } from "node:net"
 import * as fs from "node:fs"
 import * as path from "node:path"
+import { createHash, timingSafeEqual } from "node:crypto"
 import { createRuntimeFromDeployBundle } from "./runtime.js"
 import type { SocketHandler, SocketLike } from "./server/index.js"
 
@@ -14,9 +15,15 @@ interface StartBundleServerOptions {
   cwd: string
   port: number
   hostname?: string
-  inspectSecret?: string
+  // sha256 hex of the claim token. Compared timing-safe with the hash of
+  // the incoming x-pond-claim-token header. Plaintext is never stored.
+  inspectSecretHash?: string
   publicInspect?: boolean
   allowedOrigins?: string[]
+}
+
+function sha256Hex(s: string): string {
+  return createHash("sha256").update(s).digest("hex")
 }
 
 interface LogEntry {
@@ -169,8 +176,17 @@ async function createBundleServerAppInternal(
 
   function canInspect(headerToken: string | undefined) {
     if (options.publicInspect) return true
-    if (!options.inspectSecret) return true
-    return headerToken === options.inspectSecret
+    if (!options.inspectSecretHash) return true
+    if (!headerToken) return false
+    // Timing-safe comparison on equal-length sha256 hex strings. Hashing the
+    // incoming header before compare means a backup leak of the host's
+    // record JSONs (which contain only the hash) doesn't yield a valid
+    // header value, and an equality-timing attack on this code path also
+    // yields no useful signal.
+    const a = Buffer.from(sha256Hex(headerToken))
+    const b = Buffer.from(options.inspectSecretHash)
+    if (a.length !== b.length) return false
+    return timingSafeEqual(a, b)
   }
 
   app.get("/__pond/inspect", (c) => {

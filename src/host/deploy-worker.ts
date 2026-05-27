@@ -6,7 +6,11 @@ interface BootOptions {
   cwd: string
   port: number
   hostname?: string
-  inspectSecret?: string
+  // sha256 hex of the claim token. Worker compares hashes of incoming
+  // x-pond-claim-token headers (timing-safe). Plaintext never leaves the
+  // host process or sits on disk — the only persisted copy was previously
+  // in deploys/<id>.json, which is the leak vector this closes.
+  inspectSecretHash?: string
   publicInspect?: boolean
   allowedOrigins?: string[]
   restrictNetwork?: boolean

@@ -3,9 +3,9 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { execSync } from "node:child_process"
 import { randomBytes } from "node:crypto"
+import { findPackageJsonLifecycleScripts } from "../host/package-json-validation.js"
 
 const SLUG_RE = /^[a-z][a-z0-9_-]*$/i
-const LIFECYCLE_SCRIPTS = ["preinstall", "install", "postinstall", "prepare", "postprepare"] as const
 
 // Hosts we'll silently trust when the apiBase is derived from a deploy URL.
 // Anything else requires an explicit `--api` so the user has to consciously
@@ -161,20 +161,22 @@ export const forkCommand = defineCommand({
     // CLI tells the user to run next. A hostile or compromised control plane
     // can ship a package.json whose postinstall script is `rm -rf ~`. Refuse
     // by default; let the user opt in with --allow-scripts.
+    // (The control plane itself rejects these on upload as of 0.3.11 — this
+    // check defends against older control planes and self-hosted forks that
+    // pre-date that.)
     if (!args["allow-scripts"]) {
       const pkgText = body.files["package.json"]
       if (typeof pkgText === "string") {
-        let pkg: { scripts?: Record<string, unknown> } | null = null
         try {
-          pkg = JSON.parse(pkgText)
+          JSON.parse(pkgText)
         } catch {
           console.error(`Refusing to fork: package.json is not valid JSON.`)
           process.exit(1)
         }
-        const offending = pkg?.scripts ? LIFECYCLE_SCRIPTS.filter((s) => typeof pkg!.scripts![s] === "string") : []
-        if (offending.length > 0) {
+        const lifecycle = findPackageJsonLifecycleScripts(pkgText)
+        if (!lifecycle.ok) {
           console.error(
-            `Refusing to fork: upstream package.json defines npm lifecycle script(s) ${offending.join(", ")} which would run on \`npm install\`. Re-run with --allow-scripts if you trust this deploy.`,
+            `Refusing to fork: upstream package.json defines npm lifecycle script(s) ${lifecycle.offending.join(", ")} which would run on \`npm install\`. Re-run with --allow-scripts if you trust this deploy.`,
           )
           process.exit(1)
         }

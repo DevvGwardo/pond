@@ -8,6 +8,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto"
 import { fork, type ChildProcess } from "node:child_process"
 import * as net from "node:net"
 import { openControlDb, DEFAULT_QUOTA, ANONYMOUS_QUOTA, type ControlDb, type UserRow } from "../host/control-db.js"
+import { findPackageJsonLifecycleScripts } from "../host/package-json-validation.js"
 import { createHash } from "node:crypto"
 import { buildForDeploy } from "../runtime.js"
 import { buildClient } from "../bundler.js"
@@ -116,6 +117,17 @@ function validateSourceFiles(
     }
     total += Buffer.byteLength(content, "utf-8")
     if (total > SOURCE_TOTAL_LIMIT) return { ok: false, error: `Source exceeds ${SOURCE_TOTAL_LIMIT} bytes` }
+    if (rel === "package.json") {
+      // Refuse uploads that define npm lifecycle scripts. They'd run as RCE
+      // on `npm install` for anyone who later forks the deploy.
+      const lifecycle = findPackageJsonLifecycleScripts(content)
+      if (!lifecycle.ok) {
+        return {
+          ok: false,
+          error: `package.json defines npm lifecycle script(s) ${lifecycle.offending.join(", ")} which are not allowed on hosted deploys (pond builds via esbuild, not npm install)`,
+        }
+      }
+    }
     out[rel] = content
     if (rel === "server/index.ts") hasServerEntry = true
   }
@@ -157,16 +169,90 @@ async function buildDeployFromSource(deployDir: string): Promise<{
   return { bundleBytes: bundleBuf.length, bundleHash, meta }
 }
 
+// Replace JS/TS string literals and comments with a same-length blank so
+// downstream regex scans don't false-positive on tokens that appear in
+// strings or comments — e.g. a doc comment that mentions `public: true` or
+// a regex literal that quotes another capsule's metadata. Lengths are
+// preserved so source-position semantics (line/column) don't drift if a
+// caller ever needs them.
+//
+// This is a deliberately small lexer — it handles single/double/backtick
+// strings (incl. template-string interpolations as opaque strings, which
+// is over-zealous but safe for the gallery-publication decision), `// line
+// comments`, and `/* block */` comments. Regex literals are NOT handled —
+// they're rare in capsule source and the cost of false-stripping a regex
+// is just a missed isPublic detection (failed-closed for the public flag).
+export function stripJsStringsAndComments(src: string): string {
+  let out = ""
+  const blank = (n: number) => " ".repeat(n)
+  let i = 0
+  const n = src.length
+  while (i < n) {
+    const c = src[i]
+    const next = src[i + 1]
+    // // line comment
+    if (c === "/" && next === "/") {
+      const nl = src.indexOf("\n", i + 2)
+      const end = nl === -1 ? n : nl
+      out += blank(end - i)
+      i = end
+      continue
+    }
+    // /* block comment */
+    if (c === "/" && next === "*") {
+      const close = src.indexOf("*/", i + 2)
+      const end = close === -1 ? n : close + 2
+      // preserve newlines so line numbers don't shift
+      for (let k = i; k < end; k++) out += src[k] === "\n" ? "\n" : " "
+      i = end
+      continue
+    }
+    // string literal (single, double, backtick)
+    if (c === '"' || c === "'" || c === "`") {
+      const quote = c
+      out += " "
+      i++
+      while (i < n) {
+        const cc = src[i]
+        if (cc === "\\" && i + 1 < n) {
+          // preserve newlines for any newline introduced by an escape; the
+          // simple `out += "  "` keeps length the same
+          out += "  "
+          i += 2
+          continue
+        }
+        if (cc === quote) {
+          out += " "
+          i++
+          break
+        }
+        out += cc === "\n" ? "\n" : " "
+        i++
+      }
+      continue
+    }
+    out += c
+    i++
+  }
+  return out
+}
+
 // Best-effort static parse of the capsule({ public, title, description }) call.
 // We deliberately don't import the bundle to read these — that would execute
-// arbitrary code on the host. Regex is brittle but the surface is small and
-// any false-negative just means the deploy doesn't show in /gallery.
+// arbitrary code on the host. Strings and comments are stripped first so a
+// stray `public: true` in a comment or doc string can't unintentionally
+// expose source via /gallery and /api/public-deploys/:id/source.
 function extractCapsuleMeta(serverFile: string): { isPublic: boolean; title?: string; description?: string } {
   if (!fs.existsSync(serverFile)) return { isPublic: false }
-  const src = fs.readFileSync(serverFile, "utf-8")
-  const isPublic = /\bpublic\s*:\s*true\b/.test(src)
-  const titleMatch = src.match(/\btitle\s*:\s*(["'`])([^"'`]{1,200})\1/)
-  const descMatch = src.match(/\bdescription\s*:\s*(["'`])([^"'`]{1,500})\1/)
+  const rawSrc = fs.readFileSync(serverFile, "utf-8")
+  const scanSrc = stripJsStringsAndComments(rawSrc)
+  const isPublic = /\bpublic\s*:\s*true\b/.test(scanSrc)
+  // Title and description are deliberately matched on the ORIGINAL source —
+  // their values live inside string literals (which the stripper blanks out),
+  // so we still need raw text. The risk of a stray comment/string mention of
+  // `title: "Foo"` is just cosmetic gallery display, not a privacy issue.
+  const titleMatch = rawSrc.match(/\btitle\s*:\s*(["'`])([^"'`]{1,200})\1/)
+  const descMatch = rawSrc.match(/\bdescription\s*:\s*(["'`])([^"'`]{1,500})\1/)
   return {
     isPublic,
     title: titleMatch?.[2],
@@ -176,7 +262,12 @@ function extractCapsuleMeta(serverFile: string): { isPublic: boolean; title?: st
 
 interface HostedDeployRecord {
   deployId: string
-  claimToken: string
+  // sha256 hex of the deploy's claim token. The plaintext is generated at
+  // create time, returned to the client ONCE, then discarded — only the
+  // hash is persisted. This is what `authorizeDeployMutation` and the
+  // claim endpoint compare against. Pre-0.3.10 records have plaintext
+  // `claimToken` instead; `readRecord` migrates them in place.
+  claimTokenHash: string
   appPort: number
   url: string
   apiUrl: string
@@ -191,6 +282,27 @@ interface HostedDeployRecord {
   isPublic?: boolean
   title?: string
   description?: string
+  // Build metadata. Persisted on each successful build so the IDE's
+  // diagnostics panel can render `✓ Built · 17.4 KB` on first mount instead
+  // of "No build yet" (the previous in-tab-only state). Absent on records
+  // that haven't been rebuilt since this field was introduced.
+  bundleBytes?: number
+  bundleHash?: string
+  lastBuiltAt?: string
+  lastBuildDurationMs?: number
+}
+
+// Pre-migration shape. Used only by `readRecord` to detect & upgrade
+// records written before claim-token-hashing was introduced.
+interface LegacyDeployRecord {
+  deployId: string
+  claimToken?: string
+  claimTokenHash?: string
+  [key: string]: unknown
+}
+
+function sha256Hex(s: string): string {
+  return createHash("sha256").update(s).digest("hex")
 }
 
 const MAX_BUNDLE_BYTES = 64 * 1024 * 1024
@@ -482,13 +594,36 @@ export const hostCommand = defineCommand({
       if (!/^[a-f0-9]+$/i.test(deployId)) return null
       const file = metaFileFor(deployId)
       if (!fs.existsSync(file)) return null
-      return JSON.parse(fs.readFileSync(file, "utf-8")) as HostedDeployRecord
+      const raw = JSON.parse(fs.readFileSync(file, "utf-8")) as LegacyDeployRecord
+      // Migration: pre-0.3.10 records have plaintext `claimToken` and no
+      // `claimTokenHash`. Compute the hash, drop the plaintext, rewrite once.
+      // After migration the file no longer holds a usable claim token; a
+      // backup leak only yields the hash.
+      if (typeof raw.claimToken === "string" && typeof raw.claimTokenHash !== "string") {
+        raw.claimTokenHash = sha256Hex(raw.claimToken)
+        delete raw.claimToken
+        try {
+          fs.writeFileSync(file, JSON.stringify(raw, null, 2))
+        } catch {
+          // best-effort; the in-memory record still has the hash for this
+          // request, and the next successful read will retry
+        }
+      }
+      return raw as unknown as HostedDeployRecord
     }
 
     function writeRecord(record: HostedDeployRecord) {
       const dir = deployDirFor(record.deployId)
       fs.mkdirSync(dir, { recursive: true })
-      fs.writeFileSync(metaFileFor(record.deployId), JSON.stringify(record, null, 2))
+      // Defense in depth: even if a caller built a record with a stray
+      // `claimToken` field, strip it before persisting. Only the hash
+      // belongs on disk.
+      const sanitized = { ...(record as unknown as Record<string, unknown>) }
+      delete sanitized.claimToken
+      fs.writeFileSync(metaFileFor(record.deployId), JSON.stringify(sanitized, null, 2))
+      // Any record change can flip visibility (publish/unpublish/title/etc.)
+      // — drop the public-listing cache so the next GET reflects reality.
+      invalidatePublicListing()
     }
 
     function readEnv(deployId: string): Record<string, string> {
@@ -618,7 +753,7 @@ export const hostCommand = defineCommand({
               cwd: realDir,
               port: 0,
               hostname: "127.0.0.1",
-              inspectSecret: record.claimToken,
+              inspectSecretHash: record.claimTokenHash,
               publicInspect: record.publicInspect,
               restrictNetwork: Boolean(opts.restrictNetwork),
             },
@@ -794,7 +929,7 @@ export const hostCommand = defineCommand({
       record: HostedDeployRecord,
     ): { kind: "claim" } | { kind: "user"; user: UserRow } | Response {
       const claim = c.req.header("x-pond-claim-token") ?? ""
-      if (claim && safeEqual(claim, record.claimToken)) {
+      if (claim && safeEqual(sha256Hex(claim), record.claimTokenHash)) {
         return { kind: "claim" }
       }
       const provided = bearer(c.req.header("authorization"))
@@ -963,6 +1098,7 @@ export const hostCommand = defineCommand({
         const dir = deployDirFor(deployId)
         fs.mkdirSync(dir, { recursive: true })
         writeSourceTree(dir, validated.files)
+        const createStart = Date.now()
         let buildResult: {
           bundleBytes: number
           bundleHash: string
@@ -988,18 +1124,25 @@ export const hostCommand = defineCommand({
           fs.rmSync(dir, { recursive: true, force: true })
           return c.json({ error: `Disk usage ${sizeAfter} exceeds quota ${quotaTemplate.maxDiskBytes}` }, 413)
         }
+        const nowIso = new Date().toISOString()
         const record: HostedDeployRecord = {
           deployId,
-          claimToken,
+          // Persist only the hash. Plaintext `claimToken` returned to the
+          // client below as a one-time disclosure.
+          claimTokenHash: sha256Hex(claimToken),
           appPort: 0,
           url: urlFor(deployId),
           apiUrl,
           publicInspect: Boolean(body.publicInspect),
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
+          createdAt: nowIso,
+          updatedAt: nowIso,
           isPublic: buildResult.meta.isPublic,
           title: buildResult.meta.title,
           description: buildResult.meta.description,
+          bundleBytes: buildResult.bundleBytes,
+          bundleHash: buildResult.bundleHash,
+          lastBuiltAt: nowIso,
+          lastBuildDurationMs: Date.now() - createStart,
         }
         writeRecord(record)
         let extra: { terminatesAt?: string; expiresAt?: string } = {}
@@ -1046,7 +1189,15 @@ export const hostCommand = defineCommand({
           metadata: { anonymous: isAnonymous, bundleBytes: buildResult.bundleBytes },
         })
         return c.json(
-          { ...record, ...extra, bundleHash: buildResult.bundleHash, bundleBytes: buildResult.bundleBytes },
+          {
+            ...record,
+            // One-time disclosure of the plaintext claim token. Subsequent
+            // reads of the record only see the hash.
+            claimToken,
+            ...extra,
+            bundleHash: buildResult.bundleHash,
+            bundleBytes: buildResult.bundleBytes,
+          },
           201,
         )
       },
@@ -1075,6 +1226,7 @@ export const hostCommand = defineCommand({
         const quota = controlDb.getQuota(deployId)
         const dir = deployDirFor(deployId)
         writeSourceTree(dir, validated.files)
+        const updateStart = Date.now()
         let buildResult: {
           bundleBytes: number
           bundleHash: string
@@ -1097,11 +1249,16 @@ export const hostCommand = defineCommand({
         if (sizeAfter > quota.maxDiskBytes) {
           return c.json({ error: `Disk usage ${sizeAfter} exceeds quota ${quota.maxDiskBytes}` }, 413)
         }
+        const updateNow = new Date().toISOString()
         record.publicInspect = Boolean(body.publicInspect)
-        record.updatedAt = new Date().toISOString()
+        record.updatedAt = updateNow
         record.isPublic = buildResult.meta.isPublic
         record.title = buildResult.meta.title
         record.description = buildResult.meta.description
+        record.bundleBytes = buildResult.bundleBytes
+        record.bundleHash = buildResult.bundleHash
+        record.lastBuiltAt = updateNow
+        record.lastBuildDurationMs = Date.now() - updateStart
         writeRecord(record)
         try {
           await forkDeploy(record)
@@ -1130,7 +1287,7 @@ export const hostCommand = defineCommand({
         return c.json({ error: "claimToken required" }, 400)
       }
       const anon = controlDb.findAnonymous(deployId)
-      const tokenMatchesRecord = safeEqual(body.claimToken, record.claimToken)
+      const tokenMatchesRecord = safeEqual(sha256Hex(body.claimToken), record.claimTokenHash)
       const tokenMatchesAnon = anon ? controlDb.verifyAnonymousClaim(deployId, body.claimToken) : false
       if (!tokenMatchesRecord && !tokenMatchesAnon) {
         return c.json({ error: "Forbidden" }, 403)
@@ -1180,8 +1337,28 @@ export const hostCommand = defineCommand({
 
       if (anon) {
         controlDb.promoteAnonymous(deployId, user.id)
+        // First claim of an anonymous deploy — also reset the quota row so the
+        // claimed deploy gets the larger DEFAULT_QUOTA instead of inheriting
+        // ANONYMOUS_QUOTA forever. (Bug pre-0.3.9: claimed-from-anon deploys
+        // were stuck at 16MB bundle / 128MB disk / 128MB memory.)
+        controlDb.setQuota(deployId, DEFAULT_QUOTA)
       } else {
-        // Cross-machine ownership move: set owner if not already, or replace.
+        // Re-claim of an ALREADY-OWNED deploy. The claim token alone is NOT
+        // sufficient to transfer ownership — anyone with a copy of `.pond/
+        // deploy.json`, an IDE link with `#token=…`, or the persisted
+        // `localStorage` value could otherwise dispossess the current owner
+        // silently. Allow only the existing owner / an admin / the host
+        // token to perform this no-op reattachment.
+        const currentOwnerId = controlDb.getDeployOwner(deployId)
+        const isCurrentOwner = currentOwnerId !== null && currentOwnerId === user.id
+        if (!isCurrentOwner && user.isAdmin !== 1) {
+          audit(actorFor(user, false), "deploy.claim_denied", {
+            targetDeployId: deployId,
+            targetUserId: user.id,
+            metadata: { reason: "not_current_owner_or_admin" },
+          })
+          return c.json({ error: "Deploy already owned by another account" }, 403)
+        }
         controlDb.setDeployOwner(deployId, user.id)
       }
 
@@ -1206,7 +1383,13 @@ export const hostCommand = defineCommand({
           signedUp: createdCredential !== null,
         },
       })
-      const resp: Record<string, unknown> = { ...record }
+      const resp: Record<string, unknown> = {
+        ...record,
+        // Echo the plaintext claimToken back to the client so they can
+        // persist it. The server stores only the hash on disk; the
+        // plaintext we just verified came in via body.claimToken.
+        claimToken: body.claimToken,
+      }
       if (createdCredential) resp.user = createdCredential
       return c.json(resp)
     })
@@ -1222,7 +1405,7 @@ export const hostCommand = defineCommand({
         return c.json({ error: "Forbidden" }, 403)
       }
       const newToken = randomBytes(32).toString("hex")
-      record.claimToken = newToken
+      record.claimTokenHash = sha256Hex(newToken)
       record.updatedAt = new Date().toISOString()
       writeRecord(record)
       try {
@@ -1246,6 +1429,7 @@ export const hostCommand = defineCommand({
       controlDb.deleteAnonymous(deployId)
       controlDb.deleteQuota(deployId)
       controlDb.removeDomainsForDeploy(deployId)
+      invalidatePublicListing()
       const actor = auth.kind === "claim" ? "__claim_token__" : actorFor(auth.user, false)
       audit(actor, "deploy.delete", { targetDeployId: deployId })
       return c.json({ ok: true })
@@ -1542,6 +1726,21 @@ export const hostCommand = defineCommand({
         if (Buffer.byteLength(body, "utf-8") > MAX_FILE_BYTES) {
           return c.json({ error: `File exceeds ${MAX_FILE_BYTES} bytes` }, 413)
         }
+        // Same rule as the bulk source endpoint: package.json can't define
+        // npm lifecycle scripts (preinstall/install/postinstall/prepare/
+        // postprepare). Caught here too because IDE single-file PUT bypasses
+        // validateSourceFiles entirely.
+        if (sub === "package.json") {
+          const lifecycle = findPackageJsonLifecycleScripts(body)
+          if (!lifecycle.ok) {
+            return c.json(
+              {
+                error: `package.json defines npm lifecycle script(s) ${lifecycle.offending.join(", ")} which are not allowed on hosted deploys`,
+              },
+              400,
+            )
+          }
+        }
         fs.mkdirSync(path.dirname(abs), { recursive: true })
         fs.writeFileSync(abs, body)
         r.record.updatedAt = new Date().toISOString()
@@ -1619,10 +1818,16 @@ export const hostCommand = defineCommand({
           200,
         )
       }
-      r.record.updatedAt = new Date().toISOString()
+      const buildNow = new Date().toISOString()
+      const buildDuration = Date.now() - start
+      r.record.updatedAt = buildNow
       r.record.isPublic = result.meta.isPublic
       r.record.title = result.meta.title
       r.record.description = result.meta.description
+      r.record.bundleBytes = result.bundleBytes
+      r.record.bundleHash = result.bundleHash
+      r.record.lastBuiltAt = buildNow
+      r.record.lastBuildDurationMs = buildDuration
       writeRecord(r.record)
       try {
         await forkDeploy(r.record)
@@ -1632,13 +1837,13 @@ export const hostCommand = defineCommand({
       const buildActor = authUser(c)
       audit(buildActor ? actorFor(buildActor, false) : "__claim_token__", "deploy.rebuild", {
         targetDeployId: deployId,
-        metadata: { bundleBytes: result.bundleBytes, durationMs: Date.now() - start },
+        metadata: { bundleBytes: result.bundleBytes, durationMs: buildDuration },
       })
       return c.json({
         ok: true,
         bundleBytes: result.bundleBytes,
         bundleHash: result.bundleHash,
-        durationMs: Date.now() - start,
+        durationMs: buildDuration,
       })
     })
 
@@ -1675,7 +1880,23 @@ export const hostCommand = defineCommand({
     // Unauthenticated. Lists deploys whose capsule declared `public: true` in
     // its last build. Anonymous deploys are excluded — there's no "owner" to
     // attribute them to, and they have a short retention window.
+    // In-memory cache for the unauthenticated public-deploys listing.
+    // Without this each anonymous GET stats every deploy on disk + queries
+    // SQLite per id — trivially weaponized as a request-amplification DOS.
+    // 10s TTL is short enough that newly-public deploys appear quickly but
+    // absorbs request floods. Invalidated by `invalidatePublicListing()`
+    // wherever a deploy is created/updated/deleted or its visibility flips.
+    let publicListingCache: { body: { deploys: unknown[] }; expiresAt: number } | null = null
+    const PUBLIC_LISTING_TTL_MS = 10_000
+    function invalidatePublicListing() {
+      publicListingCache = null
+    }
+
     app.get("/api/public-deploys", (c) => {
+      const now = Date.now()
+      if (publicListingCache && publicListingCache.expiresAt > now) {
+        return c.json(publicListingCache.body)
+      }
       const out: Array<{
         deployId: string
         url: string
@@ -1700,7 +1921,9 @@ export const hostCommand = defineCommand({
         })
       }
       out.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
-      return c.json({ deploys: out })
+      const body = { deploys: out }
+      publicListingCache = { body, expiresAt: now + PUBLIC_LISTING_TTL_MS }
+      return c.json(body)
     })
 
     // Returns all source files for a public capsule as { path: content } so
@@ -2506,11 +2729,28 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
             const deployId = ideMatch[1]
             const record = readRecord(deployId)
             if (!record) return c.json({ error: "Unknown deploy" }, 404)
+            // Send the last successful build (if any) so the IDE's
+            // diagnostics panel renders `✓ Built · 17.4 KB` on first mount
+            // instead of "No build yet". Older records that pre-date these
+            // fields simply omit `lastBuild` and the IDE falls back to the
+            // unbuilt placeholder, which is honest for them.
+            const lastBuild =
+              typeof record.bundleBytes === "number" &&
+              typeof record.bundleHash === "string" &&
+              typeof record.lastBuiltAt === "string"
+                ? {
+                    bundleBytes: record.bundleBytes,
+                    bundleHash: record.bundleHash,
+                    builtAt: record.lastBuiltAt,
+                    durationMs: record.lastBuildDurationMs ?? 0,
+                  }
+                : null
             const bootstrap = JSON.stringify({
               deployId,
               deployUrl: record.url,
               publicHost,
               controlUrl: apiUrl,
+              lastBuild,
             })
             const html = ideHtml.replace("__POND_IDE__BOOTSTRAP__", `window.__POND_IDE = ${bootstrap}`)
             return c.html(html)

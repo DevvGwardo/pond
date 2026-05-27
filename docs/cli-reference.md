@@ -139,14 +139,23 @@ Snapshot a running capsule: declared tables, registered sockets, AI providers, b
 
 **When to use:** confirming a deploy actually has the schema and config you expect, or debugging "is the env var set?" without rolling logs.
 
+**Target resolution** (since 0.3.10):
+
+1. `--local` → force `localhost:<port>`.
+2. Explicit `target` positional (URL or `deployId`) → use it.
+3. `.pond/deploy.json` exists with `url` + `claimToken` → **auto-target the hosted deploy**, prints `→ Inspecting <url>  (pass --local for the dev server)` to stderr.
+4. Otherwise → fall back to `localhost:<port>`.
+
 **Key flags:**
 
-- `--port <n>` — local capsule port (default `3000`).
-- `--target <deployId-or-url>` — inspect a hosted deploy instead of localhost. If you pass a `deployId` that matches `.pond/deploy.json`, the saved `claimToken` is sent automatically.
+- `--port <n>` — localhost port (default `3000`).
+- `--local` — force localhost even if `.pond/deploy.json` points at a remote.
+- `<target>` (positional) — `deployId`, full URL, or omit to auto-target.
 
 ```sh
-pond inspect                                  # local dev / start
-pond inspect --target https://abc.pond.run    # remote
+pond inspect                                  # auto: remote if deployed, else local
+pond inspect --local                          # force local dev server
+pond inspect https://abc.pond.run             # explicit remote
 ```
 
 ---
@@ -157,18 +166,21 @@ Stream stdout/stderr from a running capsule via Server-Sent Events.
 
 **When to use:** watching live activity, or tailing a hosted deploy you just shipped.
 
-**Key flags:** same `--port` / `--target` as `pond inspect`.
+**Target resolution:** identical to `pond inspect` — `--local` forces localhost, an explicit `--target` wins, otherwise auto-target the deploy in `.pond/deploy.json`, falling back to `localhost:<port>`.
 
 ```sh
-pond logs
-pond logs --target https://abc.pond.run
+pond logs                                     # auto-target the hosted deploy
+pond logs --local                             # force local dev server
+pond logs --target https://abc.pond.run       # explicit remote
 ```
+
+A friendly hint fires if the chosen target refuses (`ECONNREFUSED`) — no more raw undici stack traces when the dev server isn't running.
 
 ---
 
 ## pond db
 
-Inspect, dump, back up, and restore the capsule's SQLite database. All subcommands take `--port <n>` (default `3000`) and `--target <deployId-or-url>` to point at a hosted deploy.
+Inspect, dump, back up, and restore the capsule's SQLite database. Same target-resolution rules as `pond inspect` apply to every subcommand: `--local` to force localhost, explicit `--target`, or auto-target from `.pond/deploy.json`. Bare `pond db` now prints help cleanly (exit 0) instead of erroring with `No command specified`.
 
 ### `pond db list`
 
@@ -217,7 +229,7 @@ Clone a public capsule from a deploy URL. Pulls the source tree from `/api/deplo
 - `--name <name>` — override the local directory name (default: derived from the capsule title or deployId).
 - `--api <url>` — control-plane base URL. When omitted, the API base is derived from the deploy URL — but only `pond.run` / `*.pond.run` hosts are trusted by default. Pass `--api` explicitly to fork from any other control plane.
 - `--no-git` — skip `git init`.
-- `--allow-scripts` — permit forking a `package.json` that defines npm lifecycle scripts (`preinstall`/`install`/`postinstall`/`prepare`/`postprepare`). **Off by default**: those scripts run automatically on `npm install` and are an RCE vector if the upstream is hostile. The CLI refuses the fork and names the offending scripts unless this flag is passed.
+- `--allow-scripts` — permit forking a `package.json` that defines npm lifecycle scripts (`preinstall`/`install`/`postinstall`/`prepare`/`postprepare`). **Off by default**: those scripts run automatically on `npm install` and are an RCE vector if the upstream is hostile. The CLI refuses the fork and names the offending scripts unless this flag is passed. Since 0.3.11, the control plane also refuses to **accept** uploads that contain these scripts (POST/PUT `/api/deploys`, single-file PUT `/files/package.json`) — `--allow-scripts` only matters when forking from an older control plane or a self-hosted one that pre-dates the upload-side check.
 
 ```sh
 pond fork https://abc.pond.run
@@ -228,23 +240,30 @@ pond fork https://abc.pond.run --name my-copy
 
 ## pond claim
 
-Take ownership of an anonymous hosted deploy by presenting its `claimToken`. Optionally creates a new user in the same step. For the friendliest first-time path, use [`pond signup`](#pond-signup) — it wraps this command.
+Take ownership of an anonymous hosted deploy by presenting its `claimToken`, or reattach an already-owned deploy from a new machine. For the friendliest first-time path, use [`pond signup`](#pond-signup) — it wraps this command.
 
-**When to use:** cross-machine ownership transfer (the `claimToken` is portable), or any time you want explicit control over the claim step. For day-one "I just deployed and want an account," prefer `pond signup`.
+**Authorization rules:**
+
+- **Anonymous deploy** (just created via `pond deploy`, not yet claimed): a valid `claimToken` is sufficient. Pair with `--signup <name>` to mint a new user in the same call, or with `Authorization: Bearer <token>` (an existing user account) to claim under that account.
+- **Already-claimed deploy** (since 0.3.9): the `claimToken` alone is **not** sufficient to transfer ownership. The caller's bearer token must belong to the current owner or be an admin. Attempts by a different user are rejected with `403 "Deploy already owned by another account"` and audited as `deploy.claim_denied`. This closes the takeover path where a leaked `claimToken` could dispossess the original owner.
+
+**When to use:** cross-machine ownership reattachment (the legitimate owner re-targeting from a new laptop), or explicit control over the claim step. For day-one "I just deployed and want an account," prefer `pond signup`.
 
 **Key flags:**
 
 - Reads `.pond/deploy.json` from the cwd for `deployId`, `apiUrl`, and `claimToken`.
-- `--signup <name>` — create a new user with this username and claim in one shot.
+- `--signup <name>` — create a new user with this username and claim in one shot (anonymous deploys only).
 - `--api <url>` — override the API URL from `.pond/deploy.json`.
 
 ```sh
 pond deploy
-# → deployId: abc123…, claimToken: tk_…
+# → deployId: abc123…, claimToken: tk_…  (one-time disclosure; server stores only the hash)
 
-pond claim                          # uses .pond/deploy.json (existing user)
-pond claim --signup devgwardo       # claim + create user
+pond claim                          # uses .pond/deploy.json (existing user, must be current owner)
+pond claim --signup devgwardo       # claim + create user (anonymous deploys only)
 ```
+
+Since 0.3.10, the control plane stores only `sha256(claimToken)` on disk — a backup leak no longer yields usable tokens. The plaintext lives only in your local `.pond/deploy.json` (mode `0o600`) and is returned once at create time.
 
 ---
 
@@ -411,7 +430,7 @@ pond token rotate --api https://pond.example.com
 
 ## pond domains
 
-Manage custom subdomains for hosted deploys.
+Manage custom subdomains for hosted deploys. Bare `pond domains` now prints help cleanly (exit 0) instead of erroring with `No command specified`.
 
 ### `pond domains list --api <url>`
 
@@ -437,7 +456,7 @@ pond domains remove my-app --api https://pond.example.com
 
 ## pond env
 
-Manage env vars on a hosted deploy. They're written to the deploy's `.env.pond.server` and re-read on the next worker boot.
+Manage env vars on a hosted deploy. They're written to the deploy's `.env.pond.server` and re-read on the next worker boot. Bare `pond env` now prints help cleanly (exit 0) instead of erroring with `No command specified`.
 
 ### `pond env list [deployId] --api <url>`
 

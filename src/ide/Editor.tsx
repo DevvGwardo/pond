@@ -53,8 +53,16 @@ export function CodeMirrorEditor(props: EditorProps) {
         keymap.of([saveBinding, indentWithTab, ...defaultKeymap, ...historyKeymap, ...searchKeymap]),
         EditorView.lineWrapping,
         EditorView.theme({
-          "&": { height: "100%", fontSize: "13px" },
-          ".cm-scroller": { fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" },
+          // `maxHeight: 100%` caps the editor at its host's height so content
+          // overflow happens INSIDE `.cm-scroller` (which gets the scrollbar)
+          // instead of growing the editor past the host and being clipped by
+          // the host's `overflow-hidden` — the previous failure mode that
+          // made long files unscrollable in the IDE.
+          "&": { height: "100%", maxHeight: "100%", fontSize: "13px" },
+          ".cm-scroller": {
+            fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+            overflow: "auto",
+          },
         }),
         oneDark,
         languageExtension(props.path),

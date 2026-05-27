@@ -2,6 +2,7 @@ import { defineCommand } from "citty"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { saveCredentials } from "../host/credentials.js"
+import { deployRecordPath, readDeployRecord } from "../host/deploy-record.js"
 
 // Friendly first-account flow: `pond signup <name>` creates an account on the
 // control plane and claims the local anonymous deploy under it. Equivalent to
@@ -26,19 +27,14 @@ export const signupCommand = defineCommand({
   },
   async run({ args }) {
     const cwd = process.cwd()
-    const deployFile = path.join(cwd, ".pond", "deploy.json")
+    const deployFile = deployRecordPath(cwd)
 
-    if (!fs.existsSync(deployFile)) {
+    const deploy = readDeployRecord(cwd)
+    if (!deploy) {
       console.error(
         `No .pond/deploy.json in this directory. Run \`pond deploy\` first to create an anonymous deploy, then \`pond signup <name>\` to claim it under your account.`,
       )
       process.exit(1)
-    }
-
-    const deploy = JSON.parse(fs.readFileSync(deployFile, "utf-8")) as {
-      deployId?: string
-      apiUrl?: string
-      claimToken?: string
     }
 
     const apiArg = typeof args.api === "string" && args.api ? args.api : ""

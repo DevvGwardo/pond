@@ -1,7 +1,8 @@
 import { defineCommand } from "citty"
 import * as fs from "node:fs"
-import * as path from "node:path"
 import { loadCredentials, saveCredentials } from "../host/credentials.js"
+import { deployRecordPath, readDeployRecord } from "../host/deploy-record.js"
+import * as path from "node:path"
 
 export const claimCommand = defineCommand({
   meta: {
@@ -22,22 +23,13 @@ export const claimCommand = defineCommand({
   },
   async run({ args }) {
     const cwd = process.cwd()
-    const deployFile = path.join(cwd, ".pond", "deploy.json")
+    const deployFile = deployRecordPath(cwd)
     const envFile = path.join(cwd, ".env.pond.server")
 
-    if (!fs.existsSync(deployFile)) {
+    const deploy = readDeployRecord(cwd)
+    if (!deploy) {
       console.error("No .pond/deploy.json found. Run `pond deploy --api ...` first.")
       process.exit(1)
-    }
-
-    const deploy = JSON.parse(fs.readFileSync(deployFile, "utf-8")) as {
-      deployId?: string
-      apiUrl?: string
-      claimToken?: string
-      url?: string
-      timestamp?: string
-      publicInspect?: boolean
-      claimedAt?: string
     }
 
     const apiUrl = (typeof args.api === "string" && args.api ? args.api.replace(/\/$/, "") : undefined) ?? deploy.apiUrl
@@ -92,10 +84,16 @@ export const claimCommand = defineCommand({
       user?: { username: string; token: string }
     }
 
+    // Trust the apiUrl we sent to, not the server's echoed remote.apiUrl —
+    // some control planes echo back their internal bind address (e.g.
+    // http://0.0.0.0:8787), which would poison every subsequent CLI read of
+    // .pond/deploy.json. The user reached this server through `apiUrl`;
+    // that's the authoritative public address. Mirror of the same rule in
+    // deploy.ts and signup.ts.
     let savedUsername: string | null = null
     if (remote.user) {
       const saved = saveCredentials({
-        apiUrl: remote.apiUrl,
+        apiUrl,
         username: remote.user.username,
         token: remote.user.token,
         isAdmin: false,
@@ -113,7 +111,7 @@ export const claimCommand = defineCommand({
           ...deploy,
           deployId: remote.deployId,
           url: remote.url,
-          apiUrl: remote.apiUrl,
+          apiUrl,
           claimToken: remote.claimToken,
           publicInspect: remote.publicInspect,
           claimedAt: remote.claimedAt,

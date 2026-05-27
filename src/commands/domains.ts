@@ -1,18 +1,20 @@
-import { defineCommand } from "citty"
-import * as fs from "node:fs"
-import * as path from "node:path"
+import { defineCommand, renderUsage } from "citty"
 import { loadCredentials } from "../host/credentials.js"
+import { readDeployRecord } from "../host/deploy-record.js"
+
+// See dbCommand for why this pattern exists. citty's default behavior on a
+// bare subcommand-group invocation is to print help AND exit 1 with "ERROR
+// No command specified" — this gives users a clean exit 0 with help instead.
+async function showGroupUsageIfBare({ args, cmd }: { args: Record<string, unknown>; cmd: unknown }) {
+  const positionals = (args._ as string[] | undefined) ?? []
+  if (positionals.length > 0) return
+  console.log(await renderUsage(cmd as Parameters<typeof renderUsage>[0]))
+}
 
 function readLocalDeploy(): { deployId: string; apiUrl: string } | null {
-  const file = path.join(process.cwd(), ".pond", "deploy.json")
-  if (!fs.existsSync(file)) return null
-  try {
-    const j = JSON.parse(fs.readFileSync(file, "utf-8")) as { deployId?: string; apiUrl?: string }
-    if (j.deployId && j.apiUrl) return { deployId: j.deployId, apiUrl: j.apiUrl }
-    return null
-  } catch {
-    return null
-  }
+  const j = readDeployRecord(process.cwd())
+  if (j?.deployId && j?.apiUrl) return { deployId: j.deployId, apiUrl: j.apiUrl }
+  return null
 }
 
 function resolveApi(args: any): string {
@@ -40,6 +42,7 @@ export const domainsCommand = defineCommand({
     name: "domains",
     description: "Manage custom subdomains for hosted deploys",
   },
+  run: showGroupUsageIfBare,
   subCommands: {
     list: defineCommand({
       meta: { name: "list" },

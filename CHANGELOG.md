@@ -5,6 +5,110 @@ Versioning: [Semver](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.15] - 2026-05-27
+
+### Fixed
+
+- **`pond-mcp`'s `tail_logs` tool now works against remote deploys.** Two compounding bugs left it returning errors for every remote deploy. (1) The handler cast `/api/deploys` to `Array<...>`, but the endpoint returns `{ deploys: [...] }` — so `deploys.find` threw `is not a function` before any network call was made. (2) Even with that fixed, the handler talked directly to `<deploy>/__pond/logs` with `Authorization: Bearer <accountToken>`, but the deploy gates `/__pond/*` on `x-pond-claim-token` only, and the control plane has stored just the sha256 of the claim token since 0.3.10 — so MCP could not produce a valid claim-token header and got `403` against every remote deploy.
+
+  Fix: add a bearer-authed control-plane proxy `GET /api/deploys/:deployId/logs?limit=N` that owner-checks the caller and reads the deploy's recent log entries from `<deployDir>/.pond/logs.ndjson` directly (worker cwd is the deploy dir, so that file is the same on-disk replay buffer the SSE endpoint serves from on initial connect). Simplifies the MCP `tail_logs` handler to a single call against the new endpoint — no more SSE accumulation loop, no more cross-component auth-scheme mismatch. Caps `limit` at 500. Five regression tests in `host.test.mjs` cover the happy path, missing-bearer 401, non-owner 403, anonymous-deploy 403, and the limit cap.
+
+## [0.3.14] - 2026-05-27
+
+### Fixed
+
+- **`pond login` now reuses the saved credential when no `--token` is provided** instead of dumping the "Need a token to attach. Three paths forward" error wall — which fired even when `~/.pond/credentials.json` already had a perfectly valid token for the target apiUrl. After `pond signup` saves credentials (or the user already authenticated on another flow), `pond login`, `pond login --username devvgwardo`, and `pond login --api https://pond.run` all just surface `Already logged in as devvgwardo (admin) at https://pond.run  (credential from ~/.pond/credentials.json)` and exit 0, after validating the token against `GET /api/users/me`. The validate-and-show flow handles three distinct response classes:
+  - **Server returns 2xx** → "Already logged in as …" with the live username/admin status.
+  - **Server returns 401/403/404** → token has been rotated or revoked; refuse to silently use it, exit 1 with a precise message naming the saved username and the rotation path.
+  - **Network failure / transient 5xx** → trust the saved credential, exit 0, but print `Saved credential for … at … (could not validate — network error (…))` so the user sees why no live confirmation happened. Without this fallback, offline use of `pond login` would be a regression vs the pre-0.3.13 error-wall behavior.
+
+  If `--username` is passed and doesn't match the saved one (the common typo case — e.g. `DevGwardo` vs the actual `devvgwardo`), the error spells out the case-sensitivity rule and shows both the "use the saved one" and "attach as the new name with --token" paths. No more guessing what to paste.
+
+### Security
+
+- **Red team verified.** Reviewed the new credential-reuse flow against 15 vectors (co-tenant on shared OS, error-message info leak, malicious local process triggering validate calls as a rotation oracle, DNS/MITM, plain-HTTP `--api`, hostile control-plane response injection, malformed `credentials.json`, case-confused `--api`, `--username` mismatch causing validation against the wrong user, silent overwrite on validation failure, cross-apiUrl confusion, concurrent-run race, offline fallback, network MITM, 0.3.7-era bind-address echo). No new attack surface — every concern either pre-dates the change, requires capabilities (file read on 0o600 `credentials.json`, network MITM) the attacker would use to bypass `pond login` entirely, or is handled correctly by the code (silent on parse failure, no save on validation failure, no cross-apiUrl mixing, 401 vs network-error distinction). Regression tests (3 new in `host.test.mjs`) cover the happy path, the offline fallback, and the server-401 refusal.
+
+## [0.3.12] - 2026-05-27
+
+### Docs
+
+- **Doc-only release.** Reships the 0.3.11 doc updates that landed after the 0.3.11 tarball was published. `docs/cli-reference.md` was updated to document the new target-resolution rules in `pond inspect` / `pond logs` / `pond db` (`--local` flag, auto-target from `.pond/deploy.json`, fallback to localhost), the re-claim authorization rule introduced in 0.3.9 (already-claimed deploys reject cross-owner reattachment), the bare-invocation help on `pond db` / `pond env` / `pond domains`, and the upload-side rejection added to `pond fork`'s `--allow-scripts` description. `docs/llms-full.txt` regenerated (~42.4 KB). Ships these to npm and to `pond host`'s `/docs/<slug>.md` agent route. No code changes vs 0.3.11.
+
+## [0.3.11] - 2026-05-27
+
+### Security
+
+- **Source uploads with `package.json` lifecycle scripts are rejected (supply-chain hardening).** Pond builds capsules via esbuild and never runs `npm install` on the host, so `preinstall` / `install` / `postinstall` / `prepare` / `postprepare` scripts in a capsule's `package.json` have no legitimate purpose on a hosted deploy. They DO have a malicious purpose: any forker who later runs `npm install` (which `pond fork` instructs them to do as the next step) silently executes those scripts. Pre-0.3.11 the host accepted them on every upload path. Now `validateSourceFiles` (POST /api/deploys, PUT /api/deploys/:id) and the single-file PUT `/files/package.json` both reject with `400 "package.json defines npm lifecycle script(s) <list> which are not allowed on hosted deploys"`. The download-side `pond fork` check (which has had `--allow-scripts` since 0.3.x) stays in place and now shares the validator via `src/host/package-json-validation.ts`. Regression tests cover both upload paths.
+- **`extractCapsuleMeta` no longer flips a deploy public from a `public: true` token inside a comment or string literal.** `host.ts:extractCapsuleMeta` regex-scanned raw source for `\bpublic\s*:\s*true\b`, so a docstring or commented-out example like `// capsule({ public: true })` was enough to mark a private deploy as public — exposing source via `/gallery` and `/api/public-deploys/:id/source`. Source is now run through a small lexer (`stripJsStringsAndComments`) that blanks out single/double/backtick strings and `//` / `/* */` comments before the regex scan. Lengths and newlines are preserved so source positions don't drift if a caller ever inspects them. Regex literals are not handled (rare in capsule code; failing closed on the public flag is the right bias). Title and description still match on raw source — their values live inside strings, and the worst case there is cosmetic gallery display, not a privacy issue. Regression test covers a private deploy whose source mentions `public: true` only in a comment and a string constant — must NOT appear in `/api/public-deploys` and `/api/public-deploys/:id/source` must 404.
+
+### Internal
+
+- **New module `src/host/package-json-validation.ts`.** Exports `LIFECYCLE_SCRIPTS` and `findPackageJsonLifecycleScripts(text)`. Used by host upload paths (POST/PUT bulk + single-file PUT) and by `pond fork` (download side). Single source of truth for the forbidden script names so upload and download checks can't drift.
+- **Exported `stripJsStringsAndComments`** (lives in `host.ts`) for use in future server-source scanners that need to ignore lexically-uninteresting text.
+
+### Docs
+
+- **`docs/cli-reference.md` brought up to date for 0.3.7–0.3.11.** Patched `pond inspect`, `pond logs`, and `pond db` to document the new target-resolution rules (`--local`, auto-target from `.pond/deploy.json`, fallback to localhost) introduced in 0.3.10. Patched `pond claim` to spell out the authorization rule introduced in 0.3.9 (already-claimed deploys reject cross-owner reattachment; only the current owner / admin / host token can re-target). Noted that `pond db` / `pond env` / `pond domains` now exit 0 with help when invoked bare. Updated `pond fork --allow-scripts` description to mention the upload-side rejection added in 0.3.11. `docs/llms-full.txt` regenerates from these files during `npm run build` — grew 39.9 KB → 42.4 KB. `docs/api-reference.md` and `docs/operations.md` required no updates (they never described the claim-token-at-rest shape).
+
+## [0.3.10] - 2026-05-27
+
+### Security
+
+- **Claim tokens are no longer stored in plaintext on the control plane.** `HostedDeployRecord` now holds `claimTokenHash` (sha256 hex) instead of `claimToken`. The plaintext is generated at create time, returned to the client ONCE in the `POST /api/deploys` response, and discarded server-side. The worker no longer receives the plaintext either — it gets `inspectSecretHash` and compares `sha256(headerToken) === storedHash` in timing-safe form. A backup leak of `deploys/*/deploy.json` no longer yields usable tokens. Existing pre-0.3.10 records auto-migrate the first time `readRecord` touches them: the plaintext `claimToken` is hashed in place and removed. `writeRecord` also strips any stray `claimToken` field defense-in-depth. The `start-server.ts:canInspect` check used a non-timing-safe `===` against plaintext — replaced with `timingSafeEqual` over sha256 buffers. Regression test in `test/host.test.mjs` asserts that the on-disk record holds only the hash and matches `sha256(plaintext)`.
+
+### Added
+
+- **`pond logs` / `pond inspect` / `pond db` auto-target the hosted deploy in `.pond/deploy.json` when no target is given.** Previously these defaulted to `http://localhost:3000` even when the cwd held a deployed project, so running `pond logs` from a deployed directory either silently hit an unrelated process listening on :3000 or hung waiting for output from the wrong server. Now the resolution order is: `--local` flag (force localhost) → explicit `target` arg → `.pond/deploy.json` with `url`+`claimToken` (auto-remote) → localhost fallback. When auto-remote fires, a one-line `→ Targeting <url>  (pass --local for the dev server)` is printed to stderr so the user always knows which deploy they're talking to. `pond logs` also picked up the friendly ECONNREFUSED handling that `pond inspect` had since 0.3.7.
+
+### Fixed
+
+- **`pond db`, `pond env`, `pond domains` no longer exit 1 with `ERROR No command specified` when invoked bare.** citty throws `E_NO_COMMAND` for subcommand groups without a `run` handler, which prints help AND exits 1. Each parent now has a tiny `run` that detects the bare-invocation case (no positional in `args._`) and renders usage cleanly via citty's `renderUsage`, then exits 0. `pond db list`, `pond env set KEY=val`, etc. continue to dispatch normally because the parent's run becomes a no-op when a subcommand was matched.
+
+### Internal
+
+- **`/api/public-deploys` listing is cached in-memory for 10 seconds.** Without auth, every request previously walked `deploys/`, stat'd each subdirectory, parsed each `deploy.json`, and queried SQLite per id — a trivial request-amplification DOS at scale. The cache is invalidated by every `writeRecord` call (covering create / update / rebuild / claim / rotate / quota changes) and by the DELETE handler, so newly-public deploys appear within at most 10 seconds of going live.
+- **PUT `/api/deploys/:id` response no longer echoes the plaintext `claimToken`** (since the server doesn't have it anymore). `pond deploy`'s re-upload path falls back to `localRecord?.claimToken` when the response omits it — the token hasn't rotated, the local copy is still valid. The claim and create flows continue to surface the plaintext to the client as a one-time disclosure.
+
+## [0.3.9] - 2026-05-27
+
+### Security
+
+- **CVE-class: Account takeover via re-claim with a stolen claim token.** `POST /api/deploys/:deployId/claim` allowed any authenticated user to transfer ownership of an already-claimed deploy to themselves by sending `{claimToken: T}` + their own bearer auth. Because the claim token is persisted plaintext on disk (`record.claimToken`), in every cwd's `.pond/deploy.json`, in `~/.pond/credentials.json`, in IDE URL fragments like `pond.run/ide/<id>#token=T`, and pre-0.3.9 in the browser's `localStorage`, a casual leak (screenshare, shoulder-surf, browser-share, backup exfil) was sufficient to dispossess the original owner silently — at which point the attacker had full env/code/db access. The fix in `src/commands/host.ts:1201-1226` rejects cross-owner re-claim with `403 "Deploy already owned by another account"`. The legitimate "I'm reattaching to my own deploy from a new machine" flow is preserved because the bearer in that case belongs to the existing owner. Admins and the host token can still reattach. Denied attempts are audited as `deploy.claim_denied` with `reason: not_current_owner_or_admin`. Regression test in `test/host.test.mjs` (case #9, attacker rejected) and the non-regression sanity (case #10, owner allowed).
+- **IDE no longer persists claim tokens in `localStorage` indefinitely.** `src/ide/App.tsx` previously wrote the IDE token (whether bearer or claim) to `window.localStorage` under `pond-ide-token:<deployId>`, where it survived browser restarts forever. Claim tokens — the bearer-equivalent secret that grants edit access to anonymous deploys and (pre-0.3.9 server) could take ownership of a claimed one — now live in `sessionStorage` so they're cleared when the tab closes. Bearer tokens (signed-in users, rotatable via `pond token`) stay in `localStorage` for UX. On load, both stores are checked, so a tab opened with `#token=…` still works for the lifetime of the tab; reopening requires the URL link again. Stale `localStorage` entries from pre-0.3.9 sessions are cleared on first write of a same-keyed token.
+
+### Fixed
+
+- **Claimed-from-anonymous deploys no longer inherit the smaller ANONYMOUS_QUOTA forever.** When a user signed up via `pond signup` to claim their first anonymous deploy, `controlDb.setQuota(deployId, ANONYMOUS_QUOTA)` was set at deploy creation (16 MB bundle / 128 MB disk / 128 MB memory) and never reset, so the deploy stayed at 4× less than the default quota for its lifetime. `host.ts:1202` now also calls `controlDb.setQuota(deployId, DEFAULT_QUOTA)` inside the `if (anon)` claim path. Existing claimed-from-anon records will catch up the next time their quota is touched (or operators can `pond host` admin-reset).
+
+## [0.3.8] - 2026-05-27
+
+### Fixed
+
+- **IDE editor pane now scrolls when files are longer than the viewport.** `CodeMirrorEditor`'s theme set `&: { height: "100%" }` but no `maxHeight`, so on a long source file `.cm-editor` grew past its host container — and the host's `overflow-hidden` clipped the bottom of the editor silently without exposing any scrollbar. Users hitting the bottom of a tall file just saw it stop rendering with no way to scroll. Added `maxHeight: "100%"` to the editor root and explicit `overflow: "auto"` on `.cm-scroller` so overflow happens inside the scroller (which gets the scrollbar) instead of growing the editor past the host.
+- **IDE diagnostics tile no longer lies about whether a deploy was built.** Opening `/ide/<deployId>` on an already-deployed project (for example after a page reload, or arriving from `pond claim`'s "IDE:" link) always showed `No build yet. Hit Deploy to compile.` — even with the live preview rendering the running app directly below it. Root cause: `lastBuild` in `src/ide/App.tsx` was purely in-tab React state initialized to `null`; the IDE never asked the server "is there already a current bundle?". On the server side, `bundleBytes` and `bundleHash` were returned by the three build handlers but never written to the persisted `HostedDeployRecord`, so the bootstrap couldn't have surfaced them anyway. Fixed end-to-end: four new fields persisted on the record (`bundleBytes`, `bundleHash`, `lastBuiltAt`, `lastBuildDurationMs`), written from all three build paths (`POST /api/deploys`, `PUT /api/deploys/:id`, `POST /api/deploys/:id/build`); IDE bootstrap (`/ide/:deployId` HTML) now ships a `lastBuild` block in `window.__POND_IDE`; `App.tsx` seeds its `useState<BuildResult>` from that bootstrap so the diagnostics tile renders `✓ Built · 17.4 KB` on first mount. Old records that pre-date these fields ship `lastBuild: null` and the IDE falls back to the previous "No build yet" placeholder — that's honest, not a bug, and self-corrects on the next rebuild.
+
+### Internal
+
+- **`HostedDeployRecord` gains `bundleBytes`, `bundleHash`, `lastBuiltAt`, `lastBuildDurationMs`.** All four are optional so existing records on disk continue to parse cleanly. Same pattern the record already uses for `title` / `description` / `isPublic` (introduced in 0.3.6).
+- **Diagnostics tile suppresses `in 0ms` for seeded records.** When `durationMs` is zero (a pre-fields record that has `bundleBytes` but no duration), the tile renders `✓ Built · 17.4 KB` instead of `✓ Built in 0ms · 17.4 KB`. Fresh builds always carry a real duration and render `in 142ms` as before.
+- **1 new regression test** in `test/host.test.mjs`: spoofs the Host header to hit the bare-domain `/ide/<deployId>` route on a freshly-created deploy and asserts the bootstrap HTML embeds `lastBuild.{bundleBytes, bundleHash, builtAt, durationMs}` with sensible values (bundleBytes > 0, bundleHash is a 64-char hex string, builtAt non-empty, durationMs ≥ 0). Full suite: 117 tests pass.
+
+## [0.3.7] - 2026-05-27
+
+### Fixed
+
+- **`pond claim` no longer poisons `.pond/deploy.json` with the control plane's bind address.** When pond.run's control plane returns a successful claim response it echoes its internal bind address (`http://0.0.0.0:8787`) in `remote.apiUrl`. 0.3.0–0.3.6 wrote that echoed value back into `.pond/deploy.json` and into `~/.pond/credentials.json` (when `--signup` created a new user via `claim`), breaking every follow-up command that reads `apiUrl` — `pond signup`, `pond dashboard`, `pond env list`, `pond logs`, `pond db`, `pond domains`, and `pond deploy`'s re-upload path all failed with `ECONNREFUSED 0.0.0.0:8787` until the file was hand-edited. `pond deploy` and `pond signup` already had the fix; `pond claim` was missed. The repaired handler now trusts the apiUrl the user actually reached and ignores `remote.apiUrl`, with a comment cross-referencing the sibling commands. The same rule is enforced via a single helper (`readDeployRecord`) so future writers can't drift.
+- **`pond inspect`'s friendly "is the capsule running?" hint now fires on dual-stack localhost.** 0.3.5 added a one-line hint when `fetch` failed with `ECONNREFUSED`, but the check only walked `err.cause.code`. Node's undici uses happy-eyeballs against `localhost` (IPv4 + IPv6 in parallel); when both families refuse, `err.cause` is an `AggregateError`, not a single Error with `.code`. The friendly branch was skipped and the raw `internalConnectMultiple` stack still leaked through. Replaced the inline check with `hasErrorCode(err, "ECONNREFUSED")`, a bounded-depth walker that recurses into `err.cause` and `AggregateError.errors[]`. Self-referential cause chains are handled.
+
+### Added
+
+- **Self-heal for `.pond/deploy.json` files corrupted by the 0.3.0–0.3.6 `pond claim` bug.** Users who already ran `pond claim` on a previous version have a poisoned `apiUrl` that won't fix itself just by upgrading. Every reader now goes through `readDeployRecord(cwd)`, which detects the specific corruption signature (apiUrl host in `{0.0.0.0, ::}` AND `url` is a non-loopback public host from which a control plane can be derived by stripping one DNS label) and silently rewrites apiUrl in place, persisting the repair to disk and printing a one-line note (`pond: repaired .pond/deploy.json (apiUrl http://0.0.0.0:8787 → https://pond.run)`). The trigger conditions are narrow enough that legitimate self-hosted setups bound to `0.0.0.0` over a loopback URL are not touched.
+
+### Internal
+
+- **New module `src/host/deploy-record.ts`.** Single source of truth for reading and repairing `.pond/deploy.json`. Exports `readDeployRecord(cwd)`, `healDeployRecord(record)`, `deriveControlPlaneFromDeployUrl(url)`, and `deployRecordPath(cwd)`. Nine commands (`claim`, `signup`, `dashboard`, `env`, `logs`, `db`, `domains`, `deploy`, `inspect`) were converted from inline `JSON.parse(fs.readFileSync(...))` to the helper. Net diff is smaller, not larger.
+- **16 new test cases** in `test/deploy-record.test.mjs` covering `deriveControlPlaneFromDeployUrl`, every branch of `healDeployRecord` (positive heal for IPv4/IPv6 sentinels, negative for healthy / loopback / no-parent-zone / missing-field records), `readDeployRecord` persistence/no-op behavior, and `hasErrorCode` for flat causes, AggregateError, miss cases, and self-referential loops. Full suite: 116 tests pass.
+
 ## [0.3.6] - 2026-05-27
 
 ### Added

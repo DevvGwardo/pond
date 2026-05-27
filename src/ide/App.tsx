@@ -17,9 +17,22 @@ import {
 } from "./api.js"
 import { CodeMirrorEditor } from "./Editor.js"
 
+interface BootstrapLastBuild {
+  bundleBytes: number
+  bundleHash: string
+  builtAt: string
+  durationMs: number
+}
+
 declare global {
   interface Window {
-    __POND_IDE?: { deployId: string; deployUrl: string; publicHost: string; controlUrl: string }
+    __POND_IDE?: {
+      deployId: string
+      deployUrl: string
+      publicHost: string
+      controlUrl: string
+      lastBuild?: BootstrapLastBuild | null
+    }
   }
 }
 
@@ -27,6 +40,7 @@ interface Bootstrap {
   deployId: string
   deployUrl: string
   publicHost: string
+  lastBuild: BootstrapLastBuild | null
 }
 
 function readBootstrap(): Bootstrap {
@@ -35,9 +49,10 @@ function readBootstrap(): Bootstrap {
       deployId: window.__POND_IDE.deployId,
       deployUrl: window.__POND_IDE.deployUrl,
       publicHost: window.__POND_IDE.publicHost,
+      lastBuild: window.__POND_IDE.lastBuild ?? null,
     }
   }
-  return { deployId: "", deployUrl: "", publicHost: "" }
+  return { deployId: "", deployUrl: "", publicHost: "", lastBuild: null }
 }
 
 interface TokenInfo {
@@ -61,23 +76,44 @@ function tokenKey(deployId: string): string {
   return `pond-ide-token:${deployId}`
 }
 
+// Anonymous claim tokens live in sessionStorage (cleared on tab close) because
+// they are bearer-like secrets that the holder can use to take the deploy.
+// User bearer tokens stay in localStorage so signed-in users don't have to
+// re-paste a bearer every time they re-open the tab — a leaked bearer can be
+// rotated via `pond token`, but a leaked claim token cannot be rotated and
+// (pre-0.3.9 server) could be used to dispossess the current owner.
+function storageFor(info: TokenInfo): Storage {
+  return info.isClaim ? window.sessionStorage : window.localStorage
+}
+
 function loadStoredToken(deployId: string): TokenInfo | null {
-  try {
-    const raw = window.localStorage.getItem(tokenKey(deployId))
-    if (!raw) return null
-    return JSON.parse(raw)
-  } catch {
-    return null
+  for (const store of [window.sessionStorage, window.localStorage]) {
+    try {
+      const raw = store.getItem(tokenKey(deployId))
+      if (raw) return JSON.parse(raw) as TokenInfo
+    } catch {
+      // continue
+    }
   }
+  return null
 }
 
 function storeToken(deployId: string, info: TokenInfo) {
+  // Write to the appropriate store, and clear the other one so we don't end
+  // up with a stale claim token in localStorage from a pre-0.3.9 session.
   try {
-    window.localStorage.setItem(tokenKey(deployId), JSON.stringify(info))
+    storageFor(info).setItem(tokenKey(deployId), JSON.stringify(info))
+  } catch {}
+  try {
+    const otherStore = info.isClaim ? window.localStorage : window.sessionStorage
+    otherStore.removeItem(tokenKey(deployId))
   } catch {}
 }
 
 function clearStoredToken(deployId: string) {
+  try {
+    window.sessionStorage.removeItem(tokenKey(deployId))
+  } catch {}
   try {
     window.localStorage.removeItem(tokenKey(deployId))
   } catch {}
@@ -225,7 +261,16 @@ function Workspace({ bootstrap, token, onSignOut }: WorkspaceProps) {
   const [contents, setContents] = useState<Record<string, { saved: string; draft: string }>>({})
   const [loadError, setLoadError] = useState<string | null>(null)
   const [building, setBuilding] = useState(false)
-  const [lastBuild, setLastBuild] = useState<BuildResult | null>(null)
+  const [lastBuild, setLastBuild] = useState<BuildResult | null>(() =>
+    bootstrap.lastBuild
+      ? {
+          ok: true,
+          bundleBytes: bootstrap.lastBuild.bundleBytes,
+          bundleHash: bootstrap.lastBuild.bundleHash,
+          durationMs: bootstrap.lastBuild.durationMs,
+        }
+      : null,
+  )
   const [previewKey, setPreviewKey] = useState(0)
   const [showPreview, setShowPreview] = useState(true)
   const [rightTab, setRightTab] = useState<"preview" | "logs" | "env">("preview")
@@ -1019,7 +1064,9 @@ function DiagnosticsSection({ lastBuild, building }: { lastBuild: BuildResult | 
         <div class="text-xs text-zinc-600">No build yet. Hit Deploy to compile.</div>
       ) : lastBuild.ok ? (
         <div class="rounded border border-emerald-900 bg-emerald-950 px-2 py-1.5 text-xs text-emerald-300">
-          ✓ Built in {lastBuild.durationMs}ms · {(lastBuild.bundleBytes / 1024).toFixed(1)} KB
+          ✓ Built
+          {lastBuild.durationMs > 0 ? ` in ${lastBuild.durationMs}ms` : ""} ·{" "}
+          {(lastBuild.bundleBytes / 1024).toFixed(1)} KB
         </div>
       ) : (
         <ul class="space-y-1 text-xs">
