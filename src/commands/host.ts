@@ -161,6 +161,18 @@ export const hostCommand = defineCommand({
       description: "Hostname used in returned deploy URLs (default localhost)",
       default: "localhost",
     },
+    "public-base-url": {
+      type: "string",
+      description:
+        "Full external base URL incl. scheme (e.g. https://pond.example.com). When set, deploy URLs use this " +
+        "scheme/host/port instead of http://<public-host>:<port>. Use behind a TLS-terminating proxy.",
+      default: "",
+    },
+    "abuse-email": {
+      type: "string",
+      description: "Contact email shown on the abuse / security pages (e.g. abuse@example.com)",
+      default: "",
+    },
     "data-dir": {
       type: "string",
       default: ".pond-host",
@@ -196,6 +208,19 @@ export const hostCommand = defineCommand({
     const hostname = typeof args.host === "string" && args.host ? args.host : "127.0.0.1"
     const publicHost =
       typeof args["public-host"] === "string" && args["public-host"] ? args["public-host"] : "localhost"
+    const publicBaseUrlRaw =
+      process.env.POND_PUBLIC_BASE_URL ?? (typeof args["public-base-url"] === "string" ? args["public-base-url"] : "")
+    let publicBaseUrl: URL | null = null
+    if (publicBaseUrlRaw) {
+      try {
+        publicBaseUrl = new URL(publicBaseUrlRaw.replace(/\/$/, ""))
+      } catch {
+        console.error(`[pond host] invalid --public-base-url: ${publicBaseUrlRaw}`)
+        process.exit(1)
+      }
+    }
+    const abuseEmail =
+      process.env.POND_ABUSE_EMAIL ?? (typeof args["abuse-email"] === "string" ? args["abuse-email"] : "") ?? ""
     const dataDir = path.resolve(process.cwd(), typeof args["data-dir"] === "string" ? args["data-dir"] : ".pond-host")
     const deploysDir = path.join(dataDir, "deploys")
     const tokenFile = path.join(dataDir, "host-token")
@@ -248,8 +273,25 @@ export const hostCommand = defineCommand({
     }
 
     function urlFor(deployId: string): string {
+      if (publicBaseUrl) {
+        const portPart = publicBaseUrl.port ? `:${publicBaseUrl.port}` : ""
+        return `${publicBaseUrl.protocol}//${deployId}.${publicBaseUrl.hostname}${portPart}`
+      }
       return `http://${deployId}.${publicHost}:${port}`
     }
+
+    function urlForCustomDomain(subdomain: string): string {
+      if (publicBaseUrl) {
+        const portPart = publicBaseUrl.port ? `:${publicBaseUrl.port}` : ""
+        return `${publicBaseUrl.protocol}//${subdomain}.${publicBaseUrl.hostname}${portPart}`
+      }
+      return `http://${subdomain}.${publicHost}:${port}`
+    }
+
+    // The external hostname (no scheme/port). Used to detect "bare-domain"
+    // requests (the landing / abuse / security pages) vs subdomain requests
+    // (proxy to a deploy).
+    const externalHost = (publicBaseUrl?.hostname ?? publicHost).toLowerCase()
 
     function deployDirFor(deployId: string) {
       return path.join(deploysDir, deployId)
@@ -1241,7 +1283,7 @@ export const hostCommand = defineCommand({
           subdomain: sub,
           deployId: body.deployId,
           createdAt: row?.createdAt,
-          url: `http://${sub}.${publicHost}:${port}`,
+          url: urlForCustomDomain(sub),
         },
         201,
       )
@@ -1287,7 +1329,164 @@ export const hostCommand = defineCommand({
       return domain?.deployId ?? null
     }
 
+    function isBareDomainRequest(hostHeader: string | undefined): boolean {
+      if (!hostHeader) return false
+      const bare = hostHeader.toLowerCase().split(":")[0]
+      return bare === externalHost || bare === `www.${externalHost}`
+    }
+
+    function landingHtml(): string {
+      const baseUrl = publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http://${publicHost}:${port}`
+      const installCmd = "npm install -g pondsh"
+      const deployCmd = `pond deploy --api ${baseUrl}`
+      return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Pond — agent-native full-stack TypeScript capsules</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: #09090b;
+    color: #e4e4e7;
+    font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    line-height: 1.55;
+  }
+  main { max-width: 720px; margin: 0 auto; padding: 64px 24px 96px; }
+  h1 { font-size: 44px; margin: 0 0 12px; letter-spacing: -0.02em; }
+  .lede { color: #a1a1aa; font-size: 18px; margin: 0 0 36px; }
+  h2 { font-size: 18px; margin: 40px 0 12px; color: #d4d4d8; font-weight: 600; }
+  pre {
+    background: #18181b;
+    border: 1px solid #27272a;
+    border-radius: 10px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    margin: 0 0 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 13.5px;
+  }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+  a { color: #a5f3fc; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  footer { color: #71717a; font-size: 13px; margin-top: 64px; border-top: 1px solid #27272a; padding-top: 20px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>pond</h1>
+  <p class="lede">Agent-native full-stack TypeScript capsules. Scaffold a small app, define schema + handlers in one file, deploy anonymously.</p>
+
+  <h2>1. Install the CLI</h2>
+  <pre><code>${installCmd}</code></pre>
+
+  <h2>2. Scaffold a capsule</h2>
+  <pre><code>pond new my-capsule
+cd my-capsule</code></pre>
+
+  <h2>3. Deploy anonymously</h2>
+  <pre><code>${deployCmd}</code></pre>
+  <p>You'll get a URL and a one-time claim token. The deploy lives for 7 days unless you claim it to an account.</p>
+
+  <h2>4. Claim to keep it</h2>
+  <pre><code>pond claim --signup &lt;username&gt;</code></pre>
+
+  <p style="margin-top:36px;">
+    <a href="https://github.com/DevvGwardo/pond">Source on GitHub</a> ·
+    <a href="/abuse">Abuse policy</a> ·
+    <a href="/.well-known/security.txt">Security</a>
+  </p>
+
+  <footer>
+    <p>Anonymous deploys are sandboxed and rate-limited. The host operator may terminate any deploy at any time without notice. See the <a href="/abuse">abuse policy</a> for the full terms.</p>
+  </footer>
+</main>
+</body>
+</html>`
+    }
+
+    function abuseHtml(): string {
+      const contact = abuseEmail ? `<a href="mailto:${abuseEmail}">${abuseEmail}</a>` : "the host operator"
+      return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Pond — Abuse Policy</title>
+<style>
+  body { margin: 0; background: #09090b; color: #e4e4e7; font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; line-height: 1.6; }
+  main { max-width: 720px; margin: 0 auto; padding: 48px 24px 96px; }
+  h1 { font-size: 32px; margin: 0 0 24px; }
+  h2 { font-size: 18px; margin: 28px 0 8px; color: #d4d4d8; }
+  a { color: #a5f3fc; }
+  p, li { color: #d4d4d8; }
+  ul { padding-left: 22px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Abuse policy</h1>
+  <p>Pond hosts arbitrary user-submitted capsules anonymously. To keep this service usable, the following are prohibited:</p>
+  <ul>
+    <li>Phishing, credential harvesting, or impersonation of any third party.</li>
+    <li>Malware distribution, drive-by downloads, exploit kits.</li>
+    <li>Cryptocurrency mining, brute force / credential stuffing, or any abuse of compute resources.</li>
+    <li>Spam, scams, illegal content under the jurisdiction of the host operator.</li>
+    <li>Targeted harassment or doxing.</li>
+  </ul>
+  <h2>Reporting abuse</h2>
+  <p>Email ${contact} with the deploy URL and a description of the issue. The host operator may take down any deploy at any time without notice. There is no SLA.</p>
+  <h2>Service limits</h2>
+  <p>Anonymous deploys: 16 MB bundle, 128 MB disk, 128 MB memory, 1 hour grace before termination, 7 days before deletion, 5 deploys per IP per hour. Outbound network access is restricted at the JavaScript layer for anonymous deploys.</p>
+  <h2>No warranty</h2>
+  <p>Pond is provided as-is. The host operator makes no guarantees of availability, durability, or fitness for any purpose. Do not deploy production workloads.</p>
+  <p style="margin-top:36px;"><a href="/">← back</a></p>
+</main>
+</body>
+</html>`
+    }
+
+    function securityTxt(): string {
+      const contact = abuseEmail
+        ? `Contact: mailto:${abuseEmail}`
+        : "Contact: (set POND_ABUSE_EMAIL to populate this field)"
+      const oneYearOut = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+      return `${contact}
+Expires: ${oneYearOut}T00:00:00.000Z
+Preferred-Languages: en
+Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http://${publicHost}:${port}`}/.well-known/security.txt
+`
+    }
+
     app.all("*", async (c) => {
+      // Bare-domain requests (no subdomain) — serve the marketing / policy pages.
+      if (isBareDomainRequest(c.req.header("host"))) {
+        const url = new URL(c.req.url)
+        if (c.req.method === "GET") {
+          if (url.pathname === "/" || url.pathname === "") {
+            return c.html(landingHtml())
+          }
+          if (url.pathname === "/abuse") {
+            return c.html(abuseHtml())
+          }
+          if (url.pathname === "/.well-known/security.txt") {
+            return new Response(securityTxt(), {
+              status: 200,
+              headers: { "content-type": "text/plain; charset=utf-8" },
+            })
+          }
+          if (url.pathname === "/robots.txt") {
+            return new Response("User-agent: *\nAllow: /\n", {
+              status: 200,
+              headers: { "content-type": "text/plain; charset=utf-8" },
+            })
+          }
+        }
+        return c.json({ error: "Not found" }, 404)
+      }
+
       const deployId = deployIdFromHost(c.req.header("host"))
       if (!deployId) return c.json({ error: "Not found" }, 404)
       const entry = runningChildren.get(deployId)
@@ -1333,6 +1532,12 @@ export const hostCommand = defineCommand({
     process.on("SIGTERM", shutdown)
 
     console.log(`\n  pond host control plane running at http://${hostname}:${port}`)
+    if (publicBaseUrl) {
+      console.log(`  public base URL: ${publicBaseUrl.toString().replace(/\/$/, "")}`)
+    }
+    if (!abuseEmail) {
+      console.log(`  ⚠ no --abuse-email set — security.txt / abuse page will be unhelpful for a public deploy.`)
+    }
     console.log(`  host token (bootstrap / recovery): ${hostToken}`)
     console.log(`  bootstrap first admin: pond login --api ${apiUrl} --username <name>`)
     if (anonymousEnabled) {

@@ -188,6 +188,85 @@ test("no subdomain → 404 from control plane", async () => {
   assert.equal(res.status, 404)
 })
 
+test("bare domain GET / serves landing page", async () => {
+  // publicHost in this test suite is "localhost" — a request to 127.0.0.1
+  // arrives with Host: 127.0.0.1:<port>, which is NOT the bare external host.
+  // So we craft a request with Host: localhost:<port> to exercise the
+  // landing-page branch.
+  const http = await import("node:http")
+  const result = await new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: "127.0.0.1",
+        port,
+        method: "GET",
+        path: "/",
+        headers: { host: `${publicHost}:${port}` },
+      },
+      (res) => {
+        let data = ""
+        res.on("data", (c) => (data += c))
+        res.on("end", () => resolve({ status: res.statusCode, body: data, ct: res.headers["content-type"] }))
+      },
+    )
+    req.on("error", reject)
+    req.end()
+  })
+  assert.equal(result.status, 200)
+  assert.match(result.ct, /text\/html/)
+  assert.match(result.body, /pond deploy --api/)
+})
+
+test("bare domain GET /abuse serves abuse policy", async () => {
+  const http = await import("node:http")
+  const result = await new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: "127.0.0.1",
+        port,
+        method: "GET",
+        path: "/abuse",
+        headers: { host: `${publicHost}:${port}` },
+      },
+      (res) => {
+        let data = ""
+        res.on("data", (c) => (data += c))
+        res.on("end", () => resolve({ status: res.statusCode, body: data }))
+      },
+    )
+    req.on("error", reject)
+    req.end()
+  })
+  assert.equal(result.status, 200)
+  assert.match(result.body, /Abuse policy/)
+})
+
+test("bare domain GET /.well-known/security.txt serves a valid file", async () => {
+  const http = await import("node:http")
+  const result = await new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: "127.0.0.1",
+        port,
+        method: "GET",
+        path: "/.well-known/security.txt",
+        headers: { host: `${publicHost}:${port}` },
+      },
+      (res) => {
+        let data = ""
+        res.on("data", (c) => (data += c))
+        res.on("end", () => resolve({ status: res.statusCode, body: data, ct: res.headers["content-type"] }))
+      },
+    )
+    req.on("error", reject)
+    req.end()
+  })
+  assert.equal(result.status, 200)
+  assert.match(result.ct, /text\/plain/)
+  assert.match(result.body, /Contact:/)
+  assert.match(result.body, /Expires:/)
+})
+
 test("wrong user token → 401 on POST /api/deploys", async () => {
   const fs = await import("node:fs")
   const bundleBase64 = fs.readFileSync(bundlePath).toString("base64")
