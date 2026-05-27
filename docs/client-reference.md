@@ -12,9 +12,14 @@ The client is Preact-based. `render` and `h` are re-exported from Preact for con
 
 ---
 
-## `useQuery<T>(name): { data, isLoading, error, refetch }`
+## `useQuery<T, TArgs>(name, ...args): { data, isLoading, error, refetch }`
 
-Subscribes to a server query mounted at `GET /api/query/<name>`. Re-fetches whenever any mutation completes.
+Subscribes to a server query mounted at `/api/query/<name>`. Re-fetches whenever any mutation completes.
+
+- Called with no args → `GET /api/query/<name>` (cacheable, visible as a plain GET in the network panel).
+- Called with args → `POST /api/query/<name>` with `{ args: [...] }`. Args are spread into the server handler.
+
+Args are part of the cache key — changing them refetches automatically.
 
 ```tsx
 function MessageList() {
@@ -28,6 +33,12 @@ function MessageList() {
       ))}
     </ul>
   )
+}
+
+// Parameterized read — the server handler is `query((ctx, id: string) => ...)`.
+function Post({ id }: { id: string }) {
+  const { data: post } = useQuery<Post, [string]>("postById", id)
+  return post ? <article>{post.body}</article> : null
 }
 ```
 

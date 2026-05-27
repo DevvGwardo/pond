@@ -167,15 +167,29 @@ In dev, entries stream over SSE on `/__pond/logs` and stay in memory (most recen
 
 ## Handlers
 
-### `query<T>(handler: (ctx: CapsuleContext) => T | Promise<T>): QueryHandler<T>`
+### `query<TArgs, TResult>(handler: (ctx: CapsuleContext, ...args: TArgs) => TResult | Promise<TResult>): QueryHandler<TArgs, TResult>`
 
-Wraps a function to mark it as a query. Mounted at `GET /api/query/:name`. The return value is JSON-serialized.
+Wraps a function to mark it as a query. The return value is JSON-serialized. Mounted at two routes:
+
+- `GET /api/query/:name` — for the no-arg case. Cacheable, shows up cleanly in the network panel.
+- `POST /api/query/:name` with `{ args: [...] }` — for parameterized reads. Arguments are spread into the handler.
 
 ```ts
 queries: {
+  // No-arg read — hit via useQuery("messages").
   messages: query((ctx) => ctx.db.messages.orderBy("createdAt", "desc").all()),
+
+  // Parameterized read — hit via useQuery("postById", id).
+  postById: query((ctx, id: string) => ctx.db.posts.get(id)),
+
+  // Multiple args work the same way — useQuery("search", keyword, limit).
+  search: query((ctx, keyword: string, limit: number) =>
+    ctx.db.posts.where("title", keyword).limit(limit).all()
+  ),
 }
 ```
+
+On the client, `useQuery(name, ...args)` picks GET when called with no args and POSTs when args are passed. Args are part of the cache key, so changing them refetches automatically.
 
 ### `mutation<TArgs, TResult>(handler: (ctx: CapsuleContext, ...args: TArgs) => TResult | Promise<TResult>): MutationHandler<TArgs, TResult>`
 

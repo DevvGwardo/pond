@@ -93,7 +93,10 @@ export interface CapsuleContext {
 
 // ── Handlers ───────────────────────────────────────────────
 
-export type QueryHandler<TResult = any> = (ctx: CapsuleContext) => TResult | Promise<TResult>
+export type QueryHandler<TArgs extends any[] = any[], TResult = any> = (
+  ctx: CapsuleContext,
+  ...args: TArgs
+) => TResult | Promise<TResult>
 
 export type MutationHandler<TArgs extends any[] = any[], TResult = any> = (
   ctx: CapsuleContext,
@@ -209,7 +212,9 @@ export function capsule(def: {
   }
 }
 
-export function query<T>(handler: QueryHandler<T>): QueryHandler<T> {
+export function query<TArgs extends any[], TResult>(
+  handler: QueryHandler<TArgs, TResult>,
+): QueryHandler<TArgs, TResult> {
   return handler
 }
 

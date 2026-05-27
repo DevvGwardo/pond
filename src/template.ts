@@ -63,19 +63,20 @@ Every table auto-gets \`id\` (uuid), \`createdAt\`, \`updatedAt\`. Column helper
 
 \`ctx.db.<table>\` exposes \`.all() / .get(id) / .where(col, val) / .orderBy(col, dir) / .limit(n) / .insert({...}) / .update(id, {...}) / .delete(id)\`.
 
-Queries return data and re-run reactively on the client. Mutations take \`(ctx, ...args)\` — the args after \`ctx\` are the wire payload.
+Queries and mutations both take \`(ctx, ...args)\` — the args after \`ctx\` are the wire payload. Queries re-run reactively on the client whenever a mutation completes.
 
 \`ctx.ai\`, \`ctx.blob\` and per-route \`rateLimit\` are first-class — see https://pond.run/docs/api-reference.md.
 
 ### client/index.tsx
 
-Preact + Tailwind classes (use \`class\` not \`className\`). Use \`useQuery<T>(name)\` and \`useMutation<Args, Ret>(name)\` from \`"pond/client"\`.
+Preact + Tailwind classes (use \`class\` not \`className\`). Use \`useQuery<T, Args>(name, ...args)\` and \`useMutation<Args, Ret>(name)\` from \`"pond/client"\`. Queries can take args — pass them after the name and they're spread into the server handler.
 
 \`\`\`tsx
 import { useMutation, useQuery } from "pond/client"
 
-export function App() {
-  const { data, isLoading } = useQuery<Item[]>("items")
+export function App({ itemId }: { itemId: string }) {
+  const { data, isLoading } = useQuery<Item[]>("items")               // no-arg: GET
+  const { data: item } = useQuery<Item, [string]>("itemById", itemId) // arg'd: POST { args: [itemId] }
   const [addItem] = useMutation<[body: string], void>("addItem")
   return <main>…</main>
 }

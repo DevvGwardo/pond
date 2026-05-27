@@ -346,3 +346,75 @@ test("`pond new --generate` without an agent fails cleanly + leaves AGENTS.md", 
     assert.ok(existsSync(path.join(projDir, "AGENTS.md")), "AGENTS.md should be left for retry")
   }
 })
+
+test("parameterized query: POST /api/query/:name spreads args; GET still works for 0-arg", async () => {
+  const parent = tmp("pond-qargs-")
+  const serverSrc = `import { capsule, mutation, query, string, table } from "pond/server"
+export default capsule({
+  schema: { items: table({ name: string() }) },
+  queries: {
+    all: query((ctx) => ctx.db.items.all()),
+    byName: query((ctx, name) => ctx.db.items.where("name", name).all()),
+    echo: query((ctx, a, b) => ({ a, b, user: ctx.auth.userId })),
+  },
+  mutations: { add: mutation((ctx, name) => ctx.db.items.insert({ name })) },
+})`
+  const dir = await scaffoldCapsule(parent, "cap-qargs", serverSrc)
+  const port = await pickFreePort()
+  const proc = spawnDev(dir, port)
+  try {
+    await waitForUrl(`http://127.0.0.1:${port}/api/query/all`)
+
+    // Seed two rows via the existing mutation route.
+    for (const name of ["alpha", "beta"]) {
+      const r = await fetch(`http://127.0.0.1:${port}/api/mutation/add`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ args: [name] }),
+      })
+      assert.equal(r.status, 200, `seed ${name} should succeed`)
+    }
+
+    // GET still serves the 0-arg query unchanged.
+    const allRes = await fetch(`http://127.0.0.1:${port}/api/query/all`)
+    assert.equal(allRes.status, 200)
+    const all = await allRes.json()
+    assert.equal(all.length, 2)
+
+    // POST with { args } reaches the single-arg query.
+    const byNameRes = await fetch(`http://127.0.0.1:${port}/api/query/byName`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ args: ["alpha"] }),
+    })
+    assert.equal(byNameRes.status, 200)
+    const byName = await byNameRes.json()
+    assert.equal(byName.length, 1)
+    assert.equal(byName[0].name, "alpha")
+
+    // Multiple args spread positionally.
+    const echoRes = await fetch(`http://127.0.0.1:${port}/api/query/echo`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ args: ["hello", 42] }),
+    })
+    assert.equal(echoRes.status, 200)
+    const echo = await echoRes.json()
+    assert.equal(echo.a, "hello")
+    assert.equal(echo.b, 42)
+    assert.equal(typeof echo.user, "string")
+
+    // Missing / non-array args body is treated as zero args (no crash).
+    const noArgsRes = await fetch(`http://127.0.0.1:${port}/api/query/echo`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    })
+    assert.equal(noArgsRes.status, 200)
+    const noArgs = await noArgsRes.json()
+    assert.equal(noArgs.a, undefined)
+    assert.equal(noArgs.b, undefined)
+  } finally {
+    await killProc(proc)
+  }
+})

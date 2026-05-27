@@ -721,7 +721,18 @@ function createRuntimeFromDefinition(
         if (denied) return denied
         return wrap(`query:${name}`, async () => {
           const ctx = await buildContext(c.req.raw.headers.get("cookie"))
-          const result = await handler(ctx)
+          const result = await (handler as any)(ctx)
+          return c.json(result)
+        })
+      })
+      app.post(`/api/query/${name}`, async (c) => {
+        const denied = enforceRateLimit(c, name)
+        if (denied) return denied
+        return wrap(`query:${name}`, async () => {
+          const ctx = await buildContext(c.req.raw.headers.get("cookie"))
+          const body = (await c.req.json().catch(() => ({}))) as { args?: unknown }
+          const args = Array.isArray(body.args) ? body.args : []
+          const result = await (handler as any)(ctx, ...args)
           return c.json(result)
         })
       })

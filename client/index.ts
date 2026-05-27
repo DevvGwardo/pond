@@ -32,8 +32,9 @@ async function refetchAllQueries() {
   await Promise.all(jobs)
 }
 
-export function useQuery<T = any>(
+export function useQuery<T = any, TArgs extends any[] = []>(
   name: string,
+  ...args: TArgs
 ): {
   data: T | undefined
   isLoading: boolean
@@ -44,15 +45,19 @@ export function useQuery<T = any>(
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<Error | null>(null)
   const refetchRef = useRef<() => Promise<void>>(async () => {})
+  const argsKey = args.length === 0 ? "" : JSON.stringify(args)
 
   useEffect(() => {
     let cancelled = false
+    const hasArgs = argsKey !== ""
 
     const refetch = async () => {
       setIsLoading(true)
       setError(null)
       try {
-        const next = await apiFetch<T>(`/api/query/${name}`)
+        const next = hasArgs
+          ? await apiFetch<T>(`/api/query/${name}`, { method: "POST", body: argsKey ? `{"args":${argsKey}}` : "{}" })
+          : await apiFetch<T>(`/api/query/${name}`)
         if (!cancelled) setData(next)
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err : new Error("Unknown query error"))
@@ -69,7 +74,7 @@ export function useQuery<T = any>(
       cancelled = true
       unsubscribe()
     }
-  }, [name])
+  }, [name, argsKey])
 
   return {
     data,
