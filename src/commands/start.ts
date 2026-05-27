@@ -33,18 +33,6 @@ export const startCommand = defineCommand({
       deployId?: string
     }
 
-    if (deploy.apiUrl && deploy.url && !deploy.bundlePath) {
-      console.error(`This capsule was deployed to a hosted control plane (${deploy.apiUrl}).`)
-      console.error(`It's already running at ${deploy.url}.`)
-      console.error(``)
-      console.error(`\`pond start\` only serves OFFLINE bundles built with \`pond deploy --local\`.`)
-      console.error(`To build an offline bundle and start it locally, run:`)
-      console.error(``)
-      console.error(`  pond deploy --local`)
-      console.error(`  pond start`)
-      process.exit(1)
-    }
-
     const bundlePath = deploy.bundlePath ?? path.join(cwd, ".pond", "deploy-bundle.mjs")
     const clientPath = deploy.clientPath ?? path.join(cwd, ".pond", "client.html")
     const port =
@@ -53,6 +41,17 @@ export const startCommand = defineCommand({
         : parseInt(process.env.PORT ?? "", 10) || deploy.port || 3000
 
     if (!fs.existsSync(bundlePath)) {
+      if (deploy.apiUrl && deploy.url) {
+        console.error(`This capsule was deployed to a hosted control plane (${deploy.apiUrl}).`)
+        console.error(`It's already running at ${deploy.url}.`)
+        console.error(``)
+        console.error(`\`pond start\` only serves offline bundles built with \`pond deploy --local\`.`)
+        console.error(`To build an offline bundle and start it locally, run:`)
+        console.error(``)
+        console.error(`  pond deploy --local`)
+        console.error(`  pond start`)
+        process.exit(1)
+      }
       console.error("No deploy bundle found. Run `pond deploy --local` first to build an offline bundle.")
       process.exit(1)
     }
