@@ -5,6 +5,17 @@ Versioning: [Semver](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-05-27
+
+### Fixed
+
+- **`prepare` script no longer crashes production installs.** 0.3.2 added `"prepare": "husky"` for the dev pre-commit hook. The `prepare` lifecycle runs on every `npm install`/`npm ci` for the package itself, including `npm ci --omit=dev` in the Dockerfile and any from-source build. Husky is a devDep, so when devDeps are omitted, `husky` isn't on PATH and the prepare script fails with `sh: 1: husky: not found` (npm error 127) — taking down the entire install. The fix is the canonical husky-9 pattern: `"prepare": "husky || true"`. The `|| true` lets prepare no-op when husky isn't installed (production) while still setting up hooks when it is (development). Discovered the hard way during the upgrade of pond.run — the 0.3.2 Docker build failed, and the running site was down for several minutes.
+
+### Internal
+
+- **`deploy/upgrade.sh` fails fast if tunnel config is missing.** New preflight check refuses to start if `deploy/.env`, `deploy/cloudflared/config.yml`, or `deploy/cloudflared/credentials.json` is absent. These are gitignored secrets — losing them mid-upgrade puts the stack into a `cloudflared` crash loop and the public domain returns Cloudflare error 1033. Failing before `docker compose down` keeps the running stack up while the operator restores the missing files. Same incident discovery as the husky fix.
+- **`deploy/README.md` gains a "Tunnel config recovery" section** documenting how to rebuild `config.yml` + `credentials.json` from scratch — including the non-obvious bit that the credentials file needs `chmod 644` because the `cloudflared` container runs as a non-root user.
+
 ## [0.3.2] - 2026-05-27
 
 ### Added

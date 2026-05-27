@@ -1,6 +1,6 @@
 {
   "name": "pondsh",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Agent-native CLI and runtime for building small full-stack TypeScript apps. Hosted Lakebed-style anonymous deploys included.",
   "license": "MIT",
   "homepage": "https://github.com/DevvGwardo/pond#readme",
@@ -38,7 +38,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "prepublishOnly": "npm run build",
-    "prepare": "husky"
+    "prepare": "husky || true"
   },
   "dependencies": {
     "@hono/node-server": "^2.0.4",

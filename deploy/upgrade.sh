@@ -38,6 +38,23 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 1
 fi
 
+# Bail before touching anything if the tunnel config is missing — the compose
+# stack will start with cloudflared in a crash loop and pond.run goes 502.
+# `cloudflared/config.yml` and `cloudflared/credentials.json` are gitignored
+# (they contain secrets) and have to be present locally. See deploy/README.md.
+MISSING=()
+for f in deploy/cloudflared/config.yml deploy/cloudflared/credentials.json deploy/.env; do
+  [[ -f "$f" ]] || MISSING+=("$f")
+done
+if [[ ${#MISSING[@]} -gt 0 ]]; then
+  echo "missing required local file(s):" >&2
+  for f in "${MISSING[@]}"; do echo "  - $f" >&2; done
+  echo "" >&2
+  echo "These are gitignored secrets. Restore them before upgrading. See" >&2
+  echo "deploy/README.md → 'Tunnel config recovery' for how to recreate them." >&2
+  exit 1
+fi
+
 if [[ "$SKIP_PULL" -eq 0 ]]; then
   echo "→ git fetch origin"
   git fetch --quiet origin
