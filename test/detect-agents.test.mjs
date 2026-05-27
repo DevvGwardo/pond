@@ -25,15 +25,88 @@ test("detectHermes finds the `hermes` CLI on PATH", async () => {
 })
 
 test("detectHermes returns null when `hermes` isn't on PATH", async () => {
-  const result = await detectHermes({ which: () => null })
+  const result = await detectHermes({ which: () => null, existsSync: () => false })
   assert.equal(result, null)
 })
 
 test("detectHermes ignores `hermes-agent` (chat REPL, not a usable CLI)", async () => {
   const result = await detectHermes({
     which: (cmd) => (cmd === "hermes-agent" ? "/opt/homebrew/bin/hermes-agent" : null),
+    existsSync: () => false,
   })
   assert.equal(result, null)
+})
+
+test("detectHermes finds Windows `pip install --user` install when not on PATH", async () => {
+  const home = "C:\\Users\\Admin"
+  const env = {
+    APPDATA: "C:\\Users\\Admin\\AppData\\Roaming",
+    LOCALAPPDATA: "C:\\Users\\Admin\\AppData\\Local",
+  }
+  const target = path.win32.join(env.APPDATA, "Python", "Python311", "Scripts", "hermes.exe")
+  const result = await detectHermes({
+    platform: "win32",
+    homedir: () => home,
+    env,
+    which: () => null,
+    existsSync: (p) => p === target,
+  })
+  assert.equal(result?.name, "hermes")
+  assert.equal(result?.detail, target)
+})
+
+test("detectHermes finds Windows pipx install when not on PATH", async () => {
+  const home = "C:\\Users\\Admin"
+  const env = {
+    APPDATA: "C:\\Users\\Admin\\AppData\\Roaming",
+    LOCALAPPDATA: "C:\\Users\\Admin\\AppData\\Local",
+  }
+  const target = path.win32.join(env.LOCALAPPDATA, "pipx", "venvs", "hermes-agent", "Scripts", "hermes.exe")
+  const result = await detectHermes({
+    platform: "win32",
+    homedir: () => home,
+    env,
+    which: () => null,
+    existsSync: (p) => p === target,
+  })
+  assert.equal(result?.detail, target)
+})
+
+test("detectHermes finds Windows conda install when not on PATH", async () => {
+  const home = "C:\\Users\\Admin"
+  const env = { APPDATA: "C:\\X", LOCALAPPDATA: "C:\\Y" }
+  const target = path.win32.join(home, "miniconda3", "Scripts", "hermes.exe")
+  const result = await detectHermes({
+    platform: "win32",
+    homedir: () => home,
+    env,
+    which: () => null,
+    existsSync: (p) => p === target,
+  })
+  assert.equal(result?.detail, target)
+})
+
+test("detectHermes returns null on Windows when neither PATH nor known dirs match", async () => {
+  const result = await detectHermes({
+    platform: "win32",
+    homedir: () => "C:\\Users\\Admin",
+    env: { APPDATA: "C:\\X", LOCALAPPDATA: "C:\\Y" },
+    which: () => null,
+    existsSync: () => false,
+  })
+  assert.equal(result, null)
+})
+
+test("detectHermes finds Unix pipx fallback when not on PATH", async () => {
+  const home = "/home/dev"
+  const target = path.posix.join(home, ".local", "pipx", "venvs", "hermes-agent", "bin", "hermes")
+  const result = await detectHermes({
+    platform: "linux",
+    homedir: () => home,
+    which: () => null,
+    existsSync: (p) => p === target,
+  })
+  assert.equal(result?.detail, target)
 })
 
 test("detectClaude finds ~/.claude when present", async () => {

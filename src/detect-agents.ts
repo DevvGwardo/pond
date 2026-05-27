@@ -14,6 +14,8 @@ interface DetectionDeps {
   homedir?: () => string
   existsSync?: typeof fs.existsSync
   which?: (cmd: string) => string | null
+  platform?: NodeJS.Platform
+  env?: NodeJS.ProcessEnv
 }
 
 function defaultWhich(cmd: string): string | null {
@@ -36,15 +38,58 @@ function defaultWhich(cmd: string): string | null {
 export async function detectHermes(deps: DetectionDeps = {}): Promise<DetectedAgent | null> {
   // Hermes ships a real CLI (`hermes`) with a non-interactive one-shot flag
   // (`hermes -z "<prompt>"`). That's what we drive — same shape as claude /
-  // codex below. The previous HTTP-probe approach pointed at the wrong port
-  // (8642 is the messaging gateway, the OpenAI-compatible proxy lives on
-  // 8645) and assumed an unauthenticated endpoint that doesn't exist.
-  // `hermes-agent` is intentionally NOT considered: it's a chat REPL shim
-  // that ignores subcommands and runs a hard-coded demo query.
+  // codex below. `hermes-agent` is intentionally NOT considered: it's a
+  // chat REPL shim that ignores subcommands and runs a hard-coded demo query.
   const which = deps.which ?? defaultWhich
-  const cli = which("hermes")
-  if (cli) return { name: "hermes", detail: cli }
+  const onPath = which("hermes")
+  if (onPath) return { name: "hermes", detail: onPath }
+
+  // PATH miss is common on Windows: `pip install hermes-agent` drops
+  // `hermes.exe` into a Python `Scripts/` dir that often isn't on the
+  // PowerShell PATH. Probe known install locations as a fallback so the
+  // generate flow doesn't fall back to claude/codex when hermes is installed.
+  const exists = deps.existsSync ?? fs.existsSync
+  const home = (deps.homedir ?? os.homedir)()
+  for (const candidate of hermesCandidatePaths(home, deps.platform ?? process.platform, deps.env ?? process.env)) {
+    if (exists(candidate)) return { name: "hermes", detail: candidate }
+  }
   return null
+}
+
+function hermesCandidatePaths(home: string, platform: NodeJS.Platform, env: NodeJS.ProcessEnv): string[] {
+  // Use platform-specific path joiners so a unit test on macOS can still
+  // assert Windows install layouts deterministically.
+  if (platform === "win32") {
+    const j = path.win32.join
+    const appdata = env.APPDATA ?? j(home, "AppData", "Roaming")
+    const localappdata = env.LOCALAPPDATA ?? j(home, "AppData", "Local")
+    const out: string[] = []
+    // pipx — clean per-package venv, increasingly recommended for CLI tools.
+    out.push(j(localappdata, "pipx", "venvs", "hermes-agent", "Scripts", "hermes.exe"))
+    // Per-user pip (`pip install --user`, the default for non-admin Python on Win 10/11).
+    // Covers Python 3.9–3.14 install layouts.
+    for (const v of ["39", "310", "311", "312", "313", "314"]) {
+      out.push(j(appdata, "Python", `Python${v}`, "Scripts", "hermes.exe"))
+      out.push(j(localappdata, "Programs", "Python", `Python${v}`, "Scripts", "hermes.exe"))
+      out.push(j(localappdata, "Programs", "Python", `Python${v}-32`, "Scripts", "hermes.exe"))
+      out.push(`C:\\Python${v}\\Scripts\\hermes.exe`)
+    }
+    // PEP 370 user-scripts on Windows 10+ (only present when explicitly enabled).
+    out.push(j(home, ".local", "bin", "hermes.exe"))
+    // Conda / Miniforge.
+    out.push(j(home, "miniconda3", "Scripts", "hermes.exe"))
+    out.push(j(home, "anaconda3", "Scripts", "hermes.exe"))
+    out.push(j(home, "miniforge3", "Scripts", "hermes.exe"))
+    return out
+  }
+  const j = path.posix.join
+  return [
+    j(home, ".local", "bin", "hermes"),
+    j(home, ".local", "pipx", "venvs", "hermes-agent", "bin", "hermes"),
+    "/opt/homebrew/bin/hermes",
+    "/usr/local/bin/hermes",
+    j(home, ".pyenv", "shims", "hermes"),
+  ]
 }
 
 export async function detectClaude(deps: DetectionDeps = {}): Promise<DetectedAgent | null> {
