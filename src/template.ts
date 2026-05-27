@@ -248,9 +248,17 @@ export async function copyTemplate(
   }
 
   if (o.initGit) {
-    execSync("git init", { cwd: dir, stdio: "ignore" })
-    execSync("git add -A", { cwd: dir, stdio: "ignore" })
-    execSync('git commit -m "init"', { cwd: dir, stdio: "ignore" })
+    try {
+      execSync("git init", { cwd: dir, stdio: "ignore" })
+      execSync("git add -A", { cwd: dir, stdio: "ignore" })
+      execSync('git -c user.email=pond@local -c user.name=pond commit -m "init"', { cwd: dir, stdio: "ignore" })
+    } catch (err) {
+      const msg = (err as Error).message.split("\n")[0]
+      console.warn(
+        `pond: skipping initial git commit (${msg}). Files are scaffolded; ` +
+          "run `git init && git add -A && git commit -m init` manually if you want a repo.",
+      )
+    }
   }
 
   return { template: chosen, dir }
