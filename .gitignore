@@ -6,4 +6,5 @@ dist/
 *.js.map
 !.gitkeep
 !bin/pond.js
+!bin/pondsh.js
 !bin/pond-mcp.js

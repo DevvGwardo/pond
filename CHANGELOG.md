@@ -5,6 +5,12 @@ Versioning: [Semver](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.8] - 2026-05-27
+
+### Added
+
+- **`pondsh` bin alias.** `npx pondsh@<v> pond new …` (without the `-p` flag) now works. Previously npx interpreted `pondsh` as the binary name, found no match (the bin was just `pond`), and failed with `could not determine executable to run`. Both `npx pondsh new …` and the older `npx -p pondsh pond new …` form route through the same CLI entry.
+
 ## [0.2.7] - 2026-05-27
 
 ### Changed
