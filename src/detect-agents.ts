@@ -1,6 +1,7 @@
 import * as fs from "node:fs"
 import * as path from "node:path"
 import * as os from "node:os"
+import * as readline from "node:readline"
 import { spawn } from "node:child_process"
 
 export type AgentName = "hermes" | "claude" | "codex"
@@ -215,4 +216,77 @@ async function invokeHermes(_agent: DetectedAgent, opts: InvokeOptions): Promise
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) }
   }
+}
+
+// Ask the user a y/n question on stdin. Returns the default when stdin isn't
+// a TTY (so scripted invocations of `pond new --generate` stay deterministic).
+export function promptYesNo(question: string, defaultYes: boolean): Promise<boolean> {
+  if (!process.stdin.isTTY) return Promise.resolve(defaultYes)
+  const hint = defaultYes ? "[Y/n]" : "[y/N]"
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
+  return new Promise<boolean>((resolve) => {
+    rl.question(`${question} ${hint} `, (answer) => {
+      rl.close()
+      const trimmed = (answer ?? "").trim().toLowerCase()
+      if (!trimmed) return resolve(defaultYes)
+      resolve(trimmed === "y" || trimmed === "yes")
+    })
+  })
+}
+
+// Start a detached hermes-agent process and poll /v1/models until it answers
+// or we hit the timeout. The child is intentionally detached + stdio:'ignore'
+// so the gateway outlives the pond invocation that started it. Returns the
+// resolved DetectedAgent on success, or null on timeout / spawn failure.
+export async function startHermesGateway(
+  binary: string,
+  opts: { timeoutMs?: number; onLine?: (s: string) => void } = {},
+): Promise<DetectedAgent | null> {
+  const timeoutMs = opts.timeoutMs ?? 15_000
+  const logFile = path.join(os.tmpdir(), `pond-hermes-${Date.now()}-${process.pid}.log`)
+  let fd: number
+  try {
+    fd = fs.openSync(logFile, "a")
+  } catch (err) {
+    opts.onLine?.(`failed to open log file: ${err instanceof Error ? err.message : String(err)}`)
+    return null
+  }
+  let child
+  try {
+    // We try `<binary> serve` first; if that exits >0 within 2s the operator
+    // probably uses a different verb — but we can't know without spec. Let
+    // the gateway authors document POND_HERMES_START_ARGS to override.
+    const startArgs = (process.env.POND_HERMES_START_ARGS ?? "serve").split(/\s+/).filter(Boolean)
+    child = spawn(binary, startArgs, {
+      detached: true,
+      stdio: ["ignore", fd, fd],
+    })
+    child.unref()
+  } catch (err) {
+    fs.closeSync(fd)
+    opts.onLine?.(`spawn failed: ${err instanceof Error ? err.message : String(err)}`)
+    return null
+  }
+  opts.onLine?.(`spawned ${binary} ${process.env.POND_HERMES_START_ARGS ?? "serve"} (log: ${logFile})`)
+
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 300))
+    const found = await detectHermes()
+    if (found) {
+      try {
+        fs.closeSync(fd)
+      } catch {
+        // best effort
+      }
+      return found
+    }
+  }
+  try {
+    fs.closeSync(fd)
+  } catch {
+    // best effort
+  }
+  opts.onLine?.(`gateway did not respond within ${(timeoutMs / 1000).toFixed(0)}s — see ${logFile}`)
+  return null
 }

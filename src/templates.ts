@@ -10,7 +10,23 @@ export interface Template {
 const TODO: Template = {
   name: "todo",
   description: "Default starter — a tiny message log. Good base for any CRUD app.",
-  keywords: ["todo", "tasks", "list", "items", "checklist", "log", "diary", "notes", "default"],
+  keywords: [
+    "todo",
+    "tasks",
+    "list",
+    "items",
+    "checklist",
+    "log",
+    "diary",
+    "notes",
+    "tracker",
+    "habit",
+    "journal",
+    "expense",
+    "weight",
+    "mood",
+    "default",
+  ],
   serverTs: `import { capsule, mutation, query, string, table } from "pond/server";
 
 export default capsule({
@@ -505,6 +521,36 @@ export const TEMPLATES: Template[] = [TODO, AUTH_APP, BLOG, CHAT, DASHBOARD, WEB
 export function getTemplate(name: string): Template | null {
   return TEMPLATES.find((t) => t.name === name) ?? null
 }
+
+// Minimal "blank canvas" scaffold for `pond new --generate`. The agent reads
+// AGENTS.md and rewrites both files from scratch — we don't want a working
+// template colouring its output. Not part of TEMPLATES; not selectable via
+// --template; only used internally when generate mode is active.
+export const STUB_SERVER_TS = `import { capsule } from "pond/server";
+
+// Stub. The agent should design schema, queries, and mutations from the
+// prompt in AGENTS.md, then replace this whole file.
+export default capsule({
+  schema: {},
+  queries: {},
+  mutations: {},
+});
+`
+
+export const STUB_CLIENT_TSX = `// Stub. The agent should design the UI to match the prompt in AGENTS.md,
+// then replace this whole file.
+
+export function App() {
+  return (
+    <main class="min-h-screen bg-zinc-950 text-zinc-100 font-sans flex items-center justify-center">
+      <div class="text-center">
+        <h1 class="text-2xl font-bold mb-2">Building…</h1>
+        <p class="text-sm text-zinc-500">The agent hasn't replaced this stub yet.</p>
+      </div>
+    </main>
+  );
+}
+`
 
 export function pickTemplateForPrompt(prompt: string): Template {
   const text = prompt.toLowerCase()

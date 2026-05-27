@@ -6,13 +6,7 @@ import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync
 import { tmpdir } from "node:os"
 import * as path from "node:path"
 
-import {
-  detectHermes,
-  detectClaude,
-  detectCodex,
-  detectAgents,
-  detectHermesInstall,
-} from "../src/detect-agents.js"
+import { detectHermes, detectClaude, detectCodex, detectAgents, detectHermesInstall } from "../src/detect-agents.js"
 
 const execFileP = promisify(execFile)
 const REPO_ROOT = path.resolve(import.meta.dirname, "..")
@@ -179,6 +173,48 @@ test("`pond new <prompt>` heuristically picks chat for chat-y prompts", async ()
   } finally {
     rmSync(parent, { recursive: true, force: true })
   }
+})
+
+test("copyTemplate({ useStub: true }) writes blank-canvas stubs, not a template", async () => {
+  const { copyTemplate } = await import("../src/template.js")
+  const { STUB_SERVER_TS } = await import("../src/templates.js")
+  const parent = tmp("pond-stub-")
+  const prev = process.cwd()
+  try {
+    process.chdir(parent)
+    const result = await copyTemplate({
+      name: "stub-cap",
+      templateName: "todo", // would normally win the heuristic
+      initGit: false,
+      prompt: "a habit tracker",
+      useStub: true,
+    })
+    assert.equal(result.template, null, "template should be null in stub mode")
+    const server = readFileSync(path.join(parent, "stub-cap", "server", "index.ts"), "utf-8")
+    assert.equal(server, STUB_SERVER_TS, "server file should be the stub verbatim")
+    const agents = readFileSync(path.join(parent, "stub-cap", "AGENTS.md"), "utf-8")
+    assert.match(agents, /empty stubs/, "AGENTS.md should tell the agent it's working from stubs")
+  } finally {
+    process.chdir(prev)
+    rmSync(parent, { recursive: true, force: true })
+  }
+})
+
+test("pickTemplateForPrompt picks todo for tracker-style prompts (broadened keywords)", async () => {
+  const { pickTemplateForPrompt } = await import("../src/templates.js")
+  for (const p of ["a habit tracker", "an expense tracker for roommates", "weekly journal"]) {
+    const t = pickTemplateForPrompt(p)
+    assert.equal(t.name, "todo", `expected todo for "${p}", got ${t.name}`)
+  }
+})
+
+test("promptYesNo returns the default when stdin isn't a TTY", async () => {
+  const { promptYesNo } = await import("../src/detect-agents.js")
+  // Tests run with piped stdin, so isTTY is undefined / falsy.
+  const yes = await promptYesNo("ignored", true)
+  const no = await promptYesNo("ignored", false)
+  assert.equal(yes, true)
+  assert.equal(no, false)
 })
 
 test("`pond new` writes .cursor/rules and .claude/CLAUDE.md", async () => {

@@ -2,7 +2,14 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { execSync } from "node:child_process"
 import { randomBytes } from "node:crypto"
-import { getTemplate, pickTemplateForPrompt, TEMPLATES, Template } from "./templates.js"
+import {
+  getTemplate,
+  pickTemplateForPrompt,
+  STUB_CLIENT_TSX,
+  STUB_SERVER_TS,
+  TEMPLATES,
+  Template,
+} from "./templates.js"
 
 const POND_VERSION = JSON.parse(fs.readFileSync(path.resolve(import.meta.dirname, "../package.json"), "utf-8"))
   .version as string
@@ -88,15 +95,20 @@ export function App() {
 `
 
 function agentsMdContent(prompt: string, templateName: string): string {
+  const starter =
+    templateName === "stub"
+      ? `\`server/index.ts\` and \`client/index.tsx\` are empty stubs. Replace them entirely with an implementation that matches the description above.`
+      : `You're starting from the **${templateName}** template — read \`server/index.ts\` and \`client/index.tsx\` to see what's already there, then edit them in place to match the description.`
+
   return `# Build instructions
 
 The user ran \`pond new\` with this description:
 
 > ${prompt.replace(/\n/g, "\n> ")}
 
-You're starting from the **${templateName}** template — read \`server/index.ts\` and \`client/index.tsx\` to see what's already there.
+${starter}
 
-Your job: implement the description by editing those two files. Add tables, queries, mutations, and UI to satisfy what the user asked for. When you're done, run \`npm install && npm run dev\` and verify the app works in a browser.
+Your job: implement the description. Add tables, queries, mutations, and UI to satisfy what the user asked for. When you're done, run \`npm install && npm run dev\` and verify the app works in a browser.
 
 ### Canonical references
 
@@ -126,32 +138,44 @@ export interface CopyTemplateOptions {
   templateName: string
   initGit: boolean
   prompt?: string
+  // When true, write blank-canvas stubs instead of a template. Used by
+  // `pond new --generate` so the agent has a clean slate to design from.
+  useStub?: boolean
 }
 
-export async function copyTemplate(opts: CopyTemplateOptions): Promise<{ template: Template; dir: string }>
+export interface CopyTemplateResult {
+  // The template that was used. Null when `useStub: true`.
+  template: Template | null
+  dir: string
+}
+
+export async function copyTemplate(opts: CopyTemplateOptions): Promise<CopyTemplateResult>
 export async function copyTemplate(
   name: string,
   templateName: string,
   initGit: boolean,
   prompt?: string,
-): Promise<{ template: Template; dir: string }>
+): Promise<CopyTemplateResult>
 export async function copyTemplate(
   nameOrOpts: string | CopyTemplateOptions,
   templateName?: string,
   initGit?: boolean,
   prompt?: string,
-): Promise<{ template: Template; dir: string }> {
+): Promise<CopyTemplateResult> {
   const o: CopyTemplateOptions =
     typeof nameOrOpts === "string"
       ? { name: nameOrOpts, templateName: templateName ?? "todo", initGit: Boolean(initGit), prompt }
       : nameOrOpts
 
-  const chosen =
-    o.prompt && (o.templateName === "todo" || !o.templateName)
+  // Stub mode short-circuits the template lookup — we write a minimal
+  // capsule + placeholder UI and let the agent design from scratch.
+  const chosen: Template | null = o.useStub
+    ? null
+    : o.prompt && (o.templateName === "todo" || !o.templateName)
       ? pickTemplateForPrompt(o.prompt)
       : (getTemplate(o.templateName) ?? null)
 
-  if (!chosen) {
+  if (!o.useStub && !chosen) {
     console.error(`Unknown template: ${o.templateName}. Try one of: ${TEMPLATES.map((t) => t.name).join(", ")}`)
     process.exit(1)
   }
@@ -192,11 +216,11 @@ export async function copyTemplate(
       2,
     ),
   )
-  fs.writeFileSync(path.join(dir, "server", "index.ts"), chosen.serverTs)
-  fs.writeFileSync(path.join(dir, "client", "index.tsx"), chosen.clientTsx)
+  fs.writeFileSync(path.join(dir, "server", "index.ts"), chosen ? chosen.serverTs : STUB_SERVER_TS)
+  fs.writeFileSync(path.join(dir, "client", "index.tsx"), chosen ? chosen.clientTsx : STUB_CLIENT_TSX)
   fs.writeFileSync(path.join(dir, "shared", ".gitkeep"), "")
   const envContents =
-    BASE_ENV_TEMPLATE.replace("{{SESSION_SECRET}}", randomBytes(32).toString("hex")) + (chosen.envExtra ?? "")
+    BASE_ENV_TEMPLATE.replace("{{SESSION_SECRET}}", randomBytes(32).toString("hex")) + (chosen?.envExtra ?? "")
   fs.writeFileSync(path.join(dir, ".env.pond.server"), envContents, { mode: 0o600 })
   fs.writeFileSync(path.join(dir, ".gitignore"), GITIGNORE)
 
@@ -208,7 +232,7 @@ export async function copyTemplate(
   fs.mkdirSync(path.join(dir, ".claude"), { recursive: true })
 
   if (o.prompt) {
-    const agents = agentsMdContent(o.prompt, chosen.name)
+    const agents = agentsMdContent(o.prompt, chosen?.name ?? "stub")
     fs.writeFileSync(path.join(dir, "AGENTS.md"), agents)
     fs.writeFileSync(path.join(dir, ".claude", "CLAUDE.md"), agents)
   } else {

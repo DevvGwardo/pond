@@ -2,7 +2,14 @@ import { defineCommand } from "citty"
 import * as path from "node:path"
 import { copyTemplate } from "../template.js"
 import { TEMPLATES, getTemplate } from "../templates.js"
-import { detectAgents, detectHermesInstall, invokeAgent } from "../detect-agents.js"
+import {
+  detectAgents,
+  detectHermesInstall,
+  invokeAgent,
+  promptYesNo,
+  startHermesGateway,
+  type DetectedAgent,
+} from "../detect-agents.js"
 
 const SLUG_RE = /^[a-z][a-z0-9_-]*$/i
 const STOPWORDS = new Set([
@@ -109,7 +116,7 @@ export const newCommand = defineCommand({
     const wantsGenerate = Boolean((args as { generate?: boolean }).generate)
 
     // Detect local agents on every run (informational unless --generate is set)
-    const detected = await detectAgents()
+    const detected: DetectedAgent[] = await detectAgents()
     if (detected.length) {
       const lead = detected[0]
       const others = detected
@@ -120,15 +127,28 @@ export const newCommand = defineCommand({
       console.log(`  Detected agent: ${lead.name} — ${lead.detail}${tail}`)
     }
 
-    // Hermes deserves a special case: if the gateway is down but the binary or
-    // config dir is on disk, the user almost certainly *wants* hermes to lead
-    // the cascade — they just haven't started it. Surface that proactively
-    // so they know to flip the switch before re-running with --generate.
+    // Hermes special case: if the gateway is down but the binary or config dir
+    // is on disk, the user almost certainly *wants* hermes to lead. On a TTY
+    // under --generate, offer to start it and poll until it's reachable.
     const hermesActive = detected.some((d) => d.name === "hermes")
     const hermesInstall = !hermesActive ? detectHermesInstall() : null
     if (hermesInstall) {
-      console.log(`  Tip: hermes-agent found at ${hermesInstall} but the gateway isn't running on 127.0.0.1:8642.`)
-      console.log(`       Start it (e.g. \`hermes-agent serve\`) to use the local model first.`)
+      console.log(`  hermes-agent found at ${hermesInstall} but the gateway isn't running on 127.0.0.1:8642.`)
+      const shouldStart = wantsGenerate && (await promptYesNo("  Start it now and use it for --generate?", true))
+      if (shouldStart) {
+        console.log(`  Starting hermes-agent (override the verb with POND_HERMES_START_ARGS)...`)
+        const started = await startHermesGateway(hermesInstall, {
+          onLine: (s) => console.log(`    ${s}`),
+        })
+        if (started) {
+          console.log(`  Gateway is up — hermes will lead the cascade.`)
+          detected.unshift(started)
+        } else {
+          console.log(`  Gateway didn't come up — continuing with the other detected agents.`)
+        }
+      } else if (!wantsGenerate) {
+        console.log(`  Tip: start it (e.g. \`${path.basename(hermesInstall)} serve\`) to use the local model first.`)
+      }
     }
 
     const requestedTemplate = templateArg ?? (promptText ? undefined : "todo")
@@ -137,14 +157,25 @@ export const newCommand = defineCommand({
       process.exit(1)
     }
 
+    // With --generate, the agent rewrites both files from scratch. Skip the
+    // template lookup and scaffold a blank-canvas stub so the user's prompt
+    // drives 100% of the app instead of "template + agent overlay". The user
+    // can still force a starting template by passing --template explicitly.
+    const useStub = wantsGenerate && !templateArg
+
     const { template } = await copyTemplate({
       name,
       templateName: requestedTemplate ?? "todo",
       initGit: Boolean(args.git),
       prompt: promptText,
+      useStub,
     })
 
-    console.log(`\n  Created ${name}/ (template: ${template.name})`)
+    if (template) {
+      console.log(`\n  Created ${name}/ (template: ${template.name})`)
+    } else {
+      console.log(`\n  Created ${name}/ (stub scaffold — agent will design from your prompt)`)
+    }
     if (promptText) {
       console.log(`  Wrote AGENTS.md and .claude/CLAUDE.md with your prompt.`)
     }

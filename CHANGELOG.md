@@ -5,6 +5,22 @@ Versioning: [Semver](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-05-27
+
+### Changed
+
+- **`pond new "<prompt>" --generate` no longer scaffolds a template.** With `--generate`, the user's prompt drives 100% of the app instead of "todo template + agent overlay" — the scaffold writes a minimal blank-canvas stub (empty capsule, placeholder UI) and lets the agent design schema, queries, mutations, and UI from scratch. The CLI output reads `Created my-app/ (stub scaffold — agent will design from your prompt)` instead of the misleading `(template: todo)`. Pass `--template <name>` to opt back into the template path even with `--generate`.
+- **Broadened the `todo` template's keyword set** (`tracker`, `habit`, `journal`, `expense`, `weight`, `mood`) so prompts like "habit tracker" or "expense log" lock onto todo via the heuristic without falling through to the silent default. This only matters when `--generate` is _not_ set, since `--generate` skips the heuristic entirely.
+
+### Added
+
+- **Interactive hermes-agent startup.** When `pond new --generate` runs on a TTY and finds the hermes-agent binary or config dir but the gateway is down, the CLI now asks `Start it now and use it for --generate? [Y/n]`. On `yes`, pond spawns `<binary> serve` (override via `POND_HERMES_START_ARGS`) detached with stdio piped to a log under `$TMPDIR`, polls `/v1/models` every 300 ms for up to 15 s, then prepends hermes to the cascade if the gateway comes up. Non-TTY runs are unchanged (deterministic, no prompt).
+- `startHermesGateway()` and `promptYesNo()` exports in `src/detect-agents.ts` for the above.
+
+### Fixed
+
+- The previous `0.2.3` hint-only behavior is replaced by the interactive flow above. (0.2.3 was tagged but never published to npm, so this release supersedes it.)
+
 ## [0.2.3] - 2026-05-27
 
 ### Added
@@ -55,6 +71,8 @@ A capability + ergonomics release. New capsule primitives (`ctx.ai`, `ctx.blob`,
 ### Dependencies
 
 - Added `ws` (^8.21.0).
+
+## [0.1.0] - 2026-05-26
 
 First public release. Tagged after a security-hardening pass on the alpha.
 
