@@ -1286,6 +1286,164 @@ export const hostCommand = defineCommand({
       return c.json({ entries })
     })
 
+    // ---- SOURCE FILES (IDE) ----
+
+    const FILE_PATH_RE = /^(?:(server|client|shared)\/[a-zA-Z0-9_./-]+|package\.json)$/
+    const MAX_FILE_BYTES = 1 * 1024 * 1024
+
+    function safeSourcePath(deployId: string, requested: string): string | null {
+      if (!requested || requested.includes("\\") || requested.startsWith("/")) return null
+      const segments = requested.split("/")
+      if (segments.some((s) => s === ".." || s === "." || s === "")) return null
+      if (!FILE_PATH_RE.test(requested)) return null
+      const sourceDir = path.join(deployDirFor(deployId), "source")
+      const abs = path.join(sourceDir, requested)
+      // belt + suspenders: ensure resolved path is still inside sourceDir
+      if (!abs.startsWith(sourceDir + path.sep) && abs !== sourceDir) return null
+      return abs
+    }
+
+    function fileSubpath(c: any, deployId: string): string | null {
+      const prefix = `/api/deploys/${deployId}/files/`
+      const url = new URL(c.req.url)
+      let decoded: string
+      try {
+        decoded = decodeURIComponent(url.pathname)
+      } catch {
+        return null
+      }
+      if (!decoded.startsWith(prefix)) return null
+      return decoded.slice(prefix.length)
+    }
+
+    function listSourceTree(deployId: string): { path: string; size: number; mtime: string }[] {
+      const sourceDir = path.join(deployDirFor(deployId), "source")
+      if (!fs.existsSync(sourceDir)) return []
+      const out: { path: string; size: number; mtime: string }[] = []
+      const walk = (rel: string) => {
+        const abs = path.join(sourceDir, rel)
+        const stat = fs.statSync(abs)
+        if (stat.isFile()) {
+          out.push({ path: rel, size: stat.size, mtime: stat.mtime.toISOString() })
+          return
+        }
+        if (stat.isDirectory()) {
+          for (const entry of fs.readdirSync(abs).sort()) walk(rel ? `${rel}/${entry}` : entry)
+        }
+      }
+      for (const entry of fs.readdirSync(sourceDir).sort()) walk(entry)
+      return out
+    }
+
+    function authorizeFileOp(c: any, deployId: string): { record: HostedDeployRecord } | Response {
+      const record = readRecord(deployId)
+      if (!record) return c.json({ error: "Not found" }, 404)
+      if (controlDb.findAnonymous(deployId)) {
+        return c.json({ error: "Anonymous deploys cannot be edited — claim first" }, 403)
+      }
+      const auth = authorizeDeployMutation(c, record)
+      if (auth instanceof Response) return auth
+      return { record }
+    }
+
+    app.get("/api/deploys/:deployId/files", (c) => {
+      const deployId = c.req.param("deployId")
+      const r = authorizeFileOp(c, deployId)
+      if (r instanceof Response) return r
+      return c.json({ files: listSourceTree(deployId) })
+    })
+
+    app.get("/api/deploys/:deployId/files/*", (c) => {
+      const deployId = c.req.param("deployId")
+      const r = authorizeFileOp(c, deployId)
+      if (r instanceof Response) return r
+      const sub = fileSubpath(c, deployId)
+      if (!sub) return c.json({ error: "Invalid path" }, 400)
+      const abs = safeSourcePath(deployId, sub)
+      if (!abs) return c.json({ error: "Path not allowed" }, 400)
+      if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) return c.json({ error: "Not found" }, 404)
+      return c.body(fs.readFileSync(abs), 200, { "content-type": "text/plain; charset=utf-8" })
+    })
+
+    app.put(
+      "/api/deploys/:deployId/files/*",
+      bodyLimit({ maxSize: MAX_FILE_BYTES, onError: (c) => c.json({ error: "File too large" }, 413) }),
+      async (c) => {
+        const deployId = c.req.param("deployId")
+        const r = authorizeFileOp(c, deployId)
+        if (r instanceof Response) return r
+        const sub = fileSubpath(c, deployId)
+        if (!sub) return c.json({ error: "Invalid path" }, 400)
+        const abs = safeSourcePath(deployId, sub)
+        if (!abs) return c.json({ error: "Path not allowed" }, 400)
+        const body = await c.req.text()
+        if (Buffer.byteLength(body, "utf-8") > MAX_FILE_BYTES) {
+          return c.json({ error: `File exceeds ${MAX_FILE_BYTES} bytes` }, 413)
+        }
+        fs.mkdirSync(path.dirname(abs), { recursive: true })
+        fs.writeFileSync(abs, body)
+        r.record.updatedAt = new Date().toISOString()
+        writeRecord(r.record)
+        const fileActor = authUser(c)
+        audit(fileActor ? actorFor(fileActor, false) : "__claim_token__", "deploy.file_write", {
+          targetDeployId: deployId,
+          metadata: { path: sub, bytes: Buffer.byteLength(body, "utf-8") },
+        })
+        return c.json({ ok: true, path: sub, size: Buffer.byteLength(body, "utf-8") })
+      },
+    )
+
+    app.delete("/api/deploys/:deployId/files/*", (c) => {
+      const deployId = c.req.param("deployId")
+      const r = authorizeFileOp(c, deployId)
+      if (r instanceof Response) return r
+      const sub = fileSubpath(c, deployId)
+      if (!sub) return c.json({ error: "Invalid path" }, 400)
+      if (sub === "server/index.ts" || sub === "package.json") {
+        return c.json({ error: "Cannot delete required file" }, 400)
+      }
+      const abs = safeSourcePath(deployId, sub)
+      if (!abs) return c.json({ error: "Path not allowed" }, 400)
+      if (!fs.existsSync(abs)) return c.json({ ok: true })
+      fs.rmSync(abs, { force: true })
+      r.record.updatedAt = new Date().toISOString()
+      writeRecord(r.record)
+      const fileActor = authUser(c)
+      audit(fileActor ? actorFor(fileActor, false) : "__claim_token__", "deploy.file_delete", {
+        targetDeployId: deployId,
+        metadata: { path: sub },
+      })
+      return c.json({ ok: true })
+    })
+
+    app.post("/api/deploys/:deployId/files/move", async (c) => {
+      const deployId = c.req.param("deployId")
+      const r = authorizeFileOp(c, deployId)
+      if (r instanceof Response) return r
+      const body = (await c.req.json().catch(() => null)) as { from?: unknown; to?: unknown } | null
+      if (!body || typeof body.from !== "string" || typeof body.to !== "string") {
+        return c.json({ error: "from + to required" }, 400)
+      }
+      if (body.from === "server/index.ts" || body.from === "package.json") {
+        return c.json({ error: "Cannot move required file" }, 400)
+      }
+      const fromAbs = safeSourcePath(deployId, body.from)
+      const toAbs = safeSourcePath(deployId, body.to)
+      if (!fromAbs || !toAbs) return c.json({ error: "Path not allowed" }, 400)
+      if (!fs.existsSync(fromAbs)) return c.json({ error: "Source not found" }, 404)
+      if (fs.existsSync(toAbs)) return c.json({ error: "Destination exists" }, 409)
+      fs.mkdirSync(path.dirname(toAbs), { recursive: true })
+      fs.renameSync(fromAbs, toAbs)
+      r.record.updatedAt = new Date().toISOString()
+      writeRecord(r.record)
+      const fileActor = authUser(c)
+      audit(fileActor ? actorFor(fileActor, false) : "__claim_token__", "deploy.file_move", {
+        targetDeployId: deployId,
+        metadata: { from: body.from, to: body.to },
+      })
+      return c.json({ ok: true })
+    })
+
     // ---- CUSTOM DOMAINS ----
 
     app.get("/api/domains", (c) => {
