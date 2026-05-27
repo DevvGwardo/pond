@@ -35,6 +35,7 @@ The current runtime is optimized for local development and alpha workflows: fast
 - No manual client plumbing. Preact hooks talk to generated query and mutation routes directly.
 - Agent-friendly workflow. The CLI is small, inspectable, and easy for coding agents to scaffold against.
 - Real dev ergonomics. Live reload, guest identity switching, DB inspection, logs, and a deploy bundle path are already built in.
+- Browser-based IDE for hosted capsules. After `pond deploy --api …`, open the returned `/ide/<id>` URL to edit `server/`, `client/`, and `shared/` files, see build diagnostics, and preview the live capsule without leaving the page.
 
 ## What A Capsule Looks Like
 
@@ -91,6 +92,7 @@ If a public Pond host is running (e.g. `pond.example.com`), you can ship anonymo
 ```bash
 pond deploy --api https://pond.example.com
 # → returns a URL like https://abc123def4567890.pond.example.com
+# → prints an IDE URL: https://pond.example.com/ide/abc123…#token=<claim>
 # → returns a one-time claim token saved to .pond/deploy.json
 ```
 
@@ -209,13 +211,11 @@ These power the CLI inspection commands and make local capsules easy to inspect 
 
 ## Deploy Bundles
 
-`pond deploy` currently performs an alpha deployment step:
+`pond deploy` has two modes, depending on whether `--api <url>` is passed:
 
-- bundles the capsule server to `.pond/deploy-bundle.mjs`
-- writes `.pond/deploy.json`
-- generates a deploy ID, timestamp, and bundle hash
+**Local (no `--api`).** Bundles the capsule server to `.pond/deploy-bundle.mjs`, writes `.pond/deploy.json` with a generated deploy ID + bundle hash. Use `pond start` to serve the bundle.
 
-This is a build artifact flow, not a full hosted deployment platform yet. The runtime already emits metadata in a shape that can later back integrations with services like Fly.io or Railway.
+**Hosted (`--api <url>`).** Uploads the source tree (`server/`, `client/`, `shared/`, `package.json`) to the control plane. The host runs esbuild server-side, stores both the source and the produced bundle, forks a worker, and returns the deploy URL + claim token + IDE URL. The on-server source is what backs the browser IDE — edits made in the IDE go through `/api/deploys/:id/files/*` and trigger a server-side rebuild on Deploy.
 
 ## Hosted control plane (self-hosted MVP)
 
@@ -296,6 +296,20 @@ In addition, three things are patched at boot to block outbound network: `global
 - `PUT /api/deploys/:id` — must claim before updating the bundle.
 - `PUT /api/deploys/:id/env` — env upload is blocked at the API level. `pond deploy --push-env` errors out without uploading.
 - Outbound `fetch` from inside the capsule (see above).
+
+### Browser IDE
+
+Every hosted deploy ships with a browser-based IDE at `<api>/ide/<deployId>`. After `pond deploy --api …`, the CLI prints the URL (with a one-time `#token=` fragment for anonymous deploys). Open it in a browser and you get:
+
+- A file tree over `server/`, `client/`, `shared/`, `package.json`.
+- A multi-tab CodeMirror editor (TypeScript / TSX / JSON / Markdown).
+- An outline of tables, queries, and mutations parsed from `server/index.ts`.
+- A live preview iframe of the deploy.
+- A **Deploy** button that saves all dirty files, re-runs esbuild server-side, hot-swaps the worker, and refreshes the preview. esbuild diagnostics render with file / line / column in the right pane.
+
+The IDE is a single inlined HTML SPA (~192 KB gzipped) served on the bare host. It talks to the standard control-plane endpoints — no extra deploy surface, same auth (claim token or owner Bearer). Anonymous deploys must be claimed before editing.
+
+Files under `server/`, `client/`, `shared/`, plus `package.json` are addressable. `.env.pond.server` is **not** exposed through the IDE — edit secrets via `pond env` instead.
 
 ### Env management
 
@@ -400,7 +414,6 @@ Each deploy's `ctx.log.*` entries stream over SSE on `/__pond/logs` and are appe
 - No HTTPS, no automatic TLS, no DNS provisioning, no wildcard cert automation (custom subdomains require an external reverse proxy for TLS).
 - No billing, no usage metering beyond hard quota limits.
 - No WebSocket support through the proxy.
-- No UI — everything is CLI + HTTP.
 
 ## Public Server API
 

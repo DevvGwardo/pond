@@ -16,6 +16,7 @@ The full operational walkthrough lives in [`docs/operations.md`](../docs/operati
 - `.env.example` — copy to `.env`, fill in your domain + host token + abuse contact.
 - `cloudflared/config.example.yml` — Cloudflare Tunnel ingress config. Maps `*.pond.example.com` and the bare `pond.example.com` to the host on port 8787.
 - `pond-host.service` — systemd unit for the no-Docker path.
+- `upgrade.sh` — one-shot upgrade: `git pull --ff-only`, rebuild the pond-host image, restart in place. Run from the pond repo root on the host.
 
 ## Quickstart (Docker path)
 
@@ -44,3 +45,14 @@ pond login --api https://pond.example.com --username your-name
 ```
 
 The full step-by-step (Oracle Cloud, DNS, security review, backups, upgrades, migration to Hetzner) is in [`docs/operations.md`](../docs/operations.md).
+
+## Upgrading
+
+After pushing new commits to `main`, ssh to the host and run:
+
+```bash
+cd /path/to/pond
+./deploy/upgrade.sh
+```
+
+The script does `git pull --ff-only` then `docker compose ... up -d --build` and tails the new container's logs. Pass `--skip-pull` to rebuild against an already-checked-out commit.
