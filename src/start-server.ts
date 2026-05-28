@@ -20,6 +20,10 @@ interface StartBundleServerOptions {
   inspectSecretHash?: string
   publicInspect?: boolean
   allowedOrigins?: string[]
+  // Upper bound (bytes) on a /__pond/db/restore upload, derived from the
+  // deploy's disk quota. Caps the in-memory buffer so a restore can't be used
+  // to fill the disk or balloon the worker. 0/undefined falls back to a default.
+  maxRestoreBytes?: number
 }
 
 function sha256Hex(s: string): string {
@@ -174,19 +178,33 @@ async function createBundleServerAppInternal(
 
   runtime.mount(app)
 
-  function canInspect(headerToken: string | undefined) {
-    if (options.publicInspect) return true
+  // Timing-safe claim-token check. Hashing the incoming header before compare
+  // means a backup leak of the host's record JSONs (which contain only the
+  // hash) doesn't yield a valid header value, and an equality-timing attack on
+  // this code path yields no useful signal. When no inspectSecretHash is
+  // configured (local `pond dev`) everything is open for convenience.
+  function hasClaimToken(headerToken: string | undefined) {
     if (!options.inspectSecretHash) return true
     if (!headerToken) return false
-    // Timing-safe comparison on equal-length sha256 hex strings. Hashing the
-    // incoming header before compare means a backup leak of the host's
-    // record JSONs (which contain only the hash) doesn't yield a valid
-    // header value, and an equality-timing attack on this code path also
-    // yields no useful signal.
     const a = Buffer.from(sha256Hex(headerToken))
     const b = Buffer.from(options.inspectSecretHash)
     if (a.length !== b.length) return false
     return timingSafeEqual(a, b)
+  }
+
+  // Read-only inspection (schema, table list, row dumps). publicInspect opens
+  // these to anyone — that's the point of marking a deploy publicly inspectable.
+  function canInspect(headerToken: string | undefined) {
+    if (options.publicInspect) return true
+    return hasClaimToken(headerToken)
+  }
+
+  // Privileged operations: full-database backup (bulk exfil), restore (a WRITE
+  // to the deploy's data), and log streaming (may contain secrets). These are
+  // NOT covered by publicInspect — they always require the claim token, even on
+  // a publicly inspectable deploy.
+  function canManage(headerToken: string | undefined) {
+    return hasClaimToken(headerToken)
   }
 
   app.get("/__pond/inspect", (c) => {
@@ -225,7 +243,7 @@ async function createBundleServerAppInternal(
   })
 
   app.get("/__pond/db/backup", (c) => {
-    if (!canInspect(c.req.header("x-pond-claim-token"))) {
+    if (!canManage(c.req.header("x-pond-claim-token"))) {
       return c.json({ error: "Forbidden" }, 403)
     }
     // VACUUM INTO produces a clean, consistent SQLite snapshot in one statement
@@ -252,13 +270,23 @@ async function createBundleServerAppInternal(
   })
 
   app.post("/__pond/db/restore", async (c) => {
-    if (!canInspect(c.req.header("x-pond-claim-token"))) {
+    if (!canManage(c.req.header("x-pond-claim-token"))) {
       return c.json({ error: "Forbidden" }, 403)
     }
     // We deliberately do NOT swap the live db handle here — restoring on a
     // running process is fraught (open WAL, in-flight queries). Instead, write
     // the candidate to .pond/data.db.restored and tell the caller to restart.
+    // Bound the upload before buffering it all into memory / onto disk. A
+    // content-length over the cap is rejected up front; the actual byte length
+    // is re-checked after read in case the header lied.
+    const maxRestore =
+      options.maxRestoreBytes && options.maxRestoreBytes > 0 ? options.maxRestoreBytes : 256 * 1024 * 1024
+    const declaredLen = Number(c.req.header("content-length") ?? "0")
+    if (Number.isFinite(declaredLen) && declaredLen > maxRestore) {
+      return c.json({ error: `restore exceeds limit (${maxRestore} bytes)` }, 413)
+    }
     const body = await c.req.arrayBuffer()
+    if (body.byteLength > maxRestore) return c.json({ error: `restore exceeds limit (${maxRestore} bytes)` }, 413)
     if (body.byteLength < 16) return c.json({ error: "bundle too small" }, 400)
     // Lightweight SQLite header check
     const header = Buffer.from(body).slice(0, 16).toString("utf-8")
@@ -275,7 +303,7 @@ async function createBundleServerAppInternal(
   })
 
   app.get("/__pond/logs", (c) => {
-    if (!canInspect(c.req.header("x-pond-claim-token"))) {
+    if (!canManage(c.req.header("x-pond-claim-token"))) {
       return c.json({ error: "Forbidden" }, 403)
     }
     let streamController: ReadableStreamDefaultController<Uint8Array> | null = null

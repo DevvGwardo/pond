@@ -10,11 +10,19 @@
 #
 # This ruleset drops all outbound traffic originating from the capsule cgroup
 # subtree (everything under <POND_CAPSULE_CGROUP_ROOT>/capsule-*) except:
-#   - loopback (a capsule talking to itself)
 #   - replies on already-established/related connections (so inbound requests
 #     proxied in from the control plane can be answered)
-# Notably it does NOT allow DNS. Anonymous capsules have no legitimate need to
-# resolve external names; blocking 53/udp+tcp is what shuts the DNS-exfil door.
+#   - NEW outbound connections to the pond egress proxy ONLY (loopback, on the
+#     proxy port) when POND_EGRESS_PROXY_PORT is set — this is how a capsule
+#     reaches approved external hosts: it must go through the allowlisting
+#     proxy, which is the single sanctioned egress path.
+# Notably it does NOT allow DNS, nor blanket loopback. A capsule can no longer
+# open NEW loopback connections to sibling capsule ports or the in-container
+# control plane (the capsule-to-capsule / capsule-to-control-plane gap) — only
+# the proxy port, if configured. Blocking 53/udp+tcp shuts the DNS-exfil door;
+# the egress proxy does DNS resolution on the capsule's behalf for allowlisted
+# names. NOTE: capsules share the host loopback, so this is port-based, not
+# per-capsule isolation — true per-tenant isolation needs network namespaces.
 #
 # cgroup matching: `socket cgroupv2 level N "path"` matches a packet whose
 # socket's cgroup ancestor at depth N equals "path". With capsules living at
@@ -39,17 +47,21 @@ table inet pond {
 	}
 
 	chain capsule_filter {
-		# Let a capsule reach itself / sibling ports on loopback.
-		oifname "lo" accept
-
 		# Allow replies on connections that were opened from outside (the
 		# control-plane proxy forwarding a request in). New outbound flows from
-		# the capsule are not "established" and fall through to the drop.
+		# the capsule are not "established" and fall through below.
 		ct state established,related accept
 
-		# Anything else a capsule tries to send outbound — TCP connects, raw
-		# UDP, and crucially DNS queries — is dropped. Use `reject` instead of
-		# `drop` if you'd rather capsules fail fast than hang.
+		# The ONLY sanctioned new-outbound path: loopback to the pond egress
+		# proxy, which enforces the per-deploy allowlist and does DNS itself.
+		# Replace 8788 with your POND_EGRESS_PROXY_PORT. If you do not run the
+		# egress proxy, delete this line — capsules then have zero egress.
+		oifname "lo" tcp dport 8788 accept
+
+		# Everything else a capsule tries to send outbound — direct TCP connects,
+		# raw UDP, DNS queries, and NEW loopback to sibling capsules / the control
+		# plane — is dropped. Use `reject` instead of `drop` if you'd rather
+		# capsules fail fast than hang.
 		counter drop
 	}
 }

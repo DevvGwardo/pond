@@ -14,6 +14,7 @@ interface BootOptions {
   publicInspect?: boolean
   allowedOrigins?: string[]
   restrictNetwork?: boolean
+  maxRestoreBytes?: number
 }
 
 type ParentMessage = { type: "boot"; options: BootOptions } | { type: "shutdown" }

@@ -23,7 +23,17 @@ COPY README.md LICENSE ./
 
 ENV NODE_ENV=production
 ENV POND_HOST_DATA_DIR=/data
+
+# Run as the unprivileged `node` user (uid 1000, baked into the base image)
+# rather than root, so a capsule that escapes the Node sandbox lands as a
+# non-root user with no caps. The control plane still manages per-capsule
+# cgroups because cgroup v2 DELEGATION (deploy/setup-capsule-isolation.sh with
+# POND_RUN_USER=node) hands the subtree to this user — no root needed. NOTE for
+# upgrades: an EXISTING `pond-data` volume is root-owned; chown it once on the
+# host (see deploy/HARDENING.md) or the host can't write /data as `node`.
+RUN mkdir -p /data && chown -R node:node /app /data
 VOLUME ["/data"]
+USER node
 
 EXPOSE 8787
 

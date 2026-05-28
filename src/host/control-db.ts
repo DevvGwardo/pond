@@ -106,6 +106,11 @@ export interface ControlDb {
   countDomainsForUser(userId: string): number
   removeDomain(subdomain: string): void
   removeDomainsForDeploy(deployId: string): void
+  /** Per-deploy egress credential + allowlist for the egress proxy. */
+  setEgress(deployId: string, secretHash: string, allowlist: string[]): void
+  getEgress(deployId: string): { secretHash: string; allowlist: string[] } | null
+  setEgressAllowlist(deployId: string, allowlist: string[]): void
+  deleteEgress(deployId: string): void
   appendAudit(entry: AuditEntry): void
   listAudit(opts?: { limit?: number; sinceTs?: string }): AuditLogRow[]
   /**
@@ -165,6 +170,11 @@ export function openControlDb(dataDir: string): ControlDb {
       createdAt TEXT DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_custom_domains_deploy ON custom_domains(deployId);
+    CREATE TABLE IF NOT EXISTS deploy_egress (
+      deployId TEXT PRIMARY KEY,
+      secretHash TEXT NOT NULL,
+      allowlist TEXT NOT NULL DEFAULT '[]'
+    );
     CREATE TABLE IF NOT EXISTS audit_log (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       ts TEXT NOT NULL DEFAULT (datetime('now')),
@@ -447,6 +457,32 @@ export function openControlDb(dataDir: string): ControlDb {
     },
     removeDomainsForDeploy(deployId) {
       deleteDomainsForDeployStmt.run(deployId)
+    },
+    setEgress(deployId, secretHash, allowlist) {
+      db.prepare(
+        "INSERT INTO deploy_egress (deployId, secretHash, allowlist) VALUES (?, ?, ?) " +
+          "ON CONFLICT(deployId) DO UPDATE SET secretHash = excluded.secretHash, allowlist = excluded.allowlist",
+      ).run(deployId, secretHash, JSON.stringify(allowlist))
+    },
+    getEgress(deployId) {
+      const row = db.prepare("SELECT secretHash, allowlist FROM deploy_egress WHERE deployId = ?").get(deployId) as
+        | { secretHash: string; allowlist: string }
+        | undefined
+      if (!row) return null
+      let allowlist: string[] = []
+      try {
+        const parsed = JSON.parse(row.allowlist)
+        if (Array.isArray(parsed)) allowlist = parsed.filter((x): x is string => typeof x === "string")
+      } catch {
+        // corrupt JSON → treat as empty allowlist (deny-all), never throw
+      }
+      return { secretHash: row.secretHash, allowlist }
+    },
+    setEgressAllowlist(deployId, allowlist) {
+      db.prepare("UPDATE deploy_egress SET allowlist = ? WHERE deployId = ?").run(JSON.stringify(allowlist), deployId)
+    },
+    deleteEgress(deployId) {
+      db.prepare("DELETE FROM deploy_egress WHERE deployId = ?").run(deployId)
     },
     appendAudit(entry) {
       insertAudit.run(

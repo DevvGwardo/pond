@@ -2044,6 +2044,172 @@ test("pond login rejects a saved credential the server actively returned 401 for
   )
 })
 
+test("claim+signup on a fresh host does NOT mint an admin (privilege-escalation regression)", async () => {
+  // Before the fix, the signup branch of /claim passed isFirstUser=!hasAnyUser()
+  // as the isAdmin flag, so the first anonymous deployer to claim+signup on a
+  // not-yet-bootstrapped host became admin without the host token. /api/users
+  // gates first-user bootstrap behind the host token; this path must too.
+  const h = await startExtraHost({ extraArgs: ["--anonymous-rate-per-hour", "100"] })
+  try {
+    const create = await fetch(`${h.apiUrl}/api/deploys`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sourceFiles: tinySourceFiles() }),
+    })
+    assert.equal(create.status, 201)
+    const cb = await create.json()
+    const claim = await fetch(`${h.apiUrl}/api/deploys/${cb.deployId}/claim`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ claimToken: cb.claimToken, signup: { username: "firstie" } }),
+    })
+    assert.equal(claim.status, 200)
+    const claimed = await claim.json()
+    assert.ok(claimed.user?.token, "claim+signup should return a user credential")
+    const me = await fetch(`${h.apiUrl}/api/users/me`, {
+      headers: { authorization: `Bearer ${claimed.user.token}` },
+    })
+    assert.equal(me.status, 200)
+    const meBody = await me.json()
+    assert.equal(meBody.isAdmin, false, "first self-service claimer must NOT be admin")
+  } finally {
+    await stopExtraHost(h)
+  }
+})
+
+test("claim rotates the claim token; the pre-claim token no longer authorizes mutations", async () => {
+  const create = await fetch(`${apiUrl}/api/deploys`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sourceFiles: tinySourceFiles() }),
+  })
+  assert.equal(create.status, 201)
+  const cb = await create.json()
+  const oldToken = cb.claimToken
+
+  const claim = await fetch(`${apiUrl}/api/deploys/${cb.deployId}/claim`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ claimToken: oldToken, signup: { username: "rotor" } }),
+  })
+  assert.equal(claim.status, 200)
+  const claimed = await claim.json()
+  assert.ok(claimed.claimToken, "claim response should return a claim token")
+  assert.notEqual(claimed.claimToken, oldToken, "claim token should be rotated on claim")
+
+  // The leaked pre-claim token must no longer be a write/delete credential.
+  const putOld = await fetch(`${apiUrl}/api/deploys/${cb.deployId}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json", "x-pond-claim-token": oldToken },
+    body: JSON.stringify({ sourceFiles: tinySourceFiles() }),
+  })
+  assert.equal(putOld.status, 401, "leaked pre-claim token must not authorize mutations after claim")
+
+  // The rotated token returned to the legitimate owner still works.
+  const putNew = await fetch(`${apiUrl}/api/deploys/${cb.deployId}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json", "x-pond-claim-token": claimed.claimToken },
+    body: JSON.stringify({ sourceFiles: tinySourceFiles() }),
+  })
+  assert.equal(putNew.status, 200, "rotated claim token should authorize mutations")
+})
+
+test("publicInspect exposes read-only inspect but NOT backup/restore/logs without the claim token", async () => {
+  const http = await import("node:http")
+  const proxyGet = (id, pathname, headers = {}) =>
+    new Promise((resolve, reject) => {
+      const req = http.request(
+        {
+          host: "127.0.0.1",
+          port,
+          method: "GET",
+          path: pathname,
+          headers: { host: `${id}.${publicHost}:${port}`, ...headers },
+        },
+        (res) => {
+          let data = ""
+          res.on("data", (c) => (data += c))
+          res.on("end", () => resolve({ status: res.statusCode, body: data }))
+        },
+      )
+      req.on("error", reject)
+      req.end()
+    })
+
+  const create = await fetch(`${apiUrl}/api/deploys`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ sourceFiles: tinySourceFiles(), publicInspect: true }),
+  })
+  assert.equal(create.status, 201)
+  const cb = await create.json()
+
+  // Read-only inspection is open under publicInspect (no token needed).
+  const tables = await proxyGet(cb.deployId, "/__pond/db/tables")
+  assert.equal(tables.status, 200, "publicInspect should allow read-only table listing")
+
+  // Privileged ops are NOT covered by publicInspect.
+  const backupNoTok = await proxyGet(cb.deployId, "/__pond/db/backup")
+  assert.equal(backupNoTok.status, 403, "backup must require the claim token even when publicInspect")
+  const logsNoTok = await proxyGet(cb.deployId, "/__pond/logs")
+  assert.equal(logsNoTok.status, 403, "logs must require the claim token even when publicInspect")
+
+  // With the claim token, backup is allowed.
+  const backupTok = await proxyGet(cb.deployId, "/__pond/db/backup", { "x-pond-claim-token": cb.claimToken })
+  assert.equal(backupTok.status, 200, "claim token should authorize backup")
+})
+
+// Spawn `pond host` with the given extra args and resolve with {code, output}
+// once it exits. Used to assert startup-validation failures (which never reach
+// a healthy listening state, so startExtraHost's waitForHealth can't be used).
+function runHostExpectingExit(extraArgs) {
+  return new Promise(async (resolve, reject) => {
+    const xPort = await pickFreePort()
+    const xData = mkdtempSync(path.join(tmpdir(), "pond-host-test-exit-"))
+    const proc = spawn(
+      process.execPath,
+      [
+        CLI_PATH,
+        "host",
+        "--port",
+        String(xPort),
+        "--host",
+        "127.0.0.1",
+        "--public-host",
+        publicHost,
+        "--data-dir",
+        xData,
+        ...extraArgs,
+      ],
+      { env: { ...process.env, POND_HOST_TOKEN: "x".repeat(32) }, stdio: ["ignore", "pipe", "pipe"] },
+    )
+    let output = ""
+    proc.stdout.on("data", (c) => (output += c))
+    proc.stderr.on("data", (c) => (output += c))
+    const timer = setTimeout(() => {
+      proc.kill("SIGKILL")
+      reject(new Error(`host did not exit; expected validation failure. output: ${output}`))
+    }, 8000)
+    proc.once("exit", (code) => {
+      clearTimeout(timer)
+      rmSync(xData, { recursive: true, force: true })
+      resolve({ code, output })
+    })
+  })
+}
+
+test("--capsule-egress with an invalid mode fails fast", async () => {
+  const { code, output } = await runHostExpectingExit(["--capsule-egress", "bogus"])
+  assert.equal(code, 1)
+  assert.match(output, /invalid --capsule-egress/)
+})
+
+test("--capsule-egress=proxy is gated until the proxy is wired end-to-end", async () => {
+  const { code, output } = await runHostExpectingExit(["--capsule-egress", "proxy"])
+  assert.equal(code, 1, "proxy mode must refuse to start rather than silently seal capsules")
+  assert.match(output, /not yet wired end-to-end/)
+})
+
 test("SIGINT host leaves no orphan deploy-worker processes", async () => {
   await stopHost()
   // After stop, no deploy-worker.js child of the host should remain.

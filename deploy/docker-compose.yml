@@ -24,6 +24,13 @@ services:
     # Container-wide process ceiling. Must comfortably exceed the sum of active
     # capsules (each is itself capped at 256 pids by its own cgroup).
     pids_limit: 4096
+    # Defense-in-depth: a sandbox-escaping capsule shouldn't be able to gain
+    # privileges or use ambient capabilities. The control plane needs none of
+    # the default caps (cgroup management goes through v2 delegation, not caps).
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     # The tunnel reaches us over the compose network — bind to 0.0.0.0
     # *inside* the container only; the host port is NOT published.
     expose:
@@ -31,10 +38,11 @@ services:
     volumes:
       - pond-data:/data
       # Per-capsule cgroup isolation needs a writable cgroup v2 subtree inside
-      # the container. Uncomment this mount AND set POND_CAPSULE_CGROUP_ROOT in
-      # .env (e.g. /sys/fs/cgroup/pond) to enable it. See deploy/README.md →
-      # "Per-capsule isolation". Without it, capsules fall back to the heap cap.
-      # - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      # the container. Keep this mount enabled AND set POND_CAPSULE_CGROUP_ROOT
+      # in .env (e.g. /sys/fs/cgroup/pond) — without it, capsules fall back to
+      # the heap cap only and the egress firewall (which matches on the capsule
+      # cgroup) has nothing to match. See deploy/HARDENING.md.
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
     command:
       - node
       - /app/src/cli.js

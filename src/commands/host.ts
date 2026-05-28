@@ -501,6 +501,22 @@ export const hostCommand = defineCommand({
         "each capsule runs in its own child cgroup with cpu/memory/pids limits. Also POND_CAPSULE_CGROUP_ROOT.",
       default: "",
     },
+    "capsule-egress": {
+      type: "string",
+      description:
+        "Outbound network policy for ALL capsules (uniform, regardless of claim status): " +
+        "'open' (legacy: only anonymous-unclaimed capsules are network-restricted; claimed capsules have full network), " +
+        "'sealed' (no capsule may make outbound connections), or " +
+        "'proxy' (capsules reach only their per-deploy allowlisted hosts via the egress proxy). " +
+        "'proxy'/'sealed' REQUIRE the OS egress firewall (deploy/capsule-egress.nft) to be the real boundary. Also POND_CAPSULE_EGRESS.",
+      default: "open",
+    },
+    "egress-proxy-port": {
+      type: "string",
+      description:
+        "Loopback port for the allowlisting egress proxy when --capsule-egress=proxy. Also POND_EGRESS_PROXY_PORT.",
+      default: "8788",
+    },
   },
   async run({ args }) {
     const port = parseInt(typeof args.port === "string" ? args.port : "8787", 10)
@@ -555,6 +571,29 @@ export const hostCommand = defineCommand({
     )
     const trustProxy = process.env.POND_TRUST_PROXY_HEADERS === "1" || args["trust-proxy"] === true
 
+    // Uniform capsule egress policy (applies to ALL capsules regardless of
+    // claim status). See the --capsule-egress flag.
+    const egressModeRaw = (
+      process.env.POND_CAPSULE_EGRESS ?? (typeof args["capsule-egress"] === "string" ? args["capsule-egress"] : "open")
+    ).toLowerCase()
+    if (!["open", "sealed", "proxy"].includes(egressModeRaw)) {
+      console.error(`[pond host] invalid --capsule-egress: ${egressModeRaw} (expected open|sealed|proxy)`)
+      process.exit(1)
+    }
+    if (egressModeRaw === "proxy") {
+      // The egress proxy, its per-deploy allowlist API, and the worker-side
+      // ProxyAgent (which needs the `undici` dependency) are staged but not yet
+      // wired end-to-end; enabling this blindly would silently seal capsules.
+      // The OS firewall + proxy module + control-db allowlist are in place —
+      // see deploy/HARDENING.md for the remaining rollout steps.
+      console.error(
+        "[pond host] --capsule-egress=proxy is not yet wired end-to-end (worker ProxyAgent pending). " +
+          "Use 'open' or 'sealed' for now; see deploy/HARDENING.md.",
+      )
+      process.exit(1)
+    }
+    const egressMode = egressModeRaw as "open" | "sealed"
+
     const nodeMajor = parseInt((process.versions.node ?? "0").split(".")[0], 10)
     const sandboxAvailable = nodeMajor >= 22 && fs.existsSync(pondSrcDir) && fs.existsSync(pondNodeModulesDir)
     if (!sandboxAvailable && anonymousEnabled) {
@@ -590,12 +629,14 @@ export const hostCommand = defineCommand({
     }
 
     let hostToken = process.env.POND_HOST_TOKEN ?? ""
+    let hostTokenGenerated = false
     if (!hostToken) {
       if (fs.existsSync(tokenFile)) {
         hostToken = fs.readFileSync(tokenFile, "utf-8").trim()
       } else {
         hostToken = randomBytes(32).toString("hex")
         fs.writeFileSync(tokenFile, hostToken, { mode: 0o600 })
+        hostTokenGenerated = true
       }
     }
 
@@ -722,10 +763,15 @@ export const hostCommand = defineCommand({
       clearTimeout(timer)
     }
 
-    async function forkDeploy(
-      record: HostedDeployRecord,
-      opts: { restrictNetwork?: boolean; useSandbox?: boolean; auto?: boolean } = {},
-    ): Promise<void> {
+    async function forkDeploy(record: HostedDeployRecord, opts: { auto?: boolean } = {}): Promise<void> {
+      // Isolation policy is derived in ONE place (bootOptsForRecord) so every
+      // boot path — create, claim, update, redeploy, crash-respawn — applies
+      // the same uniform sandbox/network rules. null means the deploy should
+      // stay down (a terminated anonymous deploy past its grace window).
+      const policy = bootOptsForRecord(record.deployId)
+      if (!policy) return
+      const useSandbox = policy.useSandbox
+      const restrictNetwork = policy.restrictNetwork
       // A user-initiated (re)deploy ships potentially-fixed code, so it earns a
       // fresh crash budget. Automatic respawns (opts.auto) must NOT reset it,
       // or a fast boot→crash loop would never trip RESTART_MAX.
@@ -739,17 +785,17 @@ export const hostCommand = defineCommand({
       // Resolve symlinks: the permission model checks REAL paths (macOS /tmp →
       // /private/tmp), and the worker uses cwd to compute its data.db location,
       // so cwd / bundlePath must be in real form when the sandbox is active.
-      const realDir = opts.useSandbox && sandboxAvailable ? fs.realpathSync(dir) : dir
-      const realBundlePath = opts.useSandbox && sandboxAvailable ? fs.realpathSync(bundlePath) : bundlePath
+      const realDir = useSandbox && sandboxAvailable ? fs.realpathSync(dir) : dir
+      const realBundlePath = useSandbox && sandboxAvailable ? fs.realpathSync(bundlePath) : bundlePath
       const realClientPath = fs.existsSync(clientPath)
-        ? opts.useSandbox && sandboxAvailable
+        ? useSandbox && sandboxAvailable
           ? fs.realpathSync(clientPath)
           : clientPath
         : undefined
 
       const quota = controlDb.getQuota(record.deployId)
       const execArgv = [`--max-old-space-size=${quota.maxMemoryMb}`]
-      if (opts.useSandbox && sandboxAvailable) {
+      if (useSandbox && sandboxAvailable) {
         // Node 24 removed `--experimental-permission`; the stable `--permission`
         // is available on Node 23+. Node 22 (LTS) shipped before the rename so
         // we keep the experimental form there.
@@ -824,7 +870,8 @@ export const hostCommand = defineCommand({
               hostname: "127.0.0.1",
               inspectSecretHash: record.claimTokenHash,
               publicInspect: record.publicInspect,
-              restrictNetwork: Boolean(opts.restrictNetwork),
+              restrictNetwork,
+              maxRestoreBytes: quota.maxDiskBytes,
             },
           })
         })
@@ -850,7 +897,12 @@ export const hostCommand = defineCommand({
       const anon = controlDb.findAnonymous(deployId)
       if (anon && anon.terminated === 1) return null
       const isAnonUnclaimed = anon !== null
-      return { useSandbox: isAnonUnclaimed, restrictNetwork: isAnonUnclaimed }
+      // Isolation is UNIFORM: every capsule runs in the Node permission sandbox
+      // regardless of claim status — claiming changes ownership/quota, not the
+      // sandbox. Network policy follows --capsule-egress: 'sealed' restricts
+      // every capsule's outbound; 'open' (legacy) restricts only anonymous,
+      // unclaimed capsules and leaves claimed ones with full network.
+      return { useSandbox: true, restrictNetwork: egressMode === "sealed" ? true : isAnonUnclaimed }
     }
 
     // Respawn a worker that died unexpectedly, with backoff and a hard cap so a
@@ -876,7 +928,7 @@ export const hostCommand = defineCommand({
       const delay = RESTART_BACKOFF_MS[Math.min(st.count, RESTART_BACKOFF_MS.length - 1)]
       st.count++
       const timer = setTimeout(() => {
-        void forkDeploy(record, { ...opts, auto: true }).catch((err) => {
+        void forkDeploy(record, { auto: true }).catch((err) => {
           console.error(`[pond host] respawn failed for ${deployId}: ${err?.message ?? err}`)
         })
       }, delay)
@@ -897,7 +949,7 @@ export const hostCommand = defineCommand({
         const opts = bootOptsForRecord(deployId)
         if (!opts) return null
         try {
-          await forkDeploy(record, { ...opts, auto: true })
+          await forkDeploy(record, { auto: true })
         } catch {
           return null
         }
@@ -917,12 +969,9 @@ export const hostCommand = defineCommand({
       if (!record) continue
       const anon = controlDb.findAnonymous(record.deployId)
       if (anon && anon.terminated === 1) continue
-      const isAnonUnclaimed = anon !== null
       try {
-        await forkDeploy(record, {
-          useSandbox: isAnonUnclaimed,
-          restrictNetwork: isAnonUnclaimed,
-        })
+        // forkDeploy derives the uniform isolation policy itself.
+        await forkDeploy(record)
       } catch (err) {
         console.error(`[pond host] boot failed for ${record.deployId}:`, err)
       }
@@ -950,6 +999,31 @@ export const hostCommand = defineCommand({
           console.log(`[pond host] anonymous deploy ${id} deleted (retention passed)`)
         } catch (e) {
           console.error(`sweep delete ${id}:`, e)
+        }
+      }
+      // Runtime disk watchdog. The per-deploy quota is enforced at deploy/build
+      // time, but a running capsule can keep writing (blobs, data.db growth)
+      // until it fills the shared /data volume and takes every neighbour down.
+      // The cgroup caps cpu/memory/pids but NOT disk, so we poll here: a capsule
+      // whose dir exceeds its disk quota is stopped (not respawned — see the
+      // SIGTERM-clean exit handler) and flagged, freeing the volume.
+      for (const id of [...runningChildren.keys()]) {
+        try {
+          const maxDiskBytes = controlDb.getQuota(id).maxDiskBytes
+          if (!Number.isFinite(maxDiskBytes) || maxDiskBytes <= 0) continue
+          const used = dirSize(deployDirFor(id))
+          if (used > maxDiskBytes) {
+            void stopDeploy(id)
+            restartState.delete(id)
+            const record = readRecord(id)
+            if (record) {
+              record.bootError = `Disk usage ${used} exceeds quota ${maxDiskBytes} — capsule stopped. Reduce on-disk data and redeploy.`
+              writeRecord(record)
+            }
+            console.error(`[pond host] deploy ${id} over disk quota (${used} > ${maxDiskBytes}) — stopped`)
+          }
+        } catch (e) {
+          console.error(`sweep disk-watchdog ${id}:`, e)
         }
       }
       try {
@@ -1023,6 +1097,12 @@ export const hostCommand = defineCommand({
 
     function clientIp(c: any): string {
       if (trustProxy) {
+        // Prefer CF-Connecting-IP: Cloudflare OVERWRITES this header with the
+        // real client IP on every request, so a client can't spoof it the way
+        // they can prepend a bogus X-Forwarded-For entry. Only fall back to the
+        // first XFF hop when the request didn't come through Cloudflare.
+        const cf = c.req.header("cf-connecting-ip")
+        if (cf && cf.trim()) return cf.trim()
         const xff = c.req.header("x-forwarded-for")
         if (xff) {
           const first = xff.split(",")[0]?.trim()
@@ -1303,10 +1383,9 @@ export const hostCommand = defineCommand({
           controlDb.setDeployOwner(deployId, user!.id)
         }
         try {
-          await forkDeploy(record, {
-            useSandbox: isAnonymous,
-            restrictNetwork: isAnonymous,
-          })
+          // forkDeploy derives the uniform isolation policy itself (the anon
+          // row, if any, was just written above).
+          await forkDeploy(record)
         } catch (err: any) {
           try {
             fs.rmSync(dir, { recursive: true, force: true })
@@ -1468,8 +1547,11 @@ export const hostCommand = defineCommand({
         if (!chosen) {
           return c.json({ error: "username taken (tried -2..-99)" }, 409)
         }
-        const isFirstUser = !controlDb.hasAnyUser()
-        const created = controlDb.createUser(chosen, isFirstUser)
+        // Never grant admin via self-service claim/signup. Admin bootstrap goes
+        // through POST /api/users, which requires the host token for the first
+        // user — minting an admin here would let the first anonymous claimer on
+        // a fresh host take over.
+        const created = controlDb.createUser(chosen, false)
         user = created.user
         createdCredential = { username: created.user.username, token: created.token }
       } else if (bearerToken) {
@@ -1511,6 +1593,15 @@ export const hostCommand = defineCommand({
         if (!v.ok) return c.json({ error: v.error }, 413)
         fs.writeFileSync(path.join(deployDirFor(deployId), ".env.pond.server"), body.envText, { mode: 0o600 })
       }
+      // Rotate the claim token on every successful claim. The token that
+      // authorized this claim may have leaked (IDE links with #token=…,
+      // .pond/deploy.json, persisted localStorage). authorizeDeployMutation
+      // still accepts the claim token for mutate/delete, so a stale copy would
+      // otherwise stay a live write/delete credential after ownership. Minting
+      // a fresh token here invalidates every leaked copy of the old one; the
+      // legitimate caller persists the new value we return below.
+      const rotatedClaimToken = randomBytes(32).toString("hex")
+      record.claimTokenHash = sha256Hex(rotatedClaimToken)
       record.claimedAt = record.claimedAt ?? new Date().toISOString()
       record.updatedAt = new Date().toISOString()
       writeRecord(record)
@@ -1529,10 +1620,10 @@ export const hostCommand = defineCommand({
       })
       const resp: Record<string, unknown> = {
         ...record,
-        // Echo the plaintext claimToken back to the client so they can
-        // persist it. The server stores only the hash on disk; the
-        // plaintext we just verified came in via body.claimToken.
-        claimToken: body.claimToken,
+        // Return the freshly rotated plaintext claim token so the client can
+        // persist it. The server stores only the hash; the old token the
+        // client sent in body.claimToken is now dead.
+        claimToken: rotatedClaimToken,
       }
       if (createdCredential) resp.user = createdCredential
       return c.json(resp)
@@ -3218,7 +3309,17 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
     if (!abuseEmail) {
       console.log(`  ⚠ no --abuse-email set — security.txt / abuse page will be unhelpful for a public deploy.`)
     }
-    console.log(`  host token (bootstrap / recovery): ${hostToken}`)
+    if (hostTokenGenerated) {
+      // First run only: surface the freshly generated token once so the operator
+      // can capture it. On subsequent boots we never reprint it — stdout lands in
+      // `docker logs`, and the value is persisted to the 0600 token file anyway.
+      console.log(`  host token (bootstrap / recovery, generated now): ${hostToken}`)
+      console.log(`  ^ save this — it will NOT be printed again. Also stored at ${tokenFile}.`)
+    } else {
+      console.log(
+        `  host token: configured (from ${process.env.POND_HOST_TOKEN ? "POND_HOST_TOKEN" : tokenFile}) — not printed`,
+      )
+    }
     console.log(`  bootstrap first admin: pond login --api ${apiUrl} --username <name>`)
     if (anonymousEnabled) {
       console.log(
