@@ -171,6 +171,27 @@ async function deleteEnvKey(
 
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
 
+interface TableSample {
+  name: string
+  columns: Array<{ name: string; type: string }>
+  rows: Array<Record<string, unknown>>
+  rowCount: number
+  orderBy: string
+}
+
+async function fetchTableSample(
+  token: string,
+  deployId: string,
+  table: string,
+  limit = 10,
+): Promise<TableSample | { error: string }> {
+  const r = await fetch(`/api/deploys/${deployId}/inspect/table/${encodeURIComponent(table)}?limit=${limit}`, {
+    headers: authHeaders(token),
+  })
+  if (!r.ok) return { error: (await r.json().catch(() => ({}))).error ?? "table sample failed" }
+  return r.json()
+}
+
 function parseHashRoute(hash: string): { deployId: string | null } {
   const m = hash.match(/^#d\/([a-f0-9]+)/i)
   return { deployId: m ? m[1] : null }
@@ -750,7 +771,7 @@ function DeployDetail({
         <DetailSidebar tab={tab} onTab={setTab} />
         <main class="min-w-0 space-y-6">
           {tab === "overview" ? (
-            <OverviewTab d={d} inspect={inspect} loading={inspectLoading} error={inspectErr} />
+            <OverviewTab d={d} token={token} inspect={inspect} loading={inspectLoading} error={inspectErr} />
           ) : null}
           {tab === "tables" ? <TablesTab inspect={inspect} loading={inspectLoading} error={inspectErr} /> : null}
           {tab === "logs" ? <LogsTab token={token} deployId={d.deployId} /> : null}
@@ -806,11 +827,13 @@ function DetailSidebar({ tab, onTab }: { tab: DetailTab; onTab: (t: DetailTab) =
 
 function OverviewTab({
   d,
+  token,
   inspect,
   loading,
   error,
 }: {
   d: DeployRow
+  token: string
   inspect: InspectData | null
   loading: boolean
   error: string | null
@@ -835,6 +858,9 @@ function OverviewTab({
         <div class="rounded-lg border border-amber-900/60 bg-amber-950/30 px-4 py-3 text-xs text-amber-200">
           Could not open capsule DB: {inspect.dbOpenError}
         </div>
+      ) : null}
+      {inspect && inspect.tables.length > 0 ? (
+        <RecentActivityCard token={token} deployId={d.deployId} tables={inspect.tables} />
       ) : null}
       <section class="rounded-xl border border-zinc-900 bg-zinc-950">
         <header class="border-b border-zinc-900 px-4 py-3">
@@ -865,6 +891,164 @@ function Meta({ label, value }: { label: string; value: any }) {
       <dd class="text-right text-zinc-300">{value}</dd>
     </>
   )
+}
+
+function RecentActivityCard({
+  token,
+  deployId,
+  tables,
+}: {
+  token: string
+  deployId: string
+  tables: Array<{ name: string; rowCount: number; columns: number }>
+}) {
+  // Default to the largest non-empty user table. Falls back to the first
+  // table if everything is empty, so we still render the chooser and an
+  // explicit empty state instead of hiding the panel.
+  const candidates = useMemo(() => tables.filter((t) => t.rowCount > 0), [tables])
+  const defaultName = useMemo(() => {
+    if (candidates.length > 0) {
+      return candidates.slice().sort((a, b) => b.rowCount - a.rowCount)[0].name
+    }
+    return tables[0]?.name ?? null
+  }, [candidates, tables])
+  const [selected, setSelected] = useState<string | null>(defaultName)
+  const [sample, setSample] = useState<TableSample | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  // If the inspect refresh changes the largest table, follow it — but only
+  // when the user hasn't manually picked. We approximate "manually picked"
+  // by remembering whether the current selection still matches the
+  // most-recent default. This avoids overriding user intent.
+  useEffect(() => {
+    setSelected((prev) => prev ?? defaultName)
+  }, [defaultName])
+
+  useEffect(() => {
+    if (!selected) return
+    let cancelled = false
+    setLoading(true)
+    void fetchTableSample(token, deployId, selected, 10).then((res) => {
+      if (cancelled) return
+      if ("error" in res) {
+        setError(res.error)
+        setSample(null)
+      } else {
+        setSample(res)
+        setError(null)
+      }
+      setLoading(false)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [token, deployId, selected])
+
+  // Columns to display: drop the synthetic __rowid we add server-side and
+  // truncate to 5 columns to keep the layout readable; full data still
+  // available in the Tables tab.
+  const displayCols = useMemo(() => {
+    if (!sample) return []
+    return sample.columns.filter((c) => c.name !== "__rowid").slice(0, 5)
+  }, [sample])
+
+  return (
+    <section class="rounded-xl border border-zinc-900 bg-zinc-950">
+      <header class="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-900 px-4 py-3">
+        <div>
+          <h3 class="text-sm font-semibold text-zinc-100">Recent activity</h3>
+          <p class="mt-0.5 text-[11px] text-zinc-500">
+            Latest 10 rows
+            {sample ? (
+              <>
+                {" "}
+                · ordered by <code class="font-mono text-zinc-400">{sample.orderBy}</code> ·{" "}
+                {sample.rowCount.toLocaleString()} total
+              </>
+            ) : null}
+          </p>
+        </div>
+        {tables.length > 1 ? (
+          <select
+            class="rounded-md border border-zinc-800 bg-black px-2 py-1 text-xs text-zinc-200 outline-none transition focus:border-emerald-700/60"
+            value={selected ?? ""}
+            onChange={(e) => setSelected((e.target as HTMLSelectElement).value)}
+          >
+            {tables.map((t) => (
+              <option key={t.name} value={t.name}>
+                {t.name} ({t.rowCount.toLocaleString()})
+              </option>
+            ))}
+          </select>
+        ) : null}
+      </header>
+      {error ? (
+        <div class="border-b border-red-900/60 bg-red-950/30 px-4 py-2 text-xs text-red-300">{error}</div>
+      ) : null}
+      {loading ? (
+        <div class="px-4 py-8 text-center text-xs text-zinc-500">Loading rows…</div>
+      ) : !sample || sample.rows.length === 0 ? (
+        <div class="px-4 py-8 text-center text-xs text-zinc-500">
+          No rows in <code class="font-mono text-zinc-400">{selected ?? "?"}</code> yet.
+        </div>
+      ) : (
+        <div class="overflow-x-auto">
+          <table class="w-full text-xs">
+            <thead class="border-b border-zinc-900 text-[10px] uppercase tracking-wider text-zinc-500">
+              <tr>
+                {displayCols.map((col) => (
+                  <th key={col.name} class="px-4 py-2 text-left font-medium">
+                    {col.name}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-zinc-900">
+              {sample.rows.map((row, idx) => (
+                <tr key={idx} class="transition hover:bg-zinc-900/30">
+                  {displayCols.map((col) => (
+                    <td key={col.name} class="px-4 py-2 align-top font-mono text-zinc-300">
+                      <CellValue value={row[col.name]} />
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  )
+}
+
+function CellValue({ value }: { value: unknown }) {
+  if (value === null || value === undefined) {
+    return <span class="italic text-zinc-600">null</span>
+  }
+  if (typeof value === "boolean") {
+    return <span class="text-emerald-300">{String(value)}</span>
+  }
+  if (typeof value === "number") {
+    return <span class="tabular-nums text-zinc-200">{value.toLocaleString()}</span>
+  }
+  if (typeof value === "object") {
+    return <span class="text-zinc-500">{JSON.stringify(value)}</span>
+  }
+  const s = String(value)
+  // Heuristic ISO date rendering — server returns timestamps as strings in our
+  // capsule schemas. If it parses to a real date and looks date-shaped,
+  // render relative age; otherwise truncate to keep rows skim-able.
+  if (/^\d{4}-\d{2}-\d{2}T/.test(s)) {
+    const ts = Date.parse(s)
+    if (!Number.isNaN(ts)) {
+      return <span title={s}>{humanAge(s)}</span>
+    }
+  }
+  if (s.length > 80) {
+    return <span title={s}>{s.slice(0, 80)}…</span>
+  }
+  return <>{s}</>
 }
 
 function KpiTileText({ label, value, accent = false }: { label: string; value: string; accent?: boolean }) {

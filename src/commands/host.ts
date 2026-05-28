@@ -1652,6 +1652,80 @@ export const hostCommand = defineCommand({
       })
     })
 
+    // Sample recent rows from a named table in the capsule's DB. Used by the
+    // dashboard Overview "Recent activity" panel and by the Tables tab for a
+    // drill-down preview. Read-only WAL-safe open; identifier whitelisted
+    // before interpolation. Ordering: prefer the table's `id` column DESC if
+    // present, else fall back to the intrinsic `rowid` DESC (which is also
+    // present on WITHOUT ROWID tables for our practical schemas — but if the
+    // PRAGMA reports no `rowid` available we surface a friendly error rather
+    // than throwing).
+    app.get("/api/deploys/:deployId/inspect/table/:name", (c) => {
+      const deployId = c.req.param("deployId")
+      const name = c.req.param("name")
+      const r = requireDeployOwner(c, deployId)
+      if (r instanceof Response) return r
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+        return c.json({ error: "invalid table name" }, 400)
+      }
+      const rawLimit = Number.parseInt(c.req.query("limit") ?? "", 10)
+      const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(rawLimit, 1), 100) : 20
+      const dir = deployDirFor(deployId)
+      const dbPath = path.join(dir, ".pond", "data.db")
+      if (!fs.existsSync(dbPath)) return c.json({ error: "capsule has no database yet" }, 404)
+
+      let db: Database.Database | undefined
+      try {
+        db = new Database(dbPath, { readonly: true, fileMustExist: true })
+        const exists = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) as
+          | { name: string }
+          | undefined
+        if (!exists) return c.json({ error: `unknown table: ${name}` }, 404)
+
+        const cols = db.prepare(`PRAGMA table_info("${name}")`).all() as Array<{ name: string; type: string }>
+        const hasIdColumn = cols.some((col) => col.name === "id")
+        // sqlite_master.sql is the table's CREATE statement. WITHOUT ROWID
+        // tables can't be ordered by rowid; detect by substring match (the
+        // statement always normalises to lowercase "without rowid" via
+        // sqlite's parser when stored back) and skip ordering rather than
+        // erroring out on a malformed query.
+        const createSql =
+          (
+            db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) as
+              | { sql: string }
+              | undefined
+          )?.sql ?? ""
+        const isWithoutRowid = /without\s+rowid/i.test(createSql)
+
+        let rows: unknown[] = []
+        if (hasIdColumn) {
+          rows = db.prepare(`SELECT * FROM "${name}" ORDER BY id DESC LIMIT ?`).all(limit)
+        } else if (!isWithoutRowid) {
+          rows = db.prepare(`SELECT *, rowid AS __rowid FROM "${name}" ORDER BY rowid DESC LIMIT ?`).all(limit)
+        } else {
+          // No id and no rowid — return rows in whatever order sqlite gives.
+          rows = db.prepare(`SELECT * FROM "${name}" LIMIT ?`).all(limit)
+        }
+
+        const total = (db.prepare(`SELECT COUNT(*) AS n FROM "${name}"`).get() as { n: number }).n
+        return c.json({
+          name,
+          columns: cols.map((col) => ({ name: col.name, type: col.type })),
+          rows,
+          rowCount: Number(total ?? 0),
+          orderBy: hasIdColumn ? "id DESC" : !isWithoutRowid ? "rowid DESC" : "natural",
+        })
+      } catch (err) {
+        return c.json({ error: err instanceof Error ? err.message : String(err) }, 500)
+      } finally {
+        try {
+          db?.close()
+        } catch {
+          // ignore close errors on read-only handle
+        }
+      }
+    })
+
     app.put("/api/deploys/:deployId/env", async (c) => {
       const deployId = c.req.param("deployId")
       const r = requireDeployOwner(c, deployId)
