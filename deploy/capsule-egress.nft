@@ -44,6 +44,17 @@ table inet pond {
 		# Everything below applies ONLY to packets from a capsule cgroup.
 		# Non-capsule (control plane, system) traffic falls through untouched.
 		socket cgroupv2 level 1 "pond" jump capsule_filter
+
+		# Belt-and-suspenders: anonymous workers are also dropped to a dedicated
+		# unprivileged uid (POND_SANDBOX_UID / the 'pond-sandbox' user) so a
+		# native-addon escape lands as a powerless user. If that uid differs from
+		# the control plane's, an owner-match drop stays consistent with the
+		# privilege drop even if a worker ever ends up OUTSIDE the capsule cgroup
+		# (e.g. cgroup delegation failed). Uncomment and set <SANDBOX_UID> to the
+		# uid the host logs ("anonymous workers drop to uid=…"). The cgroup match
+		# above is uid-independent and remains the primary boundary.
+		#
+		# meta skuid <SANDBOX_UID> jump capsule_filter
 	}
 
 	chain capsule_filter {
