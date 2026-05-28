@@ -27,8 +27,7 @@
     "src/",
     "client/",
     "docs/*.md",
-    "docs/*.txt",
-    "templates/"
+    "docs/*.txt"
   ],
   "scripts": {
     "build": "node scripts/build-ide.mjs && node scripts/build-llms.mjs && tsc",

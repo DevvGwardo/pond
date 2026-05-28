@@ -59,12 +59,12 @@ Versioning: [Semver](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- **`pond login` now reuses the saved credential when no `--token` is provided** instead of dumping the "Need a token to attach. Three paths forward" error wall — which fired even when `~/.pond/credentials.json` already had a perfectly valid token for the target apiUrl. After `pond signup` saves credentials (or the user already authenticated on another flow), `pond login`, `pond login --username devvgwardo`, and `pond login --api https://pond.run` all just surface `Already logged in as devvgwardo (admin) at https://pond.run  (credential from ~/.pond/credentials.json)` and exit 0, after validating the token against `GET /api/users/me`. The validate-and-show flow handles three distinct response classes:
+- **`pond login` now reuses the saved credential when no `--token` is provided** instead of dumping the "Need a token to attach. Three paths forward" error wall — which fired even when `~/.pond/credentials.json` already had a perfectly valid token for the target apiUrl. After `pond signup` saves credentials (or the user already authenticated on another flow), `pond login`, `pond login --username your-username`, and `pond login --api https://pond.run` all just surface `Already logged in as your-username (admin) at https://pond.run  (credential from ~/.pond/credentials.json)` and exit 0, after validating the token against `GET /api/users/me`. The validate-and-show flow handles three distinct response classes:
   - **Server returns 2xx** → "Already logged in as …" with the live username/admin status.
   - **Server returns 401/403/404** → token has been rotated or revoked; refuse to silently use it, exit 1 with a precise message naming the saved username and the rotation path.
   - **Network failure / transient 5xx** → trust the saved credential, exit 0, but print `Saved credential for … at … (could not validate — network error (…))` so the user sees why no live confirmation happened. Without this fallback, offline use of `pond login` would be a regression vs the pre-0.3.13 error-wall behavior.
 
-  If `--username` is passed and doesn't match the saved one (the common typo case — e.g. `DevGwardo` vs the actual `devvgwardo`), the error spells out the case-sensitivity rule and shows both the "use the saved one" and "attach as the new name with --token" paths. No more guessing what to paste.
+  If `--username` is passed and doesn't match the saved one (the common typo case — e.g. `Your-Username` vs the actual `your-username`), the error spells out the case-sensitivity rule and shows both the "use the saved one" and "attach as the new name with --token" paths. No more guessing what to paste.
 
 ### Security
 
@@ -205,7 +205,7 @@ Versioning: [Semver](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - **`pond login --api` defaults to `https://pond.run`** (matching `pond deploy` since 0.3.0). Most users want the public host; making them retype it on every login is friction.
-- **`pond login` catches the empty-`--api` footgun.** Citty (like most arg parsers) will consume the next token as a flag's value, even if it starts with `--`. So `pond login --api --username devgwardo` silently assigned `--username` as the api URL and then failed trying to reach a control plane named "--username". `pond login` now detects values that start with `--` (or that are empty) and errors out with a clear explanation pointing at the simpler `--token`-based command form.
+- **`pond login` catches the empty-`--api` footgun.** Citty (like most arg parsers) will consume the next token as a flag's value, even if it starts with `--`. So `pond login --api --username your-username` silently assigned `--username` as the api URL and then failed trying to reach a control plane named "--username". `pond login` now detects values that start with `--` (or that are empty) and errors out with a clear explanation pointing at the simpler `--token`-based command form.
 - **`pond login` error message when no token / no bootstrap credentials are available** now lists three concrete next steps (signup, attach existing token, self-hosted bootstrap) instead of just complaining about missing `--admin-token` / `POND_HOST_TOKEN`. Half the people hitting this error want option 1.
 
 ### Internal
