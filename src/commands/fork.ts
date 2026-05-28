@@ -1,7 +1,7 @@
 import { defineCommand } from "citty"
 import * as fs from "node:fs"
 import * as path from "node:path"
-import { execSync } from "node:child_process"
+import spawn from "cross-spawn"
 import { randomBytes } from "node:crypto"
 import { findPackageJsonLifecycleScripts } from "../host/package-json-validation.js"
 
@@ -215,13 +215,17 @@ export const forkCommand = defineCommand({
     }
 
     if (args.git) {
-      try {
-        execSync("git init", { cwd: dest, stdio: "ignore" })
-        execSync("git add -A", { cwd: dest, stdio: "ignore" })
-        execSync(`git commit -m "fork from ${deployId}"`, { cwd: dest, stdio: "ignore" })
-      } catch {
-        // git not installed — skip silently
+      // argv form (no shell) so the deploy id in the commit message is never
+      // shell-interpreted; cross-spawn resolves git.exe on Windows.
+      const git = (a: string[]) => spawn.sync("git", a, { cwd: dest, stdio: "ignore" })
+      const init = git(["init"])
+      if (!init.error && init.status === 0) {
+        const add = git(["add", "-A"])
+        if (!add.error && add.status === 0) {
+          git(["commit", "-m", `fork from ${deployId}`])
+        }
       }
+      // git not installed or a step failed — skip silently (best-effort, as before)
     }
 
     console.log(`\n  Forked ${deployId} into ${dirName}/`)

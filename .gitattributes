@@ -1,0 +1,13 @@
+# Normalize line endings to LF on checkout for everyone, including Windows.
+# Without this, a Windows checkout (core.autocrlf=true) materializes CRLF and
+# `npm run format:check` fails because Prettier expects LF (its default).
+* text=auto eol=lf
+
+# Shell scripts must stay LF or they break when run on the Linux host.
+*.sh text eol=lf
+
+# Binary assets — never touch.
+*.png binary
+*.jpg binary
+*.ico binary
+*.db binary

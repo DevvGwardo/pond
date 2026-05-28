@@ -7,11 +7,23 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    # The Windows leg is newly added and not yet confirmed green end-to-end
+    # (some host integration tests assert POSIX-only behavior). Keep it
+    # non-blocking so it surfaces real signal without gating merges; flip this
+    # to drop the Windows exception once the suite is verified green on Windows.
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         node: [20, 22, 24]
+        # Exercise Windows on the current LTS so the client CLI (new / dev /
+        # deploy / login / dashboard / --generate) stays green for Windows
+        # users. Host-side cgroup/sandbox code is Linux-only and no-ops here.
+        include:
+          - os: windows-latest
+            node: 22
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -23,8 +35,10 @@ jobs:
       - run: npx tsc --noEmit
       # Some tests scaffold a capsule whose template runs `git init && git commit`.
       # Provide a default identity so the commit step doesn't fail in CI even if
-      # the test forgets --no-git.
+      # the test forgets --no-git. Use bash explicitly so the step is identical
+      # on the Windows runner (which defaults to PowerShell).
       - run: |
           git config --global user.email "ci@pond.test"
           git config --global user.name "pond ci"
+        shell: bash
       - run: npm test

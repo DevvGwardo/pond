@@ -1,7 +1,12 @@
 import * as fs from "node:fs"
 import * as path from "node:path"
 import * as os from "node:os"
-import { spawn } from "node:child_process"
+// cross-spawn, not node:child_process. The agent CLIs (claude/codex/hermes)
+// ship as .cmd/.bat shims on Windows, which Node refuses to spawn directly
+// since the CVE-2024-27980 hardening, and plain `shell: true` would fragment
+// the free-form prompt on spaces. cross-spawn resolves the shim and quotes
+// each arg correctly on Windows while being a no-op passthrough on POSIX.
+import spawn from "cross-spawn"
 
 export type AgentName = "hermes" | "claude" | "codex"
 
@@ -196,8 +201,8 @@ function streamChild(
       if (onChunk) onChunk(s)
       else process.stdout.write(s)
     }
-    child.stdout.on("data", (d) => write(d.toString()))
-    child.stderr.on("data", (d) => write(d.toString()))
+    child.stdout?.on("data", (d) => write(d.toString()))
+    child.stderr?.on("data", (d) => write(d.toString()))
     child.on("error", (err) => resolve({ ok: false, error: err.message }))
     child.on("close", (code) =>
       resolve(code === 0 ? { ok: true } : { ok: false, error: `${path.basename(cmd)} exited with code ${code}` }),
@@ -240,7 +245,7 @@ function streamClaudeJsonl(
   return new Promise((resolve) => {
     const child = spawn(cmd, args, { cwd, stdio: ["ignore", "pipe", "pipe"] })
     let buf = ""
-    child.stdout.on("data", (d) => {
+    child.stdout?.on("data", (d) => {
       buf += d.toString()
       let nl: number
       while ((nl = buf.indexOf("\n")) >= 0) {
@@ -258,7 +263,7 @@ function streamClaudeJsonl(
         }
       }
     })
-    child.stderr.on("data", (d) => onChunk?.(d.toString()))
+    child.stderr?.on("data", (d) => onChunk?.(d.toString()))
     child.on("error", (err) => resolve({ ok: false, error: err.message }))
     child.on("close", (code) =>
       resolve(code === 0 ? { ok: true } : { ok: false, error: `${path.basename(cmd)} exited with code ${code}` }),

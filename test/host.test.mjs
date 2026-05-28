@@ -1725,8 +1725,11 @@ export default capsule({
       const deployFile = path.join(projDir, ".pond", "deploy.json")
       const { statSync, readFileSync } = await import("node:fs")
       const st = statSync(deployFile)
-      // POSIX mode lower 9 bits — we want 0600 (rw-------).
-      assert.equal(st.mode & 0o777, 0o600, `expected 0600, got 0${(st.mode & 0o777).toString(8)}`)
+      // POSIX mode lower 9 bits — we want 0600 (rw-------). Windows doesn't
+      // implement POSIX permission bits, so this property only holds on POSIX.
+      if (process.platform !== "win32") {
+        assert.equal(st.mode & 0o777, 0o600, `expected 0600, got 0${(st.mode & 0o777).toString(8)}`)
+      }
       // sanity: file contains a claimToken
       const body = JSON.parse(readFileSync(deployFile, "utf-8"))
       assert.ok(typeof body.claimToken === "string" && body.claimToken.length >= 32)

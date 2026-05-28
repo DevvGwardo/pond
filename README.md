@@ -84,6 +84,15 @@ Open `http://localhost:3000`.
 
 Prefer a global install? `npm install -g pondsh` then use `pond new …` and `pond dev` directly.
 
+#### Windows
+
+The CLI runs on Windows (PowerShell or Terminal) the same way — `npx pondsh …` or a global `pond` install. Two notes:
+
+- `pond new` and `pond fork` run `git init` for the scaffold, so install [Git for Windows](https://git-scm.com/download/win) (or pass `--no-git`).
+- `pond new … --generate` shells out to a local agent CLI (`claude`/`codex`/`hermes`); those are picked up from your `PATH` including `.cmd` shims and per-user Python script dirs.
+
+`pond host` (running your own control plane) is Linux-only — it relies on `fork`, the Node permission sandbox, and cgroups. On Windows you deploy _to_ a host (e.g. `pond.run`) rather than running one.
+
 ### Or: describe what you want and let an agent build it
 
 Anything you type after `pond new` that isn't a single slug is treated as a build prompt. Pass `--generate` to hand the brief to a local coding agent (`hermes`, `claude`, or `codex` — whichever is installed) and have it design the capsule for you:

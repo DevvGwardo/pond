@@ -1,6 +1,6 @@
 import * as fs from "node:fs"
 import * as path from "node:path"
-import { execSync } from "node:child_process"
+import spawn from "cross-spawn"
 import { randomBytes } from "node:crypto"
 import {
   getTemplate,
@@ -10,6 +10,15 @@ import {
   TEMPLATES,
   Template,
 } from "./templates.js"
+
+// Run git with argv (no shell), throwing on failure so callers can try/catch
+// the same way they did around execSync. cross-spawn resolves git.exe on
+// Windows; argv form avoids shell-quoting the args entirely.
+function runGit(args: string[], cwd: string): void {
+  const r = spawn.sync("git", args, { cwd, stdio: "ignore" })
+  if (r.error) throw r.error
+  if (r.status !== 0) throw new Error(`git ${args[0]} exited with code ${r.status}`)
+}
 
 const POND_VERSION = JSON.parse(fs.readFileSync(path.resolve(import.meta.dirname, "../package.json"), "utf-8"))
   .version as string
@@ -267,9 +276,9 @@ export async function copyTemplate(
 
   if (o.initGit) {
     try {
-      execSync("git init", { cwd: dir, stdio: "ignore" })
-      execSync("git add -A", { cwd: dir, stdio: "ignore" })
-      execSync('git -c user.email=pond@local -c user.name=pond commit -m "init"', { cwd: dir, stdio: "ignore" })
+      runGit(["init"], dir)
+      runGit(["add", "-A"], dir)
+      runGit(["-c", "user.email=pond@local", "-c", "user.name=pond", "commit", "-m", "init"], dir)
     } catch (err) {
       const msg = (err as Error).message.split("\n")[0]
       console.warn(
