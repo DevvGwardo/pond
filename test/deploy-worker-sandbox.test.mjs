@@ -50,11 +50,16 @@ try { const d = new Database(${JSON.stringify(dbPath)}); const r = d.prepare("SE
 catch (e) { out.push("db:FAIL:" + e.message) }
 console.log(out.join("\\n"))
 `
+  // Mirror the runtime's flag selection (src/commands/host.js): Node 24 removed
+  // `--experimental-permission` and Node 22 LTS shipped before the stable
+  // `--permission` rename (Node 23+), so older lines need the experimental form.
+  const nodeMajor = Number(process.versions.node.split(".")[0])
+  const permissionFlag = nodeMajor >= 23 ? "--permission" : "--experimental-permission"
   try {
     return execFileSync(
       process.execPath,
       [
-        "--permission",
+        permissionFlag,
         `--allow-fs-read=${REPO_ROOT}`,
         `--allow-fs-read=${tmp}`,
         `--allow-fs-write=${tmp}`,
