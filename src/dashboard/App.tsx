@@ -133,6 +133,44 @@ async function fetchLogs(token: string, deployId: string): Promise<{ entries: Lo
   return r.json()
 }
 
+async function fetchEnv(
+  token: string,
+  deployId: string,
+): Promise<{ entries: Record<string, string> } | { error: string }> {
+  const r = await fetch(`/api/deploys/${deployId}/env`, { headers: authHeaders(token) })
+  if (!r.ok) return { error: (await r.json().catch(() => ({}))).error ?? "env load failed" }
+  return r.json()
+}
+
+async function saveEnv(
+  token: string,
+  deployId: string,
+  partial: Record<string, string>,
+): Promise<{ entries: Record<string, string> } | { error: string }> {
+  const r = await fetch(`/api/deploys/${deployId}/env`, {
+    method: "PUT",
+    headers: { "content-type": "application/json", ...authHeaders(token) },
+    body: JSON.stringify({ entries: partial }),
+  })
+  if (!r.ok) return { error: (await r.json().catch(() => ({}))).error ?? "save failed" }
+  return r.json()
+}
+
+async function deleteEnvKey(
+  token: string,
+  deployId: string,
+  key: string,
+): Promise<{ entries: Record<string, string> } | { error: string }> {
+  const r = await fetch(`/api/deploys/${deployId}/env/${encodeURIComponent(key)}`, {
+    method: "DELETE",
+    headers: authHeaders(token),
+  })
+  if (!r.ok) return { error: (await r.json().catch(() => ({}))).error ?? "delete failed" }
+  return r.json()
+}
+
+const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
+
 function parseHashRoute(hash: string): { deployId: string | null } {
   const m = hash.match(/^#d\/([a-f0-9]+)/i)
   return { deployId: m ? m[1] : null }
@@ -717,7 +755,7 @@ function DeployDetail({
           {tab === "tables" ? <TablesTab inspect={inspect} loading={inspectLoading} error={inspectErr} /> : null}
           {tab === "logs" ? <LogsTab token={token} deployId={d.deployId} /> : null}
           {tab === "settings" ? (
-            <SettingsTab d={d} isOwner={isOwner} onRotateClaim={onRotateClaim} onDelete={onDelete} />
+            <SettingsTab d={d} token={token} isOwner={isOwner} onRotateClaim={onRotateClaim} onDelete={onDelete} />
           ) : null}
         </main>
         <aside class="space-y-4">
@@ -968,11 +1006,13 @@ function LogsTab({ token, deployId }: { token: string; deployId: string }) {
 
 function SettingsTab({
   d,
+  token,
   isOwner,
   onRotateClaim,
   onDelete,
 }: {
   d: DeployRow
+  token: string
   isOwner: boolean
   onRotateClaim: () => void
   onDelete: () => void
@@ -981,6 +1021,7 @@ function SettingsTab({
     <>
       <h2 class="text-base font-semibold text-zinc-100">Settings</h2>
       <section class="space-y-4">
+        <EnvEditor token={token} deployId={d.deployId} disabled={!isOwner} />
         <div class="rounded-xl border border-zinc-900 bg-zinc-950 p-5">
           <h3 class="text-sm font-semibold text-zinc-100">Claim token</h3>
           <p class="mt-1 text-xs text-zinc-500">
@@ -1010,6 +1051,285 @@ function SettingsTab({
         </div>
       </section>
     </>
+  )
+}
+
+function EnvEditor({ token, deployId, disabled }: { token: string; deployId: string; disabled: boolean }) {
+  const [entries, setEntries] = useState<Record<string, string> | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [revealed, setRevealed] = useState<Set<string>>(new Set())
+  const [editingKey, setEditingKey] = useState<string | null>(null)
+  const [editValue, setEditValue] = useState("")
+  const [adding, setAdding] = useState(false)
+  const [newKey, setNewKey] = useState("")
+  const [newValue, setNewValue] = useState("")
+  const [busy, setBusy] = useState<string | null>(null) // key currently saving/deleting, or "add" or "reload"
+
+  async function reload() {
+    setLoading(true)
+    const res = await fetchEnv(token, deployId)
+    if ("error" in res) {
+      setError(res.error)
+      setEntries({})
+    } else {
+      setEntries(res.entries)
+      setError(null)
+    }
+    setLoading(false)
+  }
+
+  useEffect(() => {
+    void reload()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, deployId])
+
+  function toggleReveal(key: string) {
+    setRevealed((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  function startEdit(key: string, value: string) {
+    setEditingKey(key)
+    setEditValue(value)
+    setRevealed((prev) => new Set(prev).add(key))
+  }
+
+  function cancelEdit() {
+    setEditingKey(null)
+    setEditValue("")
+  }
+
+  async function commitEdit(key: string) {
+    setBusy(key)
+    setError(null)
+    const res = await saveEnv(token, deployId, { [key]: editValue })
+    setBusy(null)
+    if ("error" in res) {
+      setError(res.error)
+      return
+    }
+    setEntries(res.entries)
+    setEditingKey(null)
+    setEditValue("")
+  }
+
+  async function commitAdd() {
+    if (!ENV_KEY_RE.test(newKey)) {
+      setError("Key must match [A-Za-z_][A-Za-z0-9_]* (letters, digits, underscore; must not start with a digit).")
+      return
+    }
+    if (entries && newKey in entries) {
+      setError(`Key "${newKey}" already exists — edit it in the list instead.`)
+      return
+    }
+    setBusy("__add__")
+    setError(null)
+    const res = await saveEnv(token, deployId, { [newKey]: newValue })
+    setBusy(null)
+    if ("error" in res) {
+      setError(res.error)
+      return
+    }
+    setEntries(res.entries)
+    setNewKey("")
+    setNewValue("")
+    setAdding(false)
+  }
+
+  async function remove(key: string) {
+    if (!confirm(`Delete env var "${key}"? The capsule will redeploy.`)) return
+    setBusy(key)
+    setError(null)
+    const res = await deleteEnvKey(token, deployId, key)
+    setBusy(null)
+    if ("error" in res) {
+      setError(res.error)
+      return
+    }
+    setEntries(res.entries)
+    setRevealed((prev) => {
+      const next = new Set(prev)
+      next.delete(key)
+      return next
+    })
+  }
+
+  const keys = entries ? Object.keys(entries).sort() : []
+
+  return (
+    <div class="rounded-xl border border-zinc-900 bg-zinc-950">
+      <header class="flex items-center justify-between border-b border-zinc-900 px-5 py-4">
+        <div>
+          <h3 class="text-sm font-semibold text-zinc-100">Environment variables</h3>
+          <p class="mt-1 text-xs text-zinc-500">
+            Stored in <code class="rounded bg-zinc-900 px-1 py-0.5">.env.pond.server</code> on the capsule. Saving any
+            change triggers a redeploy.
+          </p>
+        </div>
+        <div class="flex items-center gap-2">
+          <button
+            class="rounded-md border border-zinc-800 bg-black px-3 py-1.5 text-xs text-zinc-300 transition hover:border-zinc-600 hover:text-zinc-100 disabled:opacity-50"
+            onClick={() => void reload()}
+            disabled={loading}
+          >
+            Reload
+          </button>
+          <button
+            class="rounded-md bg-zinc-100 px-3 py-1.5 text-xs font-semibold text-zinc-950 transition hover:bg-white disabled:opacity-50"
+            onClick={() => {
+              setAdding(true)
+              setError(null)
+            }}
+            disabled={disabled || adding || loading}
+          >
+            + Add variable
+          </button>
+        </div>
+      </header>
+
+      {error ? (
+        <div class="border-b border-red-900/60 bg-red-950/30 px-5 py-3 text-xs text-red-300">
+          {error}
+          <button class="ml-3 underline" onClick={() => setError(null)}>
+            dismiss
+          </button>
+        </div>
+      ) : null}
+
+      {adding ? (
+        <div class="border-b border-zinc-900 bg-black/40 px-5 py-4">
+          <div class="grid grid-cols-[200px_minmax(0,1fr)_auto] gap-2">
+            <input
+              class="rounded-md border border-zinc-800 bg-black px-3 py-2 font-mono text-sm text-zinc-200 outline-none transition focus:border-emerald-700/60 focus:ring-1 focus:ring-emerald-700/30"
+              placeholder="KEY_NAME"
+              value={newKey}
+              onInput={(e) => setNewKey((e.target as HTMLInputElement).value)}
+              disabled={busy === "__add__"}
+            />
+            <input
+              class="rounded-md border border-zinc-800 bg-black px-3 py-2 font-mono text-sm text-zinc-200 outline-none transition focus:border-emerald-700/60 focus:ring-1 focus:ring-emerald-700/30"
+              placeholder="value"
+              value={newValue}
+              onInput={(e) => setNewValue((e.target as HTMLInputElement).value)}
+              disabled={busy === "__add__"}
+            />
+            <div class="flex gap-1">
+              <button
+                class="rounded-md bg-emerald-600 px-3 py-2 text-xs font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-50"
+                onClick={() => void commitAdd()}
+                disabled={!newKey.trim() || busy === "__add__"}
+              >
+                {busy === "__add__" ? "Saving…" : "Save"}
+              </button>
+              <button
+                class="rounded-md border border-zinc-800 bg-black px-3 py-2 text-xs text-zinc-300 transition hover:border-zinc-600"
+                onClick={() => {
+                  setAdding(false)
+                  setNewKey("")
+                  setNewValue("")
+                  setError(null)
+                }}
+                disabled={busy === "__add__"}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {loading ? (
+        <div class="px-5 py-8 text-center text-sm text-zinc-500">Loading variables…</div>
+      ) : keys.length === 0 ? (
+        <div class="px-5 py-8 text-center text-sm text-zinc-500">
+          No environment variables yet. Click <span class="text-zinc-300">+ Add variable</span> to create one.
+        </div>
+      ) : (
+        <ul class="divide-y divide-zinc-900">
+          {keys.map((k) => {
+            const value = entries![k]
+            const isEditing = editingKey === k
+            const isRevealed = revealed.has(k) || isEditing
+            const isBusy = busy === k
+            return (
+              <li
+                key={k}
+                class="grid grid-cols-[200px_minmax(0,1fr)_auto] items-center gap-2 px-5 py-2.5 transition hover:bg-zinc-900/30"
+              >
+                <code class="truncate font-mono text-sm text-zinc-200">{k}</code>
+                {isEditing ? (
+                  <input
+                    class="rounded-md border border-zinc-800 bg-black px-3 py-1.5 font-mono text-sm text-zinc-200 outline-none transition focus:border-emerald-700/60 focus:ring-1 focus:ring-emerald-700/30"
+                    value={editValue}
+                    onInput={(e) => setEditValue((e.target as HTMLInputElement).value)}
+                    disabled={isBusy}
+                  />
+                ) : (
+                  <code
+                    class="cursor-pointer truncate font-mono text-sm text-zinc-400 hover:text-zinc-200"
+                    onClick={() => !disabled && startEdit(k, value)}
+                    title={disabled ? undefined : "Click to edit"}
+                  >
+                    {isRevealed
+                      ? value || <span class="italic text-zinc-600">(empty)</span>
+                      : "•".repeat(Math.min(12, Math.max(4, value.length)))}
+                  </code>
+                )}
+                <div class="flex gap-1">
+                  {isEditing ? (
+                    <>
+                      <button
+                        class="rounded-md bg-emerald-600 px-2.5 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-50"
+                        onClick={() => void commitEdit(k)}
+                        disabled={isBusy}
+                      >
+                        {isBusy ? "Saving…" : "Save"}
+                      </button>
+                      <button
+                        class="rounded-md border border-zinc-800 bg-black px-2.5 py-1.5 text-xs text-zinc-300 transition hover:border-zinc-600"
+                        onClick={cancelEdit}
+                        disabled={isBusy}
+                      >
+                        Cancel
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        class="rounded-md border border-zinc-800 bg-black px-2.5 py-1.5 text-xs text-zinc-400 transition hover:border-zinc-600 hover:text-zinc-100 disabled:opacity-50"
+                        onClick={() => toggleReveal(k)}
+                        title={isRevealed ? "Hide value" : "Reveal value"}
+                      >
+                        {isRevealed ? "Hide" : "Reveal"}
+                      </button>
+                      <button
+                        class="rounded-md border border-zinc-800 bg-black px-2.5 py-1.5 text-xs text-zinc-400 transition hover:border-zinc-600 hover:text-zinc-100 disabled:opacity-50"
+                        onClick={() => startEdit(k, value)}
+                        disabled={disabled || isBusy}
+                      >
+                        Edit
+                      </button>
+                      <button
+                        class="rounded-md border border-red-900/60 bg-black px-2.5 py-1.5 text-xs text-red-300 transition hover:border-red-700 hover:bg-red-950/40 disabled:opacity-50"
+                        onClick={() => void remove(k)}
+                        disabled={disabled || isBusy}
+                      >
+                        {isBusy ? "…" : "Delete"}
+                      </button>
+                    </>
+                  )}
+                </div>
+              </li>
+            )
+          })}
+        </ul>
+      )}
+    </div>
   )
 }
 
