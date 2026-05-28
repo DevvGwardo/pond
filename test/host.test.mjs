@@ -613,6 +613,111 @@ test("anonymous PUT /env returns 403", async () => {
   assert.equal(res.status, 403)
 })
 
+test("POST /api/admin/deploys/:id/terminate without host token returns 401", async () => {
+  const res = await fetch(`${apiUrl}/api/deploys`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sourceFiles: tinySourceFiles() }),
+  })
+  assert.equal(res.status, 201)
+  const { deployId: id } = await res.json()
+  const noauth = await fetch(`${apiUrl}/api/admin/deploys/${id}/terminate`, { method: "POST" })
+  assert.equal(noauth.status, 401)
+})
+
+test("POST /api/admin/deploys/:id/terminate with a non-host user token returns 403", async () => {
+  const signup = await fetch(`${apiUrl}/api/users`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${hostToken}` },
+    body: JSON.stringify({ username: `term-snooper-${randomBytes(4).toString("hex")}` }),
+  })
+  assert.equal(signup.status, 201)
+  const { token: snoopToken } = await signup.json()
+  const res = await fetch(`${apiUrl}/api/admin/deploys/${deployId}/terminate`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${snoopToken}` },
+  })
+  assert.equal(res.status, 403)
+})
+
+test("POST /api/admin/deploys/:id/terminate with the host token terminates an anonymous deploy", async () => {
+  const create = await fetch(`${apiUrl}/api/deploys`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sourceFiles: tinySourceFiles() }),
+  })
+  assert.equal(create.status, 201)
+  const { deployId: id } = await create.json()
+  const res = await fetch(`${apiUrl}/api/admin/deploys/${id}/terminate`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${hostToken}` },
+  })
+  assert.equal(res.status, 200)
+  const body = await res.json()
+  assert.equal(body.terminated, true)
+  assert.equal(body.anonymous, true)
+  // A terminated anonymous deploy shows terminated:true in the deploys listing.
+  const list = await fetch(`${apiUrl}/api/deploys`, {
+    headers: { authorization: `Bearer ${adminToken}` },
+  })
+  const listed = (await list.json()).deploys.find((d) => d.deployId === id)
+  assert.equal(listed.terminated, true)
+})
+
+test("POST /api/admin/deploys/:id/terminate on a missing deploy returns 404", async () => {
+  const res = await fetch(`${apiUrl}/api/admin/deploys/deadbeefdeadbeef/terminate`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${hostToken}` },
+  })
+  assert.equal(res.status, 404)
+})
+
+test("Turnstile not configured: anonymous deploy needs no token (off-safe default)", async () => {
+  const res = await fetch(`${apiUrl}/api/deploys`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sourceFiles: tinySourceFiles() }),
+  })
+  assert.equal(res.status, 201)
+})
+
+test("Turnstile configured: anonymous deploy without a token is rejected with 403", async () => {
+  const h = await startExtraHost({ env: { POND_TURNSTILE_SECRET: "test-secret" } })
+  try {
+    const res = await fetch(`${h.apiUrl}/api/deploys`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sourceFiles: tinySourceFiles() }),
+    })
+    assert.equal(res.status, 403)
+    const body = await res.json()
+    assert.match(body.error, /Turnstile/)
+  } finally {
+    await stopExtraHost(h)
+  }
+})
+
+test("Turnstile configured: authenticated deploy is never challenged", async () => {
+  const h = await startExtraHost({ env: { POND_TURNSTILE_SECRET: "test-secret" } })
+  try {
+    const bootstrap = await fetch(`${h.apiUrl}/api/users`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${h.hostToken}` },
+      body: JSON.stringify({ username: "admin" }),
+    })
+    assert.equal(bootstrap.status, 201)
+    const { token } = await bootstrap.json()
+    const res = await fetch(`${h.apiUrl}/api/deploys`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ sourceFiles: tinySourceFiles() }),
+    })
+    assert.equal(res.status, 201)
+  } finally {
+    await stopExtraHost(h)
+  }
+})
+
 test("GET /api/deploys/:id/logs returns last N entries with owner bearer", async () => {
   const res = await fetch(`${apiUrl}/api/deploys/${deployId}/logs?limit=5`, {
     headers: { authorization: `Bearer ${adminToken}` },

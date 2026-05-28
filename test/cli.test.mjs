@@ -253,6 +253,67 @@ test("`pond dev` /__pond/auth/guest accepts loopback POST", async () => {
   }
 })
 
+test("`pond admin terminate` kills a deploy via the host token", async () => {
+  const hostToken = "deadbeefdeadbeefdeadbeefdeadbeef"
+  const dataDir = tmp("pond-admin-term-")
+  const port = await pickFreePort()
+  const apiUrl = `http://127.0.0.1:${port}`
+  const proc = spawn(
+    process.execPath,
+    [CLI_PATH, "host", "--port", String(port), "--host", "127.0.0.1", "--data-dir", dataDir],
+    {
+      cwd: REPO_ROOT,
+      env: { ...process.env, POND_HOST_TOKEN: hostToken },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  )
+  cleanupProcs.push(proc)
+  proc.stdout.on("data", () => {})
+  proc.stderr.on("data", () => {})
+  try {
+    await waitForUrl(`${apiUrl}/api/health`)
+    const create = await fetch(`${apiUrl}/api/deploys`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        sourceFiles: {
+          "server/index.ts":
+            'import { capsule, mutation, query, string, table } from "pond/server"\nexport default capsule({\n  schema: { items: table({ name: string() }) },\n  queries: { items: query((ctx) => ctx.db.items.all()) },\n  mutations: { add: mutation((ctx, name) => ctx.db.items.insert({ name })) },\n})\n',
+          "package.json": '{"name":"test-cap","private":true,"type":"module"}\n',
+        },
+      }),
+    })
+    assert.equal(create.status, 201)
+    const { deployId } = await create.json()
+
+    // Wrong token is rejected.
+    const bad = await execFileP(
+      process.execPath,
+      [CLI_PATH, "admin", "terminate", deployId, "--api", apiUrl, "--host-token", "nope"],
+      { env: { ...process.env, POND_HOST_TOKEN: "" } },
+    ).then(
+      () => ({ failed: false }),
+      (e) => ({ failed: true, stderr: String(e.stderr ?? "") }),
+    )
+    assert.equal(bad.failed, true, "wrong host token should make the CLI exit non-zero")
+
+    // Correct token via env.
+    const { stdout } = await execFileP(process.execPath, [CLI_PATH, "admin", "terminate", deployId, "--api", apiUrl], {
+      env: { ...process.env, POND_HOST_TOKEN: hostToken },
+    })
+    assert.match(stdout, new RegExp(`Terminated deploy ${deployId}`))
+  } finally {
+    if (proc.exitCode === null) {
+      const exited = new Promise((r) => proc.once("exit", r))
+      proc.kill("SIGINT")
+      const t = setTimeout(() => proc.kill("SIGKILL"), 4000)
+      t.unref()
+      await exited
+      clearTimeout(t)
+    }
+  }
+})
+
 test("`pond uninstall` dry-run lists steps without deleting", async () => {
   const fakeHome = tmp("pond-uninstall-dry-")
   mkdirSync(path.join(fakeHome, ".pond"), { recursive: true })

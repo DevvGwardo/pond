@@ -3,6 +3,7 @@ import { newCommand } from "./commands/new.js"
 import { devCommand } from "./commands/dev.js"
 import { deployCommand } from "./commands/deploy.js"
 import { claimCommand } from "./commands/claim.js"
+import { adminCommand } from "./commands/admin.js"
 import { startCommand } from "./commands/start.js"
 import { hostCommand } from "./commands/host.js"
 import { dbCommand } from "./commands/db.js"
@@ -29,6 +30,7 @@ const main = defineCommand({
     dev: devCommand,
     deploy: deployCommand,
     claim: claimCommand,
+    admin: adminCommand,
     signup: signupCommand,
     start: startCommand,
     host: hostCommand,

@@ -5,6 +5,13 @@ Versioning: [Semver](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Anonymous-deploy trust boundary made explicit and enforceable.** Two product-level mitigations turn "deploy anonymously" from aspirational isolation into something an operator can actually police:
+  - **Cloudflare Turnstile on anonymous `POST /api/deploys`.** New `--turnstile-secret` flag on `pond host` (also `POND_TURNSTILE_SECRET`). When set, anonymous deploys must carry a verified Turnstile token (an `x-pond-turnstile-token` header or a `turnstileToken` body field), checked against Cloudflare's siteverify. When unset (default), there is no challenge — dev/CI and existing operators are unaffected. Authenticated deploys are never challenged. Verification is factored into `src/host/turnstile.ts` so it unit-tests with a stubbed fetch.
+  - **`pond admin terminate <deployId>` operator kill switch.** New `pond admin` command group backed by the existing host token. It calls a new host-token-gated `POST /api/admin/deploys/:id/terminate` endpoint that reuses the sweep's terminate path (stop the worker; mark anonymous deploys terminated). Auth via `POND_HOST_TOKEN` / `--host-token`.
+  - Docs: `docs/abuse-policy.md` and `docs/operations.md` now spell out the trust boundary (challenge → rate limit → sandbox → TTL → manual terminate); `docs/cli-reference.md` documents the new flag, env vars, and command. The "What's next" list marks both items done.
+
 ## [0.3.16] - 2026-05-27
 
 ### Added

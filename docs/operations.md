@@ -273,12 +273,24 @@ These are documented in [`docs/abuse-policy.md`](./abuse-policy.md) and shown to
 3. **No payments / paid tier yet**. Anonymous and authenticated are both free. Add Stripe + billing tables when you need to.
 4. **No incident response automation**. If a deploy goes viral and burns your CPU budget, you find out via the audit log or your VPS bill, not an alert.
 
+## The anonymous-deploy trust boundary
+
+"Deploy anonymously" does **not** mean "run arbitrary untrusted code with no recourse." Anonymous deploys sit inside a layered boundary:
+
+1. **Human/bot challenge** — set `--turnstile-secret` (or `POND_TURNSTILE_SECRET`) and anonymous `POST /api/deploys` must carry a verified Cloudflare Turnstile token. Off by default so dev/CI stay frictionless; turn it on for a public host. Authenticated deploys are never challenged.
+2. **Per-IP rate limit** — `--anonymous-rate-per-hour` (default 5) caps how fast one IP can create deploys.
+3. **Sandbox + egress policy** — each capsule runs in Node's permission model; anonymous-unclaimed capsules get the network shim, and `--capsule-egress=sealed` plus the OS firewall can harden this further.
+4. **Automatic TTL** — unclaimed deploys are terminated after `--anonymous-grace` and deleted after `--anonymous-retention` by the sweeper.
+5. **Manual kill switch** — `pond admin terminate <deployId>` (host-token gated) takes any deploy offline immediately, without waiting for its grace window.
+
+For a truly hostile multi-tenant environment you still want the JS sandbox replaced with Firecracker or the Cloudflare Sandbox SDK (see the limitations above) — Turnstile + rate limits + manual terminate raise the cost of abuse, they don't make the JS sandbox airtight.
+
 ## What's next after launch
 
 In rough priority order:
 
-- Add a captcha (Cloudflare Turnstile, free) to anonymous deploy.
-- Add a `pond admin terminate <deployId>` CLI subcommand backed by the existing host token.
+- ~~Add a captcha (Cloudflare Turnstile, free) to anonymous deploy.~~ **Done** — `--turnstile-secret` / `POND_TURNSTILE_SECRET` on `pond host`.
+- ~~Add a `pond admin terminate <deployId>` CLI subcommand backed by the existing host token.~~ **Done** — see [`pond admin terminate`](./cli-reference.md#pond-admin-terminate).
 - Replace the JS-level sandbox with Firecracker or Cloudflare Sandbox SDK.
 - Postgres + S3 backend for the control plane (when one box stops being enough).
 - Stripe billing for higher tiers.

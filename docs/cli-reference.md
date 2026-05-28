@@ -306,6 +306,7 @@ Run your own pond control plane — the server that accepts `pond deploy`, build
 - `--anonymous-grace <duration>` — how long an unclaimed deploy stays alive (`1h`, `30m`, `60s`). Default `1h`.
 - `--anonymous-retention <duration>` — how long after termination an unclaimed deploy stays on disk. Default `7d`.
 - `--anonymous-rate-per-hour <n>` — rolling-hour rate limit per IP for anonymous deploys. Default `5`.
+- `--turnstile-secret <secret>` — Cloudflare Turnstile secret. When set, anonymous `POST /api/deploys` must carry a verified Turnstile token (an `x-pond-turnstile-token` header or a `turnstileToken` body field), checked against Cloudflare's siteverify. When unset (default) there is no challenge — dev/CI behaviour is unchanged. Authenticated deploys are never challenged. Also `POND_TURNSTILE_SECRET`.
 - `--trust-proxy` — read client IPs from `x-forwarded-for` (you must terminate TLS yourself; otherwise this is spoofable). Also `POND_TRUST_PROXY_HEADERS=1`.
 - `--abuse-email <addr>` — contact shown on the `/abuse` and `/security` pages.
 
@@ -323,6 +324,28 @@ pond host \
 ```
 
 On Node 22 LTS and later, anonymous deploys boot inside Node's permission model — `--allow-fs-read` / `--allow-fs-write` scoped to the deploy dir. On Node 20 the sandbox is disabled and `pond host` warns about it. (0.2.6 fixed the Node-24 spelling regression here.)
+
+---
+
+## pond admin terminate
+
+Operator kill switch: stop a deploy's worker right now, gated by the **host token**. This is the manual companion to the grace-window sweeper — use it when a deploy is abusive and you don't want to wait for its TTL.
+
+**When to use:** you operate the control plane and need to immediately take a specific deploy offline. For anonymous deploys it also marks the deploy terminated, so it stays down and the retention sweep deletes it on schedule. (To wipe the bytes immediately, `DELETE /api/deploys/:id` with the host token instead.)
+
+**Key flags:**
+
+- `<deployId>` — the deploy to terminate (positional, required).
+- `--api <url>` — control plane base URL, e.g. `http://127.0.0.1:8787` (required).
+- `--host-token <value>` — the host token. Defaults to `POND_HOST_TOKEN`.
+
+```sh
+# Using POND_HOST_TOKEN from the environment
+POND_HOST_TOKEN=... pond admin terminate 1a2b3c4d5e6f7081 --api https://pond.example.com
+
+# Or pass the token explicitly
+pond admin terminate 1a2b3c4d5e6f7081 --api http://127.0.0.1:8787 --host-token <token>
+```
 
 ---
 
@@ -503,6 +526,8 @@ A few useful ones:
 | `POND_SESSION_SECRET`      | Persistent session-cookie secret. Set this in `.env.pond.server` for production; without it sessions don't survive a restart. |
 | `POND_TRUST_PROXY_HEADERS` | Same effect as `--trust-proxy` on `pond host`.                                                                                |
 | `POND_PUBLIC_BASE_URL`     | Same effect as `--public-base-url` on `pond host`.                                                                            |
+| `POND_TURNSTILE_SECRET`    | Same effect as `--turnstile-secret` on `pond host` — requires a verified Cloudflare Turnstile token on anonymous deploys.     |
+| `POND_HOST_TOKEN`          | The control-plane host token. Used by `pond admin terminate` and host bootstrap.                                              |
 
 ---
 
