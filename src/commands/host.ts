@@ -15,7 +15,6 @@ import {
   applyCapsuleCgroup,
   removeCapsuleCgroup,
 } from "../host/cgroup.js"
-import { resolveSandboxUser, DEFAULT_SANDBOX_USER, type SandboxUser } from "../host/sandbox-user.js"
 import { findPackageJsonLifecycleScripts } from "../host/package-json-validation.js"
 import { verifyTurnstile } from "../host/turnstile.js"
 import { createHash } from "node:crypto"
@@ -25,29 +24,6 @@ import { ideHtml } from "../ide/built.js"
 import { dashboardHtml } from "../dashboard/built.js"
 import { marked } from "marked"
 import Database from "better-sqlite3"
-
-// Recursively chown a deploy tree to the unprivileged sandbox uid/gid. The host
-// (root) created the dir, but a privilege-dropped worker must own it to create
-// data.db and write logs — otherwise its first write hits EACCES and the worker
-// crashes on boot. Best-effort per-entry; the caller logs if the root chown fails.
-function chownTreeSync(root: string, uid: number, gid: number): void {
-  fs.chownSync(root, uid, gid)
-  let entries: fs.Dirent[]
-  try {
-    entries = fs.readdirSync(root, { withFileTypes: true })
-  } catch {
-    return
-  }
-  for (const e of entries) {
-    const p = path.join(root, e.name)
-    try {
-      if (e.isDirectory()) chownTreeSync(p, uid, gid)
-      else fs.chownSync(p, uid, gid)
-    } catch {
-      // best-effort on individual entries
-    }
-  }
-}
 
 // Curated docs catalog. Hand-written titles + summaries beat anything derivable
 // from the markdown's H1 — the index page becomes navigation copy, not a file
@@ -549,19 +525,6 @@ export const hostCommand = defineCommand({
         "Loopback port for the allowlisting egress proxy when --capsule-egress=proxy. Also POND_EGRESS_PROXY_PORT.",
       default: "8788",
     },
-    "sandbox-uid": {
-      type: "string",
-      description:
-        "Unprivileged uid (or user name) anonymous-unclaimed capsule workers drop to when the host runs as root. " +
-        `Defaults to the '${DEFAULT_SANDBOX_USER}' system account. No-op when the host is not root. Also POND_SANDBOX_UID.`,
-      default: "",
-    },
-    "sandbox-gid": {
-      type: "string",
-      description:
-        "Primary gid (or group name) paired with --sandbox-uid. Defaults to the sandbox user's primary group. Also POND_SANDBOX_GID.",
-      default: "",
-    },
   },
   async run({ args }) {
     const port = parseInt(typeof args.port === "string" ? args.port : "8787", 10)
@@ -664,44 +627,6 @@ export const hostCommand = defineCommand({
     if (capsuleCgroupRoot && !joinManagerCgroup(capsuleCgroupRoot)) {
       console.log(
         `[pond host] note: could not move the manager into ${capsuleCgroupRoot}/manager — per-capsule limits may not bind unless this process is cgroup-delegated (see deploy/setup-capsule-isolation.sh).`,
-      )
-    }
-
-    // Privilege separation for anonymous-unclaimed workers. When the host runs
-    // as root we drop each such worker to a dedicated unprivileged uid/gid so a
-    // native-addon escape lands as a powerless user, not as the control plane.
-    // null (not root, or the sandbox user can't be resolved) → keep same-uid,
-    // mirroring the cgroup/permission fallbacks. Claimed deploys are unaffected.
-    const sandboxUidRaw =
-      process.env.POND_SANDBOX_UID ?? (typeof args["sandbox-uid"] === "string" ? args["sandbox-uid"] : "")
-    const sandboxGidRaw =
-      process.env.POND_SANDBOX_GID ?? (typeof args["sandbox-gid"] === "string" ? args["sandbox-gid"] : "")
-    const sandboxUser: SandboxUser | null = resolveSandboxUser({
-      uidEnv: sandboxUidRaw,
-      gidEnv: sandboxGidRaw,
-    })
-    const hostIsRoot = process.getuid?.() === 0
-    if (sandboxUser) {
-      console.log(
-        `[pond host] anonymous workers drop to uid=${sandboxUser.uid} gid=${sandboxUser.gid} (resolved via ${sandboxUser.source}).`,
-      )
-      // The kernel egress firewall matches on cgroup membership (see
-      // deploy/capsule-egress.nft), which is uid-independent, so a dropped uid
-      // stays covered. If an operator also wants uid-based owner-match rules,
-      // they target this uid — warn when the egress boundary isn't actually on.
-      if (egressMode !== "sealed" && (sandboxUidRaw || "").trim()) {
-        console.log(
-          `[pond host] note: anonymous workers run as uid=${sandboxUser.uid} but --capsule-egress is '${egressMode}'. ` +
-            `For uid-bound egress, add an owner-match drop for skuid ${sandboxUser.uid} to deploy/capsule-egress.nft, or use --capsule-egress=sealed.`,
-        )
-      }
-    } else if (hostIsRoot && ((sandboxUidRaw || "").trim() || (sandboxGidRaw || "").trim())) {
-      console.log(
-        `[pond host] sandbox uid/gid requested (uid='${sandboxUidRaw}' gid='${sandboxGidRaw}') but could not be resolved — anonymous workers run under the host uid. Create the '${DEFAULT_SANDBOX_USER}' user or pass a valid POND_SANDBOX_UID.`,
-      )
-    } else if (!hostIsRoot && ((sandboxUidRaw || "").trim() || (sandboxGidRaw || "").trim())) {
-      console.log(
-        `[pond host] sandbox uid/gid requested but the host is not root — anonymous workers run under the host uid (privilege drop needs root).`,
       )
     }
 
@@ -858,12 +783,6 @@ export const hostCommand = defineCommand({
       if (!policy) return
       const useSandbox = policy.useSandbox
       const restrictNetwork = policy.restrictNetwork
-      // Drop to the unprivileged sandbox uid/gid only for anonymous-unclaimed
-      // workers, and only when one was resolved (root host + valid user). This
-      // is the OS-level half of the sandbox: even a native-addon escape from one
-      // of these workers lands as a powerless user. Claimed/authenticated
-      // deploys keep the host uid.
-      const dropToSandboxUser = sandboxUser && policy.isAnonUnclaimed ? sandboxUser : null
       // A user-initiated (re)deploy ships potentially-fixed code, so it earns a
       // fresh crash budget. Automatic respawns (opts.auto) must NOT reset it,
       // or a fast boot→crash loop would never trip RESTART_MAX.
@@ -901,24 +820,11 @@ export const hostCommand = defineCommand({
           "--allow-addons",
         )
       }
-      if (dropToSandboxUser) {
-        // The deploy dir was created by the host (root); hand ownership to the
-        // sandbox uid so the dropped worker can create data.db and write logs.
-        try {
-          chownTreeSync(realDir, dropToSandboxUser.uid, dropToSandboxUser.gid)
-        } catch (e) {
-          console.error(
-            `[pond host] failed to chown ${realDir} to uid=${dropToSandboxUser.uid} — anonymous worker may fail to write its db:`,
-            e,
-          )
-        }
-      }
       const child = fork(workerPath, [], {
         cwd: realDir,
         env: scopedEnvFor(record),
         stdio: ["ignore", "inherit", "inherit", "ipc"],
         execArgv,
-        ...(dropToSandboxUser ? { uid: dropToSandboxUser.uid, gid: dropToSandboxUser.gid } : {}),
       })
 
       const deployId = record.deployId
@@ -998,9 +904,7 @@ export const hostCommand = defineCommand({
     // Derive the sandbox/network options a deploy should boot with from its
     // current claim status. Returns null when the deploy should stay down
     // (anonymous deploy already terminated past its grace window).
-    function bootOptsForRecord(
-      deployId: string,
-    ): { useSandbox: boolean; restrictNetwork: boolean; isAnonUnclaimed: boolean } | null {
+    function bootOptsForRecord(deployId: string): { useSandbox: boolean; restrictNetwork: boolean } | null {
       const anon = controlDb.findAnonymous(deployId)
       if (anon && anon.terminated === 1) return null
       const isAnonUnclaimed = anon !== null
@@ -1012,7 +916,6 @@ export const hostCommand = defineCommand({
       return {
         useSandbox: true,
         restrictNetwork: egressMode === "sealed" ? true : isAnonUnclaimed,
-        isAnonUnclaimed,
       }
     }
 
