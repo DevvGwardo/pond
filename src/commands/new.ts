@@ -254,12 +254,19 @@ export const newCommand = defineCommand({
           const cl = fileSize(clientPath)
           const svDelta = sv === null ? "missing" : sv === baselineServer ? "unchanged" : fmtBytes(sv)
           const clDelta = cl === null ? "missing" : cl === baselineClient ? "unchanged" : fmtBytes(cl)
+          // Clip each line to the terminal width. A line wider than the
+          // viewport wraps onto extra physical rows, but the redraw above only
+          // moves the cursor up by the count of logical lines — so a wrapped
+          // line leaves stale rows behind (long Windows paths trailing the
+          // spinner). Clipping keeps logical lines == physical rows.
+          const maxW = Math.max(1, (process.stdout.columns ?? 80) - 1)
+          const clip = (s: string) => (s.length > maxW ? s.slice(0, maxW - 1) + "…" : s)
           const lines = [
             `  ${spin} ${candidate.name} is building… ${fmtElapsed(Date.now() - startedAt)}` +
               (toolCount > 0 ? `  (${toolCount} action${toolCount === 1 ? "" : "s"})` : ""),
             `    ▸ ${lastActivity}`,
             `    server/index.ts → ${svDelta}    client/index.tsx → ${clDelta}`,
-          ]
+          ].map(clip)
           process.stdout.write(lines.join("\n") + "\n")
           drawnLines = lines.length
         }

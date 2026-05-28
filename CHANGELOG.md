@@ -5,6 +5,12 @@ Versioning: [Semver](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-05-28
+
+### Fixed
+
+- **`pond new --generate` live spinner no longer leaves a trail of `… is building…` lines on Windows.** The live progress panel redraws by moving the cursor up by the number of logical lines it printed (`\x1b[${drawnLines}F\x1b[J`, 3 lines). But the activity line can exceed the terminal width — long absolute paths like `C:\Users\torre\…\server\index.ts` — and a too-wide line wraps onto extra physical rows. The cursor-up count then undershoots the rows actually occupied, so the top line is never erased and each tick orphans another copy. `draw()` in `src/commands/new.ts` now clips each line to the terminal width (`process.stdout.columns`), keeping logical lines equal to physical rows so the in-place redraw stays aligned on every platform.
+
 ## [0.4.2] - 2026-05-28
 
 ### Fixed
