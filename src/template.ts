@@ -40,6 +40,7 @@ const BASE_ENV_TEMPLATE = `# Server-only environment variables
 
 const GITIGNORE = `node_modules
 .pond
+.env.pond.server
 `
 
 const CAPSULE_CONTRACT = `## Pond capsule contract

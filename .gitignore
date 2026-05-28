@@ -8,3 +8,15 @@ dist/
 !bin/pond.js
 !bin/pondsh.js
 !bin/pond-mcp.js
+
+# Secrets / local state — never commit. The deploy runbook (deploy/README.md,
+# deploy/upgrade.sh, docs/operations.md) assumes these are ignored.
+.env
+.env.pond.server
+.pond/
+deploy/cloudflared/config.yml
+deploy/cloudflared/credentials.json
+*.db
+*.sqlite
+*.sqlite3
+.claude/
