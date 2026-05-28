@@ -26,6 +26,29 @@ import { dashboardHtml } from "../dashboard/built.js"
 import { marked } from "marked"
 import Database from "better-sqlite3"
 
+// Recursively chown a deploy tree to the unprivileged sandbox uid/gid. The host
+// (root) created the dir, but a privilege-dropped worker must own it to create
+// data.db and write logs — otherwise its first write hits EACCES and the worker
+// crashes on boot. Best-effort per-entry; the caller logs if the root chown fails.
+function chownTreeSync(root: string, uid: number, gid: number): void {
+  fs.chownSync(root, uid, gid)
+  let entries: fs.Dirent[]
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true })
+  } catch {
+    return
+  }
+  for (const e of entries) {
+    const p = path.join(root, e.name)
+    try {
+      if (e.isDirectory()) chownTreeSync(p, uid, gid)
+      else fs.chownSync(p, uid, gid)
+    } catch {
+      // best-effort on individual entries
+    }
+  }
+}
+
 // Curated docs catalog. Hand-written titles + summaries beat anything derivable
 // from the markdown's H1 — the index page becomes navigation copy, not a file
 // listing. Order = sidebar order. Slug = URL slug = filename minus `.md`.
@@ -877,6 +900,18 @@ export const hostCommand = defineCommand({
           `--allow-fs-write=${realDir}`,
           "--allow-addons",
         )
+      }
+      if (dropToSandboxUser) {
+        // The deploy dir was created by the host (root); hand ownership to the
+        // sandbox uid so the dropped worker can create data.db and write logs.
+        try {
+          chownTreeSync(realDir, dropToSandboxUser.uid, dropToSandboxUser.gid)
+        } catch (e) {
+          console.error(
+            `[pond host] failed to chown ${realDir} to uid=${dropToSandboxUser.uid} — anonymous worker may fail to write its db:`,
+            e,
+          )
+        }
       }
       const child = fork(workerPath, [], {
         cwd: realDir,

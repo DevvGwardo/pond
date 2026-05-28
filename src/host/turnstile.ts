@@ -12,15 +12,20 @@ export interface TurnstileResult {
 
 type FetchLike = (
   input: string,
-  init: { method: string; body: URLSearchParams },
+  init: { method: string; body: URLSearchParams; signal?: AbortSignal },
 ) => Promise<{
   ok: boolean
   json: () => Promise<unknown>
 }>
 
+// Hard cap on the siteverify round-trip. Without it a hung Cloudflare connection
+// blocks the anonymous-deploy request handler indefinitely; on timeout the fetch
+// aborts, throws, and we fail closed below.
+const SITEVERIFY_TIMEOUT_MS = 5000
+
 // Verify a client-supplied Turnstile token against Cloudflare's siteverify
-// endpoint. `remoteIp` is optional context Cloudflare cross-checks. Any network
-// or parse failure resolves to `{ ok: false }` so the caller fails closed.
+// endpoint. `remoteIp` is optional context Cloudflare cross-checks. Any network,
+// timeout, or parse failure resolves to `{ ok: false }` so the caller fails closed.
 export async function verifyTurnstile(
   secret: string,
   token: string,
@@ -33,7 +38,11 @@ export async function verifyTurnstile(
   body.set("response", token)
   if (remoteIp && remoteIp !== "unknown") body.set("remoteip", remoteIp)
   try {
-    const res = await fetchImpl(SITEVERIFY_URL, { method: "POST", body })
+    const res = await fetchImpl(SITEVERIFY_URL, {
+      method: "POST",
+      body,
+      signal: AbortSignal.timeout(SITEVERIFY_TIMEOUT_MS),
+    })
     if (!res.ok) return { ok: false, errorCodes: ["siteverify-http-error"] }
     const data = (await res.json()) as { success?: unknown; "error-codes"?: unknown }
     const errorCodes = Array.isArray(data["error-codes"]) ? (data["error-codes"] as string[]) : undefined

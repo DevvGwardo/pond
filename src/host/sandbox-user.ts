@@ -42,9 +42,14 @@ function lookupUserByName(name: string): { uid: number; gid: number } | null {
   }
 }
 
+// Resolve a group NAME to a gid. `id -g <name>` treats its argument as a user,
+// not a group, so it can't be used here — use getent's group database (the gid
+// is the 3rd colon-field). Returns null off-Linux or when the group is unknown,
+// so the caller falls back to the user's primary gid.
 function lookupGroupByName(name: string): number | null {
   try {
-    const gid = Number(execFileSync("id", ["-g", name], { encoding: "utf-8" }).trim())
+    const line = execFileSync("getent", ["group", name], { encoding: "utf-8" }).trim()
+    const gid = Number(line.split(":")[2])
     return Number.isInteger(gid) ? gid : null
   } catch {
     return null

