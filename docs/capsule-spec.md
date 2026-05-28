@@ -90,18 +90,10 @@ data is effectively public to anyone who can reach the route.
 
 ```ts
 // server/index.ts
-import {
-  capsule, query, mutation, endpoint, socket,
-  table, string, number, boolean,
-  json, text,
-} from "pond/server"
+import { capsule, query, mutation, endpoint, socket, table, string, number, boolean, json, text } from "pond/server"
 
 // client/index.tsx
-import {
-  useQuery, useMutation, useAuth,
-  SignInWithGoogle, signOut,
-  render, h,
-} from "pond/client"
+import { useQuery, useMutation, useAuth, SignInWithGoogle, signOut, render, h } from "pond/client"
 ```
 
 A capsule **MUST NOT** import any symbol from `pond/server` or `pond/client` that
@@ -137,10 +129,10 @@ table<T extends Record<string, ColumnType>>(columns: T): T
 Identity marker function. The object passed in is the table's user-defined
 columns. The runtime adds three columns to **every** table automatically:
 
-| Column      | SQL                                    |
-| ----------- | -------------------------------------- |
-| `id`        | `TEXT PRIMARY KEY` (UUID, set on insert) |
-| `createdAt` | `TEXT DEFAULT (datetime('now'))`       |
+| Column      | SQL                                                             |
+| ----------- | --------------------------------------------------------------- |
+| `id`        | `TEXT PRIMARY KEY` (UUID, set on insert)                        |
+| `createdAt` | `TEXT DEFAULT (datetime('now'))`                                |
 | `updatedAt` | `TEXT DEFAULT (datetime('now'))` (re-stamped on every `update`) |
 
 **Identifier rules** (enforced at migration time and on every dynamic column
@@ -193,10 +185,10 @@ its first argument:
 ```ts
 interface CapsuleContext {
   auth: CapsuleAuth
-  db:   CapsuleDb
-  env:  Record<string, string>
-  log:  CapsuleLog
-  ai:   CapsuleAi
+  db: CapsuleDb
+  env: Record<string, string>
+  log: CapsuleLog
+  ai: CapsuleAi
   blob: CapsuleBlob
 }
 ```
@@ -209,7 +201,7 @@ interface CapsuleContext {
 ```ts
 interface CapsuleAuth {
   isGuest: boolean
-  userId: string          // "guest" for unauthenticated callers
+  userId: string // "guest" for unauthenticated callers
   displayName?: string
   picture?: string
   email?: string
@@ -227,13 +219,13 @@ A proxy with one property per schema table. Each table exposes:
 
 ```ts
 interface CapsuleDbTable {
-  where(column: string, value: any): QueryBuilder   // chainable; multiple ANDed
+  where(column: string, value: any): QueryBuilder // chainable; multiple ANDed
   orderBy(column: string, dir: "asc" | "desc"): QueryBuilder
   limit(n: number): QueryBuilder
-  all(): any[]                                       // runs SELECT *
-  get(id: string): any                              // SELECT by id; row or undefined
-  insert(data: Record<string, any>): any            // generates UUID id; returns row
-  update(id: string, data: Record<string, any>): any// re-stamps updatedAt; returns row
+  all(): any[] // runs SELECT *
+  get(id: string): any // SELECT by id; row or undefined
+  insert(data: Record<string, any>): any // generates UUID id; returns row
+  update(id: string, data: Record<string, any>): any // re-stamps updatedAt; returns row
   delete(id: string): void
 }
 
@@ -295,8 +287,11 @@ string (non-progressive fallback).
 
 ```ts
 interface CapsuleBlob {
-  put(key: string, bytes: Uint8Array | ArrayBuffer | Buffer | string,
-      options?: { contentType?: string }): Promise<{ key: string; size: number }>
+  put(
+    key: string,
+    bytes: Uint8Array | ArrayBuffer | Buffer | string,
+    options?: { contentType?: string },
+  ): Promise<{ key: string; size: number }>
   get(key: string): Promise<{ bytes: Buffer; contentType: string } | null>
   delete(key: string): Promise<void>
   list(prefix?: string): Promise<Array<{ key: string; size: number; contentType: string }>>
@@ -524,25 +519,25 @@ blob layer.
 
 ### 5.6 Auth routes (built-in)
 
-| Method | Path                        | Purpose                                                |
-| ------ | --------------------------- | ------------------------------------------------------ |
-| GET    | `/auth/me`                  | Returns the current `CapsuleAuth` as JSON.             |
-| POST   | `/auth/signout`             | Clears the session cookie; returns `{ "ok": true }`.   |
-| GET    | `/auth/google`              | Redirect to Google OAuth (if configured).              |
-| GET    | `/auth/google/callback`     | OAuth callback → sets `pond_session` → redirect `/`.   |
-| GET    | `/auth/github`              | Redirect to GitHub OAuth (if configured).              |
-| GET    | `/auth/github/callback`     | OAuth callback → sets `pond_session` → redirect `/`.   |
-| POST   | `/auth/email/request`       | Body `{ email }`; issues a 15-min magic-link token.    |
-| GET    | `/auth/email/verify?token=` | Consumes the token → sets session → redirect `/`.      |
+| Method | Path                        | Purpose                                              |
+| ------ | --------------------------- | ---------------------------------------------------- |
+| GET    | `/auth/me`                  | Returns the current `CapsuleAuth` as JSON.           |
+| POST   | `/auth/signout`             | Clears the session cookie; returns `{ "ok": true }`. |
+| GET    | `/auth/google`              | Redirect to Google OAuth (if configured).            |
+| GET    | `/auth/google/callback`     | OAuth callback → sets `pond_session` → redirect `/`. |
+| GET    | `/auth/github`              | Redirect to GitHub OAuth (if configured).            |
+| GET    | `/auth/github/callback`     | OAuth callback → sets `pond_session` → redirect `/`. |
+| POST   | `/auth/email/request`       | Body `{ email }`; issues a 15-min magic-link token.  |
+| GET    | `/auth/email/verify?token=` | Consumes the token → sets session → redirect `/`.    |
 
 Session cookie is `pond_session` (HttpOnly, SameSite=Lax, JWT, 7-day expiry).
 
 ### 5.7 Operational routes
 
-| Method | Path                | Purpose                                              |
-| ------ | ------------------- | ---------------------------------------------------- |
+| Method | Path                | Purpose                                                                        |
+| ------ | ------------------- | ------------------------------------------------------------------------------ |
 | GET    | `/__pond/metrics`   | Prometheus text: per-route request/error counts, p50/p95/p99 latency. No auth. |
-| GET    | `/favicon.svg` etc. | Built-in favicons.                                   |
+| GET    | `/favicon.svg` etc. | Built-in favicons.                                                             |
 
 ### 5.8 Error shapes
 
@@ -634,14 +629,10 @@ export default capsule({
   },
   queries: {
     // No-arg read — hit via useQuery("todos").
-    todos: query((ctx) =>
-      ctx.db.todos.where("owner", ctx.auth.userId).orderBy("createdAt", "desc").all(),
-    ),
+    todos: query((ctx) => ctx.db.todos.where("owner", ctx.auth.userId).orderBy("createdAt", "desc").all()),
   },
   mutations: {
-    addTodo: mutation((ctx, text: string) =>
-      ctx.db.todos.insert({ text, done: false, owner: ctx.auth.userId }),
-    ),
+    addTodo: mutation((ctx, text: string) => ctx.db.todos.insert({ text, done: false, owner: ctx.auth.userId })),
     toggleTodo: mutation((ctx, id: string) => {
       const row = ctx.db.todos.get(id)
       if (!row || row.owner !== ctx.auth.userId) throw new Error("not found")
@@ -683,7 +674,9 @@ export function App() {
         }}
       >
         <input name="text" class="flex-1 rounded border px-2 py-1" placeholder="Add a todo" />
-        <button type="submit" class="rounded bg-black px-3 py-1 text-white">Add</button>
+        <button type="submit" class="rounded bg-black px-3 py-1 text-white">
+          Add
+        </button>
       </form>
       <ul class="space-y-1">
         {todos?.map((t) => (
