@@ -613,6 +613,19 @@ export const hostCommand = defineCommand({
       return raw as unknown as HostedDeployRecord
     }
 
+    // In-memory cache for the unauthenticated public-deploys listing.
+    // Declared BEFORE writeRecord because writeRecord calls
+    // invalidatePublicListing() and the boot loop calls writeRecord during
+    // module/run init — if `publicListingCache` is declared later in the
+    // function body, that path hits a TDZ ReferenceError. The handler that
+    // reads/writes the cache lives much further down with the rest of the
+    // public-deploys route; it closes over these bindings.
+    let publicListingCache: { body: { deploys: unknown[] }; expiresAt: number } | null = null
+    const PUBLIC_LISTING_TTL_MS = 10_000
+    function invalidatePublicListing() {
+      publicListingCache = null
+    }
+
     function writeRecord(record: HostedDeployRecord) {
       const dir = deployDirFor(record.deployId)
       fs.mkdirSync(dir, { recursive: true })
@@ -2052,18 +2065,9 @@ export const hostCommand = defineCommand({
     // Unauthenticated. Lists deploys whose capsule declared `public: true` in
     // its last build. Anonymous deploys are excluded — there's no "owner" to
     // attribute them to, and they have a short retention window.
-    // In-memory cache for the unauthenticated public-deploys listing.
-    // Without this each anonymous GET stats every deploy on disk + queries
-    // SQLite per id — trivially weaponized as a request-amplification DOS.
-    // 10s TTL is short enough that newly-public deploys appear quickly but
-    // absorbs request floods. Invalidated by `invalidatePublicListing()`
-    // wherever a deploy is created/updated/deleted or its visibility flips.
-    let publicListingCache: { body: { deploys: unknown[] }; expiresAt: number } | null = null
-    const PUBLIC_LISTING_TTL_MS = 10_000
-    function invalidatePublicListing() {
-      publicListingCache = null
-    }
-
+    // publicListingCache + invalidatePublicListing are declared up top (next
+    // to writeRecord) — see comment there. The handler below closes over
+    // those bindings.
     app.get("/api/public-deploys", (c) => {
       const now = Date.now()
       if (publicListingCache && publicListingCache.expiresAt > now) {
