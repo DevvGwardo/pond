@@ -175,29 +175,38 @@ Enable it:
 POND_CAPSULE_FS_ISOLATION=bwrap
 ```
 
-**Verify on the host** (cannot be checked on a macOS dev box — bwrap is
-Linux-only):
+**Mechanism verified on Linux.** The two load-bearing claims were exercised
+against real `bwrap` (0.8.0, Node 22) in a Linux container using the actual
+`buildBwrapArgv` output:
+
+- **Allowlist boundary** — from inside the namespace, `control.db`, the
+  host-token file, and a sibling deploy dir all return `ENOENT`; the capsule's
+  own deploy dir is readable + writable; the pond runtime is readable but
+  `EROFS` (read-only). control.db et al. are not merely unreadable, they are
+  absent.
+- **IPC through bwrap** — a `spawn`ed `bwrap … node` child with `ipc` stdio
+  successfully delivered a `booted` message to the parent, confirming
+  `NODE_CHANNEL_FD` survives the bwrap exec. (See the note below.)
+
+**Still verify on the actual host** (the container test used a stub worker, not
+the real runtime):
 
 1. Host boots and logs `capsule fs isolation: bubblewrap enabled`.
-2. Deploy a capsule and confirm it serves `/api/health` and its own `ctx.db`
-   reads/writes still work (the deploy dir is rw-bound).
-3. From inside a capsule (e.g. a temporary deploy whose handler shells out or
-   reads files), confirm the control plane is invisible:
-   - `ls ../` / the data-dir path → no `control.db`, no `host-token`, no sibling
-     `deploys/<other-id>` directories.
-   - Attempting to read another deploy's dir by absolute path → ENOENT.
-4. Confirm the worker still talks to the control plane (the boot `booted`
-   message arrives within 10s — this exercises the IPC channel through bwrap,
-   the one piece that must be validated on Linux; if the worker never boots,
-   the NODE_CHANNEL_FD is not surviving the bwrap exec — see the note below).
+2. Deploy a real capsule and confirm it serves `/api/health` and its own
+   `ctx.db` reads/writes still work — i.e. the real `deploy-worker` +
+   native `better-sqlite3` + the `--permission` flags all function together
+   under bwrap (the part the mechanism test did not cover).
+3. Spot-check the boundary from inside a real capsule: `ls` the data-dir path →
+   no `control.db` / `host-token` / sibling `deploys/<other-id>`; absolute-path
+   read of another deploy → ENOENT.
 
 > **IPC-through-bwrap note.** The control plane drives each worker over a Node
 > IPC channel (the `boot`/`booted` messages). `fork` wires this automatically;
 > in `bwrap` mode the host `spawn`s `bwrap` with the same `ipc` stdio so the
 > channel fd (`NODE_CHANNEL_FD`) is inherited by the inner node. bwrap is not
-> given `--args`, so it consumes no extra fds. This is the only part of the
-> feature that cannot be verified off-Linux; if boots time out under `bwrap`,
-> that fd inheritance is the first thing to check.
+> given `--args`, so it consumes no extra fds. This was confirmed working on
+> Linux; if boots ever time out under `bwrap`, that fd inheritance is the first
+> thing to check.
 
 ## 7. Known residual gaps
 
@@ -212,9 +221,10 @@ Linux-only):
   deploys' secrets. The kernel-enforced fix now exists as an opt-in: set
   `--capsule-fs-isolation=bwrap` on a Linux host (§6). Treat the lockdown as the
   speed bump and bwrap as the real boundary, exactly as the JS network shim
-  relates to the nft firewall. Remaining work to make it the default: validate
-  the IPC-through-bwrap path on Linux (§6) and confirm no hosted-app regressions,
-  then flip the default once verified in production.
+  relates to the nft firewall. The bwrap mechanism (allowlist + IPC) is verified
+  on Linux (§6); remaining work to make it the default: a full-runtime host smoke
+  test (real worker + native `better-sqlite3` + `--permission` under bwrap), then
+  a production soak before flipping the default.
 - **Capsule-to-capsule on loopback** is closed for _new_ connections by the nft
   rule, but capsules still share a network namespace. Per-tenant netns (or
   microVMs) is the structural fix.
