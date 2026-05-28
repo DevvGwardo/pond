@@ -85,6 +85,57 @@ async function api(opts: McpServerOptions, path: string, init: RequestInit = {})
 function tools(opts: McpServerOptions): ToolDef[] {
   return [
     {
+      name: "create_deploy",
+      description:
+        "Create a new deploy from a source tree and return its live URL. sourceFiles maps relative paths to file contents and MUST include server/index.ts (the entry point). The deploy is owned by the authenticated account. The response includes deployId, url, and a one-time claimToken — save it if you need to claim/transfer the deploy later.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          sourceFiles: {
+            type: "object",
+            description:
+              'Map of relative path -> file content, e.g. { "server/index.ts": "...", "package.json": "..." }. Must include server/index.ts.',
+            additionalProperties: { type: "string" },
+          },
+          publicInspect: {
+            type: "boolean",
+            description: "Allow read-only public inspection of the deploy (default false).",
+          },
+        },
+        required: ["sourceFiles"],
+      },
+      handler: async ({ sourceFiles, publicInspect }) =>
+        api(opts, "/api/deploys", {
+          method: "POST",
+          body: JSON.stringify({ sourceFiles, publicInspect: Boolean(publicInspect) }),
+        }),
+    },
+    {
+      name: "claim_deploy",
+      description:
+        "Claim an unclaimed (anonymous) deploy to the authenticated account, or re-attach a deploy already owned by this account. Requires the deployId and its current claimToken (from create_deploy). Returns a NEW rotated claimToken — the old one is invalidated, so persist the returned value.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          deployId: { type: "string" },
+          claimToken: { type: "string", description: "The current claim token for the deploy." },
+          envText: {
+            type: "string",
+            description: "Optional .env contents to set on the deploy as part of the claim (KEY=value lines).",
+          },
+        },
+        required: ["deployId", "claimToken"],
+      },
+      handler: async ({ deployId, claimToken, envText }) => {
+        const body: Record<string, unknown> = { claimToken }
+        if (typeof envText === "string") body.envText = envText
+        return api(opts, `/api/deploys/${deployId}/claim`, {
+          method: "POST",
+          body: JSON.stringify(body),
+        })
+      },
+    },
+    {
       name: "list_deploys",
       description: "List deploys owned by the current user. Returns id, url, status, createdAt.",
       inputSchema: { type: "object", properties: {} },
