@@ -28,6 +28,7 @@ Hard constraints — non-negotiable:
 
 ## Docs
 
+- [Capsule Spec v1](https://pond.run/docs/capsule-spec.md): the authoritative, versioned definition of the capsule format + wire protocol — what a conformant capsule and a conformant runtime must implement.
 - [Pond Server API Reference](https://pond.run/docs/api-reference.md): the surface of `pond/server` — `capsule()`, `table()`, `query()`, `mutation()`, `endpoint()`, column types, the `ctx.db` data API, lifecycle.
 - [Pond Client API Reference](https://pond.run/docs/client-reference.md): the surface of `pond/client` — `useQuery`, `useMutation`, `useAuth`, `SignInWithGoogle`, `signOut`, plus the re-exported `render` and `h` from Preact.
 - [Pond CLI Reference](https://pond.run/docs/cli-reference.md): every `pond` subcommand (`new`, `dev`, `deploy`, `host`, `db`, `logs`, `inspect`, `fork`, `claim`, `login`, `user`, `token`, `domains`, `env`, `auth`) with flags, when-to-use, and worked examples.
@@ -1078,8 +1079,8 @@ A few useful ones:
 | `POND_SESSION_SECRET`      | Persistent session-cookie secret. Set this in `.env.pond.server` for production; without it sessions don't survive a restart. |
 | `POND_TRUST_PROXY_HEADERS` | Same effect as `--trust-proxy` on `pond host`.                                                                                |
 | `POND_PUBLIC_BASE_URL`     | Same effect as `--public-base-url` on `pond host`.                                                                            |
-| `POND_TURNSTILE_SECRET`    | Same effect as `--turnstile-secret` on `pond host` — requires a verified Cloudflare Turnstile token on anonymous deploys.    |
-| `POND_HOST_TOKEN`          | The control-plane host token. Used by `pond admin terminate` and host bootstrap.                                             |
+| `POND_TURNSTILE_SECRET`    | Same effect as `--turnstile-secret` on `pond host` — requires a verified Cloudflare Turnstile token on anonymous deploys.     |
+| `POND_HOST_TOKEN`          | The control-plane host token. Used by `pond admin terminate` and host bootstrap.                                              |
 
 ---
 
