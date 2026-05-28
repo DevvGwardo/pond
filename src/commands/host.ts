@@ -15,6 +15,7 @@ import { buildClient } from "../bundler.js"
 import { ideHtml } from "../ide/built.js"
 import { dashboardHtml } from "../dashboard/built.js"
 import { marked } from "marked"
+import Database from "better-sqlite3"
 
 // Curated docs catalog. Hand-written titles + summaries beat anything derivable
 // from the markdown's H1 — the index page becomes navigation copy, not a file
@@ -1552,6 +1553,103 @@ export const hostCommand = defineCommand({
         }
       }
       return c.json({ entries })
+    })
+
+    // Inspect a hosted capsule's DB schema + source layout. Opens the
+    // capsule's SQLite file read-only so it's safe while the worker is
+    // running (WAL mode allows concurrent readers). Used by the dashboard
+    // detail page to render an Outline / KPI overview without a CORS hop
+    // through the capsule itself.
+    app.get("/api/deploys/:deployId/inspect", (c) => {
+      const deployId = c.req.param("deployId")
+      const r = requireDeployOwner(c, deployId)
+      if (r instanceof Response) return r
+      const dir = deployDirFor(deployId)
+      const dbPath = path.join(dir, ".pond", "data.db")
+      const sourceDir = path.join(dir, "source")
+
+      type TableInfo = { name: string; rowCount: number; columns: number }
+      let tables: TableInfo[] = []
+      let dbBytes = 0
+      let dbOpenError: string | undefined
+      if (fs.existsSync(dbPath)) {
+        try {
+          dbBytes = fs.statSync(dbPath).size
+        } catch {
+          // best-effort
+        }
+        let db: Database.Database | undefined
+        try {
+          db = new Database(dbPath, { readonly: true, fileMustExist: true })
+          const rows = db
+            .prepare(
+              "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_pond_%' ORDER BY name ASC",
+            )
+            .all() as Array<{ name: string }>
+          for (const { name } of rows) {
+            // Identifier validation: sqlite_master `name` is the table's
+            // declared identifier. Reject anything outside the safe alnum/_
+            // set before interpolating into the COUNT(*) statement.
+            if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) continue
+            let rowCount = 0
+            let columns = 0
+            try {
+              const c = db.prepare(`SELECT COUNT(*) AS n FROM "${name}"`).get() as { n: number }
+              rowCount = Number(c?.n ?? 0)
+            } catch {
+              // table might be locked or schema is unusual — surface zero
+            }
+            try {
+              const cols = db.prepare(`PRAGMA table_info("${name}")`).all() as unknown[]
+              columns = cols.length
+            } catch {
+              // best-effort
+            }
+            tables.push({ name, rowCount, columns })
+          }
+        } catch (err) {
+          dbOpenError = err instanceof Error ? err.message : String(err)
+        } finally {
+          try {
+            db?.close()
+          } catch {
+            // ignore close errors on a read-only handle
+          }
+        }
+      }
+
+      let sourceFileCount = 0
+      const countFiles = (rel: string) => {
+        const abs = path.join(sourceDir, rel)
+        if (!fs.existsSync(abs)) return
+        const stat = fs.statSync(abs)
+        if (stat.isFile()) {
+          sourceFileCount += 1
+          return
+        }
+        if (stat.isDirectory()) {
+          for (const entry of fs.readdirSync(abs)) {
+            if (entry === "node_modules" || entry.startsWith(".")) continue
+            countFiles(path.join(rel, entry))
+          }
+        }
+      }
+      try {
+        countFiles("")
+      } catch {
+        // best-effort; partial counts still useful
+      }
+
+      const totalRows = tables.reduce((acc, t) => acc + t.rowCount, 0)
+      return c.json({
+        deployId,
+        dbBytes,
+        dbOpenError,
+        tableCount: tables.length,
+        totalRows,
+        tables,
+        sourceFileCount,
+      })
     })
 
     app.put("/api/deploys/:deployId/env", async (c) => {

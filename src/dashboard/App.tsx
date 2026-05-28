@@ -104,6 +104,57 @@ async function deleteDeploy(token: string, deployId: string): Promise<boolean> {
   return r.ok
 }
 
+interface InspectData {
+  deployId: string
+  dbBytes: number
+  dbOpenError?: string
+  tableCount: number
+  totalRows: number
+  tables: Array<{ name: string; rowCount: number; columns: number }>
+  sourceFileCount: number
+}
+
+async function fetchInspect(token: string, deployId: string): Promise<InspectData | { error: string }> {
+  const r = await fetch(`/api/deploys/${deployId}/inspect`, { headers: authHeaders(token) })
+  if (!r.ok) return { error: (await r.json().catch(() => ({}))).error ?? "inspect failed" }
+  return r.json()
+}
+
+interface LogEntry {
+  ts?: string
+  level?: string
+  message?: string
+  [k: string]: unknown
+}
+
+async function fetchLogs(token: string, deployId: string): Promise<{ entries: LogEntry[] } | { error: string }> {
+  const r = await fetch(`/api/deploys/${deployId}/logs?limit=200`, { headers: authHeaders(token) })
+  if (!r.ok) return { error: (await r.json().catch(() => ({}))).error ?? "logs failed" }
+  return r.json()
+}
+
+function parseHashRoute(hash: string): { deployId: string | null } {
+  const m = hash.match(/^#d\/([a-f0-9]+)/i)
+  return { deployId: m ? m[1] : null }
+}
+
+function useHashRoute() {
+  const [route, setRoute] = useState(() =>
+    typeof window !== "undefined" ? parseHashRoute(window.location.hash) : { deployId: null },
+  )
+  useEffect(() => {
+    const onChange = () => setRoute(parseHashRoute(window.location.hash))
+    window.addEventListener("hashchange", onChange)
+    return () => window.removeEventListener("hashchange", onChange)
+  }, [])
+  return route
+}
+
+function navigateTo(hash: string) {
+  if (typeof window === "undefined") return
+  window.location.hash = hash
+}
+
 export function App() {
   const bootstrap = useMemo(readBootstrap, [])
   const [token, setToken] = useState<string | null>(() => loadToken())
@@ -208,6 +259,7 @@ function Workspace({
   bootstrap: Bootstrap
   onSignOut: () => void
 }) {
+  const route = useHashRoute()
   const [deploys, setDeploys] = useState<DeployRow[]>([])
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState<string | null>(null)
@@ -271,6 +323,34 @@ function Workspace({
     const mine = deploys.filter((d) => d.ownerId === me.id).length
     return { total: deploys.length, live, anon, mine }
   }, [deploys, me.id])
+
+  const activeDeploy = useMemo(
+    () => (route.deployId ? (deploys.find((d) => d.deployId.startsWith(route.deployId!)) ?? null) : null),
+    [route.deployId, deploys],
+  )
+
+  if (route.deployId && !loading) {
+    if (activeDeploy) {
+      return (
+        <DeployDetail
+          d={activeDeploy}
+          me={me}
+          token={token}
+          flash={flash}
+          err={err}
+          onClearErr={() => setErr(null)}
+          onBack={() => navigateTo("")}
+          onRotateClaim={() => void handleRotateClaim(activeDeploy)}
+          onDelete={async () => {
+            await handleDelete(activeDeploy)
+            navigateTo("")
+          }}
+          onSignOut={onSignOut}
+        />
+      )
+    }
+    // deployId in URL but no matching deploy loaded — fall through to list
+  }
 
   return (
     <div class="min-h-screen bg-black text-zinc-100">
@@ -430,7 +510,12 @@ function DeployCard({
       <div class="flex flex-col gap-4 px-5 py-4 lg:flex-row lg:items-center">
         <div class="min-w-0 flex-1">
           <div class="flex flex-wrap items-center gap-2">
-            <h2 class="truncate text-base font-semibold text-zinc-50">{heading}</h2>
+            <a
+              href={`#d/${d.deployId}`}
+              class="truncate text-base font-semibold text-zinc-50 transition hover:text-emerald-300"
+            >
+              {heading}
+            </a>
             <StatusPill d={d} isOwner={isOwner} />
           </div>
           <p class="mt-1 flex flex-wrap items-center gap-x-2 text-xs text-zinc-500">
@@ -507,6 +592,477 @@ function StatusPill({ d, isOwner }: { d: DeployRow; isOwner: boolean }) {
       <span class="h-1.5 w-1.5 rounded-full bg-zinc-500" />
       shared
     </span>
+  )
+}
+
+type DetailTab = "overview" | "tables" | "logs" | "settings"
+
+function DeployDetail({
+  d,
+  me,
+  token,
+  flash,
+  err,
+  onClearErr,
+  onBack,
+  onRotateClaim,
+  onDelete,
+  onSignOut,
+}: {
+  d: DeployRow
+  me: Me
+  token: string
+  flash: string | null
+  err: string | null
+  onClearErr: () => void
+  onBack: () => void
+  onRotateClaim: () => void
+  onDelete: () => void
+  onSignOut: () => void
+}) {
+  const [tab, setTab] = useState<DetailTab>("overview")
+  const [inspect, setInspect] = useState<InspectData | null>(null)
+  const [inspectErr, setInspectErr] = useState<string | null>(null)
+  const [inspectLoading, setInspectLoading] = useState(true)
+  const [refreshKey, setRefreshKey] = useState(0)
+
+  useEffect(() => {
+    let cancelled = false
+    setInspectLoading(true)
+    void fetchInspect(token, d.deployId).then((res) => {
+      if (cancelled) return
+      if ("error" in res) {
+        setInspectErr(res.error)
+        setInspect(null)
+      } else {
+        setInspect(res)
+        setInspectErr(null)
+      }
+      setInspectLoading(false)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [token, d.deployId, refreshKey])
+
+  const isOwner = d.ownerId === me.id
+  const heading = d.title?.trim() || "Untitled project"
+  const ideHref = `/ide/${d.deployId}#bearer=${encodeURIComponent(token)}`
+  const liveTag = d.terminated ? "Terminated" : d.anonymous ? "Anonymous" : "Live"
+  const liveTagColor = d.terminated ? "text-zinc-500" : d.anonymous ? "text-amber-300" : "text-emerald-300"
+
+  return (
+    <div class="min-h-screen bg-black text-zinc-100">
+      <header class="border-b border-zinc-900 bg-zinc-950/60 backdrop-blur">
+        <div class="mx-auto flex max-w-7xl flex-wrap items-end justify-between gap-4 px-6 py-5">
+          <div class="min-w-0">
+            <button
+              class="mb-2 text-[11px] font-medium uppercase tracking-[0.18em] text-zinc-500 transition hover:text-zinc-300"
+              onClick={onBack}
+            >
+              ← Dashboard
+            </button>
+            <h1 class="truncate text-2xl font-semibold tracking-tight text-zinc-50">{heading}</h1>
+            <p class="mt-1 flex flex-wrap items-center gap-x-2 text-sm text-zinc-500">
+              <a class="font-mono text-zinc-400 hover:text-emerald-300" href={d.url} target="_blank" rel="noreferrer">
+                {d.url.replace(/^https?:\/\//, "")}
+              </a>
+              <span class="text-zinc-800">·</span>
+              <span class="font-mono text-zinc-600">{d.deployId.slice(0, 12)}</span>
+              <span class="text-zinc-800">·</span>
+              <span class={`font-medium ${liveTagColor}`}>{liveTag}</span>
+            </p>
+          </div>
+          <div class="flex items-center gap-2">
+            <button
+              class="rounded-md border border-zinc-800 bg-black px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-zinc-600 hover:text-zinc-100"
+              onClick={() => setRefreshKey((k) => k + 1)}
+            >
+              Refresh
+            </button>
+            <a
+              class="rounded-md border border-zinc-800 bg-black px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-zinc-600 hover:text-zinc-100"
+              href={d.url}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Preview
+            </a>
+            <a
+              class="rounded-md bg-zinc-100 px-3 py-1.5 text-xs font-semibold text-zinc-950 transition hover:bg-white"
+              href={ideHref}
+            >
+              IDE →
+            </a>
+          </div>
+        </div>
+      </header>
+      {flash ? (
+        <div class="border-b border-emerald-900/60 bg-emerald-950/40 px-6 py-2 text-xs text-emerald-300">{flash}</div>
+      ) : null}
+      {err ? (
+        <div class="border-b border-red-900/60 bg-red-950/40 px-6 py-2 text-xs text-red-200">
+          {err}
+          <button class="ml-3 underline decoration-red-700 hover:decoration-red-300" onClick={onClearErr}>
+            dismiss
+          </button>
+        </div>
+      ) : null}
+      <div class="mx-auto grid max-w-7xl gap-6 px-6 py-6 lg:grid-cols-[180px_minmax(0,1fr)_280px]">
+        <DetailSidebar tab={tab} onTab={setTab} />
+        <main class="min-w-0 space-y-6">
+          {tab === "overview" ? (
+            <OverviewTab d={d} inspect={inspect} loading={inspectLoading} error={inspectErr} />
+          ) : null}
+          {tab === "tables" ? <TablesTab inspect={inspect} loading={inspectLoading} error={inspectErr} /> : null}
+          {tab === "logs" ? <LogsTab token={token} deployId={d.deployId} /> : null}
+          {tab === "settings" ? (
+            <SettingsTab d={d} isOwner={isOwner} onRotateClaim={onRotateClaim} onDelete={onDelete} />
+          ) : null}
+        </main>
+        <aside class="space-y-4">
+          <DiagnosticsCard d={d} inspect={inspect} loading={inspectLoading} />
+          <OutlineCard inspect={inspect} loading={inspectLoading} />
+          <a
+            class="block rounded-xl border border-emerald-900/60 bg-emerald-950/30 px-4 py-3 text-center text-sm font-semibold text-emerald-200 transition hover:border-emerald-700 hover:bg-emerald-950/60"
+            href={d.url}
+            target="_blank"
+            rel="noreferrer"
+          >
+            Open Live App ↗
+          </a>
+        </aside>
+      </div>
+    </div>
+  )
+}
+
+function DetailSidebar({ tab, onTab }: { tab: DetailTab; onTab: (t: DetailTab) => void }) {
+  const items: Array<{ id: DetailTab; label: string }> = [
+    { id: "overview", label: "Overview" },
+    { id: "tables", label: "Tables" },
+    { id: "logs", label: "Logs" },
+    { id: "settings", label: "Settings" },
+  ]
+  return (
+    <nav class="rounded-xl border border-zinc-900 bg-zinc-950 p-2">
+      <p class="px-3 pb-2 pt-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-500">Navigation</p>
+      <div class="space-y-0.5">
+        {items.map((it) => (
+          <button
+            key={it.id}
+            class={`block w-full rounded-md px-3 py-2 text-left text-sm transition ${
+              tab === it.id
+                ? "bg-zinc-100 font-semibold text-zinc-950"
+                : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100"
+            }`}
+            onClick={() => onTab(it.id)}
+          >
+            {it.label}
+          </button>
+        ))}
+      </div>
+    </nav>
+  )
+}
+
+function OverviewTab({
+  d,
+  inspect,
+  loading,
+  error,
+}: {
+  d: DeployRow
+  inspect: InspectData | null
+  loading: boolean
+  error: string | null
+}) {
+  const dbKb = inspect ? Math.round(inspect.dbBytes / 102.4) / 10 : 0 // KB to 1dp
+  const dbDisplay = inspect ? (dbKb >= 1024 ? `${(dbKb / 1024).toFixed(1)} MB` : `${dbKb} KB`) : "—"
+  return (
+    <>
+      <h2 class="text-base font-semibold text-zinc-100">Overview</h2>
+      <section class="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <KpiTile label="Tables" value={inspect?.tableCount ?? 0} accent />
+        <KpiTile label="Total rows" value={inspect?.totalRows ?? 0} accent />
+        <KpiTileText label="DB size" value={loading ? "…" : dbDisplay} accent={!loading && !!inspect} />
+        <KpiTile label="Source files" value={inspect?.sourceFileCount ?? 0} accent />
+      </section>
+      {error ? (
+        <div class="rounded-lg border border-red-900/60 bg-red-950/30 px-4 py-3 text-xs text-red-300">
+          Inspect error: {error}
+        </div>
+      ) : null}
+      {inspect?.dbOpenError ? (
+        <div class="rounded-lg border border-amber-900/60 bg-amber-950/30 px-4 py-3 text-xs text-amber-200">
+          Could not open capsule DB: {inspect.dbOpenError}
+        </div>
+      ) : null}
+      <section class="rounded-xl border border-zinc-900 bg-zinc-950">
+        <header class="border-b border-zinc-900 px-4 py-3">
+          <h3 class="text-sm font-semibold text-zinc-100">Deploy meta</h3>
+        </header>
+        <dl class="grid grid-cols-2 gap-x-6 gap-y-2 px-4 py-4 text-xs">
+          <Meta label="Deploy ID" value={<span class="font-mono text-zinc-300">{d.deployId}</span>} />
+          <Meta label="Created" value={humanAge(d.createdAt)} />
+          <Meta label="Updated" value={humanAge(d.updatedAt)} />
+          <Meta
+            label="Public inspect"
+            value={
+              d.isPublic ? <span class="text-emerald-300">enabled</span> : <span class="text-zinc-500">disabled</span>
+            }
+          />
+          {d.terminatesAt ? <Meta label="Terminates" value={humanAge(d.terminatesAt, true)} /> : null}
+          {d.expiresAt ? <Meta label="Expires" value={humanAge(d.expiresAt, true)} /> : null}
+        </dl>
+      </section>
+    </>
+  )
+}
+
+function Meta({ label, value }: { label: string; value: any }) {
+  return (
+    <>
+      <dt class="text-zinc-500">{label}</dt>
+      <dd class="text-right text-zinc-300">{value}</dd>
+    </>
+  )
+}
+
+function KpiTileText({ label, value, accent = false }: { label: string; value: string; accent?: boolean }) {
+  return (
+    <div
+      class={`relative overflow-hidden rounded-xl border ${accent ? "border-emerald-900/60" : "border-zinc-800"} bg-zinc-950 px-5 py-4`}
+    >
+      <p class="text-[10px] font-medium uppercase tracking-[0.18em] text-zinc-500">{label}</p>
+      <p class="mt-2 font-mono text-2xl font-semibold tabular-nums text-zinc-50">{value}</p>
+      {accent ? (
+        <svg
+          class="pointer-events-none absolute bottom-0 left-0 h-8 w-12"
+          viewBox="0 0 48 32"
+          preserveAspectRatio="none"
+        >
+          <polygon points="0,32 48,32 0,0" fill="rgb(16 185 129 / 0.18)" />
+          <polyline points="0,32 48,32" stroke="rgb(16 185 129 / 0.6)" stroke-width="1" fill="none" />
+        </svg>
+      ) : null}
+    </div>
+  )
+}
+
+function TablesTab({
+  inspect,
+  loading,
+  error,
+}: {
+  inspect: InspectData | null
+  loading: boolean
+  error: string | null
+}) {
+  if (loading) {
+    return <p class="text-sm text-zinc-500">Loading tables…</p>
+  }
+  if (error) {
+    return <div class="rounded-lg border border-red-900/60 bg-red-950/30 px-4 py-3 text-xs text-red-300">{error}</div>
+  }
+  if (!inspect || inspect.tables.length === 0) {
+    return (
+      <div class="rounded-xl border border-zinc-900 bg-zinc-950 px-5 py-12 text-center text-sm text-zinc-500">
+        No tables in this capsule yet.
+      </div>
+    )
+  }
+  return (
+    <>
+      <h2 class="text-base font-semibold text-zinc-100">Tables</h2>
+      <section class="overflow-hidden rounded-xl border border-zinc-900 bg-zinc-950">
+        <table class="w-full text-sm">
+          <thead class="border-b border-zinc-900 bg-zinc-950 text-xs uppercase tracking-wider text-zinc-500">
+            <tr>
+              <th class="px-4 py-3 text-left font-medium">Name</th>
+              <th class="px-4 py-3 text-right font-medium">Rows</th>
+              <th class="px-4 py-3 text-right font-medium">Columns</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-zinc-900">
+            {inspect.tables.map((t) => (
+              <tr key={t.name} class="transition hover:bg-zinc-900/40">
+                <td class="px-4 py-3 font-mono text-zinc-200">{t.name}</td>
+                <td class="px-4 py-3 text-right font-mono tabular-nums text-zinc-300">{t.rowCount.toLocaleString()}</td>
+                <td class="px-4 py-3 text-right font-mono tabular-nums text-zinc-500">{t.columns}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
+    </>
+  )
+}
+
+function LogsTab({ token, deployId }: { token: string; deployId: string }) {
+  const [entries, setEntries] = useState<LogEntry[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [reloadKey, setReloadKey] = useState(0)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    void fetchLogs(token, deployId).then((res) => {
+      if (cancelled) return
+      if ("error" in res) {
+        setError(res.error)
+        setEntries([])
+      } else {
+        setEntries(res.entries.reverse())
+        setError(null)
+      }
+      setLoading(false)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [token, deployId, reloadKey])
+
+  return (
+    <>
+      <div class="flex items-end justify-between">
+        <h2 class="text-base font-semibold text-zinc-100">Logs</h2>
+        <button
+          class="rounded-md border border-zinc-800 bg-black px-3 py-1 text-xs text-zinc-300 transition hover:border-zinc-600"
+          onClick={() => setReloadKey((k) => k + 1)}
+        >
+          Reload
+        </button>
+      </div>
+      {loading ? (
+        <p class="text-sm text-zinc-500">Loading logs…</p>
+      ) : error ? (
+        <div class="rounded-lg border border-red-900/60 bg-red-950/30 px-4 py-3 text-xs text-red-300">{error}</div>
+      ) : entries.length === 0 ? (
+        <div class="rounded-xl border border-zinc-900 bg-zinc-950 px-5 py-12 text-center text-sm text-zinc-500">
+          No log entries yet.
+        </div>
+      ) : (
+        <section class="overflow-hidden rounded-xl border border-zinc-900 bg-zinc-950">
+          <ul class="divide-y divide-zinc-900 font-mono text-xs">
+            {entries.map((e, i) => (
+              <li key={i} class="grid grid-cols-[110px_60px_minmax(0,1fr)] gap-3 px-4 py-2">
+                <span class="text-zinc-500">{e.ts ? new Date(e.ts).toLocaleTimeString() : ""}</span>
+                <span
+                  class={`text-xs uppercase ${
+                    e.level === "error" ? "text-red-400" : e.level === "warn" ? "text-amber-400" : "text-zinc-500"
+                  }`}
+                >
+                  {e.level ?? "log"}
+                </span>
+                <span class="truncate text-zinc-300">{e.message ?? JSON.stringify(e)}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+    </>
+  )
+}
+
+function SettingsTab({
+  d,
+  isOwner,
+  onRotateClaim,
+  onDelete,
+}: {
+  d: DeployRow
+  isOwner: boolean
+  onRotateClaim: () => void
+  onDelete: () => void
+}) {
+  return (
+    <>
+      <h2 class="text-base font-semibold text-zinc-100">Settings</h2>
+      <section class="space-y-4">
+        <div class="rounded-xl border border-zinc-900 bg-zinc-950 p-5">
+          <h3 class="text-sm font-semibold text-zinc-100">Claim token</h3>
+          <p class="mt-1 text-xs text-zinc-500">
+            The claim token authorizes CLI redeploys for this capsule. Rotate it if it may have been leaked — the new
+            token is copied to your clipboard.
+          </p>
+          <button
+            class="mt-3 rounded-md border border-zinc-800 bg-black px-3 py-1.5 text-xs text-zinc-300 transition hover:border-zinc-600 hover:text-zinc-100 disabled:opacity-50"
+            onClick={onRotateClaim}
+            disabled={!isOwner}
+          >
+            Rotate claim token
+          </button>
+        </div>
+        <div class="rounded-xl border border-red-900/60 bg-red-950/10 p-5">
+          <h3 class="text-sm font-semibold text-red-200">Delete deploy</h3>
+          <p class="mt-1 text-xs text-red-300/70">
+            Permanently removes the capsule, its database, and all associated source files. This cannot be undone.
+          </p>
+          <button
+            class="mt-3 rounded-md border border-red-900/60 bg-black px-3 py-1.5 text-xs text-red-300 transition hover:border-red-700 hover:bg-red-950/40 disabled:opacity-50"
+            onClick={onDelete}
+            disabled={!isOwner}
+          >
+            Delete this deploy
+          </button>
+        </div>
+      </section>
+    </>
+  )
+}
+
+function DiagnosticsCard({ d, inspect, loading }: { d: DeployRow; inspect: InspectData | null; loading: boolean }) {
+  const healthy = !d.terminated && !inspect?.dbOpenError
+  return (
+    <div class="rounded-xl border border-zinc-900 bg-zinc-950">
+      <p class="border-b border-zinc-900 px-4 py-3 text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-500">
+        Diagnostics
+      </p>
+      <div class="px-4 py-3">
+        <div
+          class={`rounded-lg border px-3 py-2 text-xs ${
+            healthy
+              ? "border-emerald-900/60 bg-emerald-950/20 text-emerald-300"
+              : "border-red-900/60 bg-red-950/20 text-red-300"
+          }`}
+        >
+          {loading
+            ? "Checking deploy health…"
+            : healthy
+              ? "Dashboard is healthy and live."
+              : d.terminated
+                ? "Deploy terminated."
+                : "Capsule DB not reachable."}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function OutlineCard({ inspect, loading }: { inspect: InspectData | null; loading: boolean }) {
+  return (
+    <div class="rounded-xl border border-zinc-900 bg-zinc-950">
+      <p class="border-b border-zinc-900 px-4 py-3 text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-500">
+        Outline
+      </p>
+      <div class="grid grid-cols-2 gap-px bg-zinc-900">
+        <OutlineCell label="Tables" value={loading ? "—" : String(inspect?.tableCount ?? 0)} />
+        <OutlineCell label="Rows" value={loading ? "—" : (inspect?.totalRows ?? 0).toLocaleString()} />
+        <OutlineCell label="Files" value={loading ? "—" : String(inspect?.sourceFileCount ?? 0)} />
+        <OutlineCell label="DB KB" value={loading ? "—" : String(Math.round((inspect?.dbBytes ?? 0) / 1024))} />
+      </div>
+    </div>
+  )
+}
+
+function OutlineCell({ label, value }: { label: string; value: string }) {
+  return (
+    <div class="bg-zinc-950 px-4 py-3">
+      <p class="text-[10px] uppercase tracking-wider text-zinc-500">{label}</p>
+      <p class="mt-1 font-mono text-lg font-semibold tabular-nums text-zinc-200">{value}</p>
+    </div>
   )
 }
 
