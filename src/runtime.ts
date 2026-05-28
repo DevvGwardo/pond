@@ -493,11 +493,23 @@ function createRuntimeFromDefinition(
   }
 
   function mount(app: Hono) {
-    const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#09090b"/><path d="M16 6c-3 5-7 9-7 13a7 7 0 0 0 14 0c0-4-4-8-7-13z" fill="#67e8f9"/></svg>`
+    const FAVICON_RIPPLE = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#09090b"/><g fill="none" stroke="#67e8f9" stroke-linecap="round"><circle cx="16" cy="18" r="7" stroke-width="1.5"/><circle cx="16" cy="18" r="4" stroke-width="1.5"/></g><circle cx="16" cy="11.5" r="1.3" fill="#67e8f9"/></svg>`
+    const FAVICON_DROP = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#09090b"/><path d="M16 6.5c-3 4.7-6 7.6-6 11A6 6 0 0 0 22 17.5c0-3.4-3-6.3-6-11Z" fill="#67e8f9"/><path d="M12 21.4c2.5-1 5.5-1 8 0" fill="none" stroke="#67e8f9" stroke-width="1.5" stroke-linecap="round"/></svg>`
+    const FAVICON_P = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#09090b"/><path d="M12 8h4.5A5.5 5.5 0 0 1 22 13.5 5.5 5.5 0 0 1 16.5 19H15v7h-3Z" fill="#67e8f9"/><circle cx="17" cy="13.5" r="3.2" fill="#09090b"/></svg>`
+    const FAVICON_MONO = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><g fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="2"><circle cx="16" cy="18" r="7"/><circle cx="16" cy="18" r="4"/></g><circle cx="16" cy="11.5" r="1.3" fill="currentColor"/></svg>`
+    const FAVICON_SVG = FAVICON_RIPPLE
     app.get(
       "/favicon.svg",
       (c) =>
         new Response(FAVICON_SVG, {
+          status: 200,
+          headers: { "content-type": "image/svg+xml", "cache-control": "public, max-age=86400" },
+        }),
+    )
+    app.get(
+      "/favicon-mono.svg",
+      (c) =>
+        new Response(FAVICON_MONO, {
           status: 200,
           headers: { "content-type": "image/svg+xml", "cache-control": "public, max-age=86400" },
         }),
