@@ -161,28 +161,35 @@ export function App() {
 function SignIn({ onSubmit, error }: { onSubmit: (t: string) => void; error: string | null }) {
   const [t, setT] = useState("")
   return (
-    <div class="flex min-h-screen items-center justify-center bg-black text-zinc-200">
+    <div class="relative flex min-h-screen items-center justify-center overflow-hidden bg-black text-zinc-200">
+      <div class="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_30%_20%,rgba(16,185,129,0.08),transparent_60%)]" />
       <form
-        class="w-full max-w-md space-y-4 rounded-xl border border-zinc-800 bg-zinc-950 p-6"
+        class="relative w-full max-w-md space-y-5 rounded-2xl border border-zinc-900 bg-zinc-950/80 p-7 backdrop-blur"
         onSubmit={(e) => {
           e.preventDefault()
           if (t.trim()) onSubmit(t.trim())
         }}
       >
-        <h1 class="text-xl font-semibold">pond dashboard</h1>
-        <p class="text-sm text-zinc-400">
-          Paste your account API token. <code>pond login --api ...</code> writes it to{" "}
-          <code>~/.pond/credentials.json</code>.
+        <div>
+          <p class="text-[10px] font-semibold uppercase tracking-[0.22em] text-emerald-400/80">Pond</p>
+          <h1 class="mt-1 text-2xl font-semibold tracking-tight">Dashboard</h1>
+        </div>
+        <p class="text-sm leading-relaxed text-zinc-400">
+          Paste your account API token.{" "}
+          <code class="rounded bg-zinc-900 px-1.5 py-0.5 text-zinc-300">pond login --api …</code> writes it to{" "}
+          <code class="rounded bg-zinc-900 px-1.5 py-0.5 text-zinc-300">~/.pond/credentials.json</code>.
         </p>
-        {error ? <div class="rounded border border-red-900 bg-red-950 p-2 text-xs text-red-200">{error}</div> : null}
+        {error ? (
+          <div class="rounded border border-red-900/60 bg-red-950/40 p-2 text-xs text-red-200">{error}</div>
+        ) : null}
         <input
           type="password"
-          class="w-full rounded-lg border border-zinc-800 bg-black px-3 py-2 text-sm outline-none focus:border-zinc-600"
+          class="w-full rounded-lg border border-zinc-800 bg-black px-3 py-2.5 text-sm outline-none transition focus:border-emerald-700/60 focus:ring-2 focus:ring-emerald-700/20"
           placeholder="bearer token"
           value={t}
           onInput={(e) => setT((e.target as HTMLInputElement).value)}
         />
-        <button class="w-full rounded-lg bg-zinc-100 px-4 py-2 text-sm font-semibold text-zinc-950 hover:bg-zinc-200">
+        <button class="w-full rounded-lg bg-zinc-100 px-4 py-2.5 text-sm font-semibold text-zinc-950 transition hover:bg-white">
           Open dashboard
         </button>
       </form>
@@ -258,64 +265,143 @@ function Workspace({
     setReloadKey((k) => k + 1)
   }
 
+  const stats = useMemo(() => {
+    const live = deploys.filter((d) => !d.terminated && !d.anonymous).length
+    const anon = deploys.filter((d) => d.anonymous && !d.terminated).length
+    const mine = deploys.filter((d) => d.ownerId === me.id).length
+    return { total: deploys.length, live, anon, mine }
+  }, [deploys, me.id])
+
   return (
     <div class="min-h-screen bg-black text-zinc-100">
-      <header class="flex items-center justify-between border-b border-zinc-800 bg-zinc-950 px-6 py-3">
-        <div>
-          <h1 class="text-lg font-semibold leading-tight">pond dashboard</h1>
-          <p class="text-xs text-zinc-500">
-            {me.username}
-            {me.isAdmin ? " · admin" : ""} · {deploys.length} project{deploys.length === 1 ? "" : "s"}
-          </p>
-        </div>
-        <div class="flex gap-2">
-          <button
-            class="rounded-md border border-zinc-800 bg-black px-3 py-1.5 text-xs text-zinc-300 hover:border-zinc-600"
-            onClick={handleRotateUserToken}
-          >
-            rotate token
-          </button>
-          <button
-            class="rounded-md border border-zinc-800 bg-black px-3 py-1.5 text-xs text-zinc-300 hover:border-zinc-600"
-            onClick={onSignOut}
-          >
-            sign out
-          </button>
+      <header class="border-b border-zinc-900 bg-zinc-950/60 backdrop-blur">
+        <div class="mx-auto flex max-w-7xl items-center justify-between px-6 py-5">
+          <div>
+            <h1 class="text-2xl font-semibold tracking-tight text-zinc-50">pond Dashboard</h1>
+            <p class="mt-1 text-sm text-zinc-500">
+              <span class="font-mono text-zinc-400">{me.username}</span>
+              {me.isAdmin ? (
+                <span class="ml-2 rounded bg-emerald-900/30 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-emerald-300">
+                  admin
+                </span>
+              ) : null}
+              <span class="mx-2 text-zinc-700">·</span>
+              {deploys.length} {deploys.length === 1 ? "deploy" : "deploys"}
+            </p>
+          </div>
+          <div class="flex items-center gap-2">
+            <button
+              class="rounded-md border border-zinc-800 bg-black px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-zinc-600 hover:text-zinc-100"
+              onClick={() => setReloadKey((k) => k + 1)}
+            >
+              Refresh
+            </button>
+            <button
+              class="rounded-md border border-zinc-800 bg-black px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-zinc-600 hover:text-zinc-100"
+              onClick={handleRotateUserToken}
+            >
+              Rotate token
+            </button>
+            <button
+              class="rounded-md bg-zinc-100 px-3 py-1.5 text-xs font-semibold text-zinc-950 transition hover:bg-white"
+              onClick={onSignOut}
+            >
+              Sign out
+            </button>
+          </div>
         </div>
       </header>
       {flash ? (
-        <div class="border-b border-emerald-900 bg-emerald-950 px-6 py-2 text-xs text-emerald-300">{flash}</div>
+        <div class="border-b border-emerald-900/60 bg-emerald-950/40 px-6 py-2 text-xs text-emerald-300">{flash}</div>
       ) : null}
       {err ? (
-        <div class="border-b border-red-900 bg-red-950 px-6 py-2 text-xs text-red-200">
+        <div class="border-b border-red-900/60 bg-red-950/40 px-6 py-2 text-xs text-red-200">
           {err}
-          <button class="ml-3 underline" onClick={() => setErr(null)}>
+          <button class="ml-3 underline decoration-red-700 hover:decoration-red-300" onClick={() => setErr(null)}>
             dismiss
           </button>
         </div>
       ) : null}
-      <main class="mx-auto max-w-5xl p-6">
-        {loading ? (
-          <p class="text-sm text-zinc-500">Loading deploys…</p>
-        ) : deploys.length === 0 ? (
-          <p class="text-sm text-zinc-500">
-            No projects yet. Run <code>pond new my-app && cd my-app && pond deploy</code>.
-          </p>
-        ) : (
-          <div class="space-y-3">
-            {deploys.map((d) => (
-              <DeployCard
-                key={d.deployId}
-                d={d}
-                me={me}
-                token={token}
-                onRotateClaim={() => void handleRotateClaim(d)}
-                onDelete={() => void handleDelete(d)}
-              />
-            ))}
+      <main class="mx-auto max-w-7xl px-6 py-8">
+        <section class="grid grid-cols-2 gap-3 sm:grid-cols-4 mb-8">
+          <KpiTile label="Total deploys" value={stats.total} accent />
+          <KpiTile label="Live" value={stats.live} accent />
+          <KpiTile label="Anonymous" value={stats.anon} accent={stats.anon > 0} muted={stats.anon === 0} />
+          <KpiTile label="Owned by you" value={stats.mine} accent />
+        </section>
+
+        <section>
+          <div class="mb-3 flex items-end justify-between">
+            <h2 class="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500">Your projects</h2>
+            {!loading && deploys.length > 0 ? (
+              <p class="text-xs text-zinc-600">
+                {deploys.length} {deploys.length === 1 ? "result" : "results"}
+              </p>
+            ) : null}
           </div>
-        )}
+          {loading ? (
+            <div class="rounded-xl border border-zinc-900 bg-zinc-950 px-5 py-12 text-center text-sm text-zinc-500">
+              Loading deploys…
+            </div>
+          ) : deploys.length === 0 ? (
+            <div class="rounded-xl border border-zinc-900 bg-zinc-950 px-5 py-12 text-center">
+              <p class="text-sm text-zinc-400">No projects yet.</p>
+              <p class="mt-2 text-xs text-zinc-600">
+                Run{" "}
+                <code class="rounded bg-zinc-900 px-1.5 py-0.5 text-zinc-300">
+                  pond new my-app && cd my-app && pond deploy
+                </code>
+              </p>
+            </div>
+          ) : (
+            <div class="space-y-3">
+              {deploys.map((d) => (
+                <DeployCard
+                  key={d.deployId}
+                  d={d}
+                  me={me}
+                  token={token}
+                  onRotateClaim={() => void handleRotateClaim(d)}
+                  onDelete={() => void handleDelete(d)}
+                />
+              ))}
+            </div>
+          )}
+        </section>
       </main>
+    </div>
+  )
+}
+
+function KpiTile({
+  label,
+  value,
+  accent = false,
+  muted = false,
+}: {
+  label: string
+  value: number
+  accent?: boolean
+  muted?: boolean
+}) {
+  return (
+    <div
+      class={`relative overflow-hidden rounded-xl border ${muted ? "border-zinc-900" : accent ? "border-emerald-900/60" : "border-zinc-800"} bg-zinc-950 px-5 py-4`}
+    >
+      <p class="text-[10px] font-medium uppercase tracking-[0.18em] text-zinc-500">{label}</p>
+      <p class={`mt-2 font-mono text-3xl font-semibold tabular-nums ${muted ? "text-zinc-600" : "text-zinc-50"}`}>
+        {value}
+      </p>
+      {accent && !muted ? (
+        <svg
+          class="pointer-events-none absolute bottom-0 left-0 h-8 w-12"
+          viewBox="0 0 48 32"
+          preserveAspectRatio="none"
+        >
+          <polygon points="0,32 48,32 0,0" fill="rgb(16 185 129 / 0.18)" />
+          <polyline points="0,32 48,32" stroke="rgb(16 185 129 / 0.6)" stroke-width="1" fill="none" />
+        </svg>
+      ) : null}
     </div>
   )
 }
@@ -339,62 +425,58 @@ function DeployCard({
   const heading = d.title?.trim() || "Untitled project"
   const shortId = d.deployId.slice(0, 8)
   return (
-    <article class="rounded-xl border border-zinc-800 bg-zinc-950">
-      <header class="flex flex-wrap items-start justify-between gap-4 border-b border-zinc-900 px-5 py-4">
-        <div class="min-w-0">
-          <h2 class="truncate text-lg font-semibold text-zinc-50">{heading}</h2>
-          <p class="mt-1 text-xs text-zinc-500">
-            <a
-              class="font-mono text-zinc-400 underline decoration-zinc-800 hover:text-zinc-200 hover:decoration-zinc-500"
-              href={d.url}
-              target="_blank"
-              rel="noreferrer"
-            >
+    <article class="group relative overflow-hidden rounded-xl border border-zinc-900 bg-zinc-950 transition hover:border-zinc-700">
+      <div class="absolute left-0 top-0 h-full w-1 bg-emerald-500/0 transition group-hover:bg-emerald-500/60" />
+      <div class="flex flex-col gap-4 px-5 py-4 lg:flex-row lg:items-center">
+        <div class="min-w-0 flex-1">
+          <div class="flex flex-wrap items-center gap-2">
+            <h2 class="truncate text-base font-semibold text-zinc-50">{heading}</h2>
+            <StatusPill d={d} isOwner={isOwner} />
+          </div>
+          <p class="mt-1 flex flex-wrap items-center gap-x-2 text-xs text-zinc-500">
+            <a class="font-mono text-zinc-400 hover:text-emerald-300" href={d.url} target="_blank" rel="noreferrer">
               {d.url.replace(/^https?:\/\//, "")}
             </a>
-            <span class="mx-2 text-zinc-700">·</span>
+            <span class="text-zinc-800">·</span>
             <span class="font-mono text-zinc-600">{shortId}</span>
-            <span class="mx-2 text-zinc-700">·</span>
+            <span class="text-zinc-800">·</span>
             <span>{age}</span>
           </p>
           {d.description ? <p class="mt-2 max-w-2xl text-sm text-zinc-400">{d.description}</p> : null}
         </div>
-        <div class="flex flex-shrink-0 items-center gap-2">
-          <StatusPill d={d} isOwner={isOwner} />
+        <div class="flex flex-shrink-0 flex-wrap items-center gap-2">
+          <a
+            class="rounded-md border border-zinc-800 bg-black px-3 py-1.5 text-xs text-zinc-300 transition hover:border-zinc-600 hover:text-zinc-100"
+            href={d.url}
+            target="_blank"
+            rel="noreferrer"
+          >
+            Open
+          </a>
+          <a
+            class="rounded-md bg-zinc-100 px-3 py-1.5 text-xs font-semibold text-zinc-950 transition hover:bg-white"
+            href={ideHref}
+          >
+            IDE →
+          </a>
+          {isOwner ? (
+            <Fragment>
+              <button
+                class="rounded-md border border-zinc-800 bg-black px-3 py-1.5 text-xs text-zinc-300 transition hover:border-zinc-600 hover:text-zinc-100"
+                onClick={onRotateClaim}
+                title="Rotate claim token (copied to clipboard)"
+              >
+                Rotate
+              </button>
+              <button
+                class="rounded-md border border-red-900/60 bg-black px-3 py-1.5 text-xs text-red-300 transition hover:border-red-700 hover:bg-red-950/40"
+                onClick={onDelete}
+              >
+                Delete
+              </button>
+            </Fragment>
+          ) : null}
         </div>
-      </header>
-      <div class="flex flex-wrap items-center justify-end gap-2 px-5 py-3">
-        <a
-          class="rounded-md border border-zinc-800 bg-black px-3 py-1.5 text-xs text-zinc-300 hover:border-zinc-600"
-          href={d.url}
-          target="_blank"
-          rel="noreferrer"
-        >
-          Open live app
-        </a>
-        <a
-          class="rounded-md bg-zinc-100 px-3 py-1.5 text-xs font-semibold text-zinc-950 hover:bg-zinc-200"
-          href={ideHref}
-        >
-          Open IDE →
-        </a>
-        {isOwner ? (
-          <Fragment>
-            <button
-              class="rounded-md border border-zinc-800 bg-black px-3 py-1.5 text-xs text-zinc-300 hover:border-zinc-600"
-              onClick={onRotateClaim}
-              title="Rotate claim token (copied to clipboard)"
-            >
-              Rotate claim
-            </button>
-            <button
-              class="rounded-md border border-red-900 bg-black px-3 py-1.5 text-xs text-red-300 hover:bg-red-950"
-              onClick={onDelete}
-            >
-              Delete
-            </button>
-          </Fragment>
-        ) : null}
       </div>
     </article>
   )
@@ -403,18 +485,29 @@ function DeployCard({
 function StatusPill({ d, isOwner }: { d: DeployRow; isOwner: boolean }) {
   if (d.anonymous) {
     return (
-      <div class="text-right">
-        <span class="rounded bg-amber-900/40 px-2 py-0.5 text-xs text-amber-200">anonymous</span>
-        {d.terminatesAt ? (
-          <div class="mt-1 text-xs text-zinc-500">terminates {humanAge(d.terminatesAt, true)}</div>
-        ) : null}
-      </div>
+      <span
+        class="inline-flex items-center gap-1.5 rounded-full border border-amber-900/60 bg-amber-950/40 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-amber-200"
+        title={d.terminatesAt ? `terminates ${humanAge(d.terminatesAt, true)}` : undefined}
+      >
+        <span class="h-1.5 w-1.5 rounded-full bg-amber-400" />
+        anonymous
+      </span>
     )
   }
   if (isOwner) {
-    return <span class="rounded bg-emerald-900/40 px-2 py-0.5 text-xs text-emerald-200">owned</span>
+    return (
+      <span class="inline-flex items-center gap-1.5 rounded-full border border-emerald-900/60 bg-emerald-950/40 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-emerald-200">
+        <span class="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+        live
+      </span>
+    )
   }
-  return <span class="rounded bg-zinc-800 px-2 py-0.5 text-xs text-zinc-300">shared</span>
+  return (
+    <span class="inline-flex items-center gap-1.5 rounded-full border border-zinc-800 bg-zinc-900 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-zinc-400">
+      <span class="h-1.5 w-1.5 rounded-full bg-zinc-500" />
+      shared
+    </span>
+  )
 }
 
 function humanAge(iso: string, future = false): string {
