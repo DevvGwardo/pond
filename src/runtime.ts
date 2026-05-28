@@ -161,27 +161,27 @@ function applyMigrations(db: Database.Database, schema: Record<string, Record<st
 
     if (!existsRow) {
       const colDefs = Object.entries(columns).map(([col, type]) => {
-        assertIdent(col)
-        return `${col} ${type._sqlType}`
+        return `${quoteIdent(col)} ${type._sqlType}`
       })
       colDefs.push("id TEXT PRIMARY KEY")
       colDefs.push("createdAt TEXT DEFAULT (datetime('now'))")
       colDefs.push("updatedAt TEXT DEFAULT (datetime('now'))")
 
-      db.exec(`CREATE TABLE IF NOT EXISTS ${tableName} (${colDefs.join(", ")})`)
+      db.exec(`CREATE TABLE IF NOT EXISTS ${quoteIdent(tableName)} (${colDefs.join(", ")})`)
       db.prepare("INSERT OR IGNORE INTO _pond_migrations (name) VALUES (?)").run(`table_${tableName}`)
       continue
     }
 
     // Table already exists — diff columns. Add new ones; refuse to drop.
-    const existing = (db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name: string }>).map((c) => c.name)
+    const existing = (db.prepare(`PRAGMA table_info(${quoteIdent(tableName)})`).all() as Array<{ name: string }>).map(
+      (c) => c.name,
+    )
     const wantSet = new Set(Object.keys(columns))
     const reserved = new Set(["id", "createdAt", "updatedAt"])
 
     for (const [col, type] of Object.entries(columns)) {
-      assertIdent(col)
       if (!existing.includes(col)) {
-        db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${col} ${type._sqlType}`)
+        db.exec(`ALTER TABLE ${quoteIdent(tableName)} ADD COLUMN ${quoteIdent(col)} ${type._sqlType}`)
       }
     }
     const removed = existing.filter((c) => !wantSet.has(c) && !reserved.has(c))
@@ -834,155 +834,6 @@ export async function buildForDeploy(
   return { outfile, hash }
 }
 
-// SQLite reserved words — using any of these unquoted as a table/column name
-// produces a syntax error at the next CREATE/SELECT. List from sqlite.org/lang_keywords.html.
-const SQLITE_RESERVED_WORDS = new Set([
-  "ABORT",
-  "ACTION",
-  "ADD",
-  "AFTER",
-  "ALL",
-  "ALTER",
-  "ANALYZE",
-  "AND",
-  "AS",
-  "ASC",
-  "ATTACH",
-  "AUTOINCREMENT",
-  "BEFORE",
-  "BEGIN",
-  "BETWEEN",
-  "BY",
-  "CASCADE",
-  "CASE",
-  "CAST",
-  "CHECK",
-  "COLLATE",
-  "COLUMN",
-  "COMMIT",
-  "CONFLICT",
-  "CONSTRAINT",
-  "CREATE",
-  "CROSS",
-  "CURRENT",
-  "CURRENT_DATE",
-  "CURRENT_TIME",
-  "CURRENT_TIMESTAMP",
-  "DATABASE",
-  "DEFAULT",
-  "DEFERRABLE",
-  "DEFERRED",
-  "DELETE",
-  "DESC",
-  "DETACH",
-  "DISTINCT",
-  "DO",
-  "DROP",
-  "EACH",
-  "ELSE",
-  "END",
-  "ESCAPE",
-  "EXCEPT",
-  "EXCLUDE",
-  "EXCLUSIVE",
-  "EXISTS",
-  "EXPLAIN",
-  "FAIL",
-  "FILTER",
-  "FIRST",
-  "FOLLOWING",
-  "FOR",
-  "FOREIGN",
-  "FROM",
-  "FULL",
-  "GENERATED",
-  "GLOB",
-  "GROUP",
-  "GROUPS",
-  "HAVING",
-  "IF",
-  "IGNORE",
-  "IMMEDIATE",
-  "IN",
-  "INDEX",
-  "INDEXED",
-  "INITIALLY",
-  "INNER",
-  "INSERT",
-  "INSTEAD",
-  "INTERSECT",
-  "INTO",
-  "IS",
-  "ISNULL",
-  "JOIN",
-  "KEY",
-  "LAST",
-  "LEFT",
-  "LIKE",
-  "LIMIT",
-  "MATCH",
-  "NATURAL",
-  "NO",
-  "NOT",
-  "NOTHING",
-  "NOTNULL",
-  "NULL",
-  "NULLS",
-  "OF",
-  "OFFSET",
-  "ON",
-  "OR",
-  "ORDER",
-  "OTHERS",
-  "OUTER",
-  "OVER",
-  "PARTITION",
-  "PLAN",
-  "PRAGMA",
-  "PRECEDING",
-  "PRIMARY",
-  "QUERY",
-  "RAISE",
-  "RANGE",
-  "RECURSIVE",
-  "REFERENCES",
-  "REGEXP",
-  "REINDEX",
-  "RELEASE",
-  "RENAME",
-  "REPLACE",
-  "RESTRICT",
-  "RIGHT",
-  "ROLLBACK",
-  "ROW",
-  "ROWS",
-  "SAVEPOINT",
-  "SELECT",
-  "SET",
-  "TABLE",
-  "TEMP",
-  "TEMPORARY",
-  "THEN",
-  "TIES",
-  "TO",
-  "TRANSACTION",
-  "TRIGGER",
-  "UNBOUNDED",
-  "UNION",
-  "UNIQUE",
-  "UPDATE",
-  "USING",
-  "VACUUM",
-  "VALUES",
-  "VIEW",
-  "VIRTUAL",
-  "WHEN",
-  "WHERE",
-  "WINDOW",
-  "WITH",
-  "WITHOUT",
-])
-
 function assertIdent(name: string) {
   if (typeof name !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
     throw new Error(`Invalid identifier: ${name}`)
@@ -993,9 +844,15 @@ function assertIdent(name: string) {
   if (name.startsWith("_pond_")) {
     throw new Error(`Identifier "${name}" uses reserved _pond_ prefix`)
   }
-  if (SQLITE_RESERVED_WORDS.has(name.toUpperCase())) {
-    throw new Error(`Identifier "${name}" is a SQLite reserved word`)
-  }
+}
+
+// Validate an identifier's shape, then double-quote it for safe use in SQL.
+// Quoting lets SQLite reserved words (e.g. "key", "order") be used as table or
+// column names. assertIdent already restricts names to [A-Za-z0-9_], so there
+// are no embedded quotes to escape and no injection risk.
+function quoteIdent(name: string): string {
+  assertIdent(name)
+  return `"${name}"`
 }
 
 // better-sqlite3 rejects boolean values with "SQLite3 can only bind numbers, strings,
@@ -1039,14 +896,16 @@ function buildDbProxy(db: Database.Database): CapsuleContext["db"] {
       },
       all() {
         const whereSql =
-          parts.where.length > 0 ? ` WHERE ${parts.where.map(({ column }) => `${column} = ?`).join(" AND ")}` : ""
+          parts.where.length > 0
+            ? ` WHERE ${parts.where.map(({ column }) => `${quoteIdent(column)} = ?`).join(" AND ")}`
+            : ""
         const orderSql =
           parts.orderBy.length > 0
-            ? ` ORDER BY ${parts.orderBy.map(({ column, dir }) => `${column} ${dir.toUpperCase()}`).join(", ")}`
+            ? ` ORDER BY ${parts.orderBy.map(({ column, dir }) => `${quoteIdent(column)} ${dir.toUpperCase()}`).join(", ")}`
             : ""
         const limitSql = typeof parts.limit === "number" ? ` LIMIT ${parts.limit}` : ""
         return db
-          .prepare(`SELECT * FROM ${tableName}${whereSql}${orderSql}${limitSql}`)
+          .prepare(`SELECT * FROM ${quoteIdent(tableName)}${whereSql}${orderSql}${limitSql}`)
           .all(...parts.where.map(({ value }) => value))
       },
     }
@@ -1062,30 +921,29 @@ function buildDbProxy(db: Database.Database): CapsuleContext["db"] {
         limit: builder.limit,
         all: builder.all,
         get(id: string) {
-          return db.prepare(`SELECT * FROM ${tableName} WHERE id = ?`).get(id)
+          return db.prepare(`SELECT * FROM ${quoteIdent(tableName)} WHERE id = ?`).get(id)
         },
         insert(data: Record<string, any>) {
           const id = crypto.randomUUID()
           const keys = Object.keys(data)
-          keys.forEach(assertIdent)
+          const cols = keys.map(quoteIdent)
           const values = keys.map((key) => coerceBinding(data[key]))
           db.prepare(
-            `INSERT INTO ${tableName} (id, ${keys.join(", ")}) VALUES (?, ${keys.map(() => "?").join(", ")})`,
+            `INSERT INTO ${quoteIdent(tableName)} (id, ${cols.join(", ")}) VALUES (?, ${keys.map(() => "?").join(", ")})`,
           ).run(id, ...values)
-          return db.prepare(`SELECT * FROM ${tableName} WHERE id = ?`).get(id)
+          return db.prepare(`SELECT * FROM ${quoteIdent(tableName)} WHERE id = ?`).get(id)
         },
         update(id: string, data: Record<string, any>) {
           const keys = Object.keys(data)
-          keys.forEach(assertIdent)
-          const sets = keys.map((key) => `${key} = ?`).join(", ")
-          db.prepare(`UPDATE ${tableName} SET ${sets}, updatedAt = datetime('now') WHERE id = ?`).run(
+          const sets = keys.map((key) => `${quoteIdent(key)} = ?`).join(", ")
+          db.prepare(`UPDATE ${quoteIdent(tableName)} SET ${sets}, updatedAt = datetime('now') WHERE id = ?`).run(
             ...keys.map((key) => coerceBinding(data[key])),
             id,
           )
-          return db.prepare(`SELECT * FROM ${tableName} WHERE id = ?`).get(id)
+          return db.prepare(`SELECT * FROM ${quoteIdent(tableName)} WHERE id = ?`).get(id)
         },
         delete(id: string) {
-          db.prepare(`DELETE FROM ${tableName} WHERE id = ?`).run(id)
+          db.prepare(`DELETE FROM ${quoteIdent(tableName)} WHERE id = ?`).run(id)
         },
       }
     },

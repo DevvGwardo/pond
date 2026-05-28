@@ -5,6 +5,12 @@ Versioning: [Semver](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-05-28
+
+### Fixed
+
+- **Schemas can now use SQLite reserved words as table and column names.** A capsule with a column named `key` (or `order`, `index`, `group`, etc.) failed to boot with `Identifier "key" is a SQLite reserved word`, because `assertIdent()` in `src/runtime.ts` rejected reserved words outright and the runtime interpolated raw identifiers into SQL (`SELECT * FROM ${tableName}`). The runtime now double-quotes every table/column identifier in generated SQL — SQLite's standard mechanism for using reserved words — across `CREATE TABLE`, `ALTER TABLE`, `PRAGMA table_info`, and the query builder's `SELECT`/`WHERE`/`ORDER BY`/`INSERT`/`UPDATE`/`DELETE`. A new `quoteIdent()` helper validates identifier shape (the existing `^[A-Za-z_][A-Za-z0-9_]*$` restriction is unchanged, so there is nothing to escape and no injection risk) and the reserved-word rejection — plus the now-unused `SQLITE_RESERVED_WORDS` list — is removed. The `_pond_` prefix and length guards remain. Existing capsules are unaffected; those that previously couldn't boot now work without renaming columns. A test in `test/host.test.mjs` deploys a capsule with a reserved-word table (`select`) and column (`order`) and confirms it boots and serves queries. 194/194 tests pass.
+
 ## [0.3.34] - 2026-05-28
 
 ### Added

@@ -1531,11 +1531,11 @@ export default capsule({ schema: {}, queries: {}, mutations: {} })
 
 // ---- Schema identifier validation ----
 
-test("capsule with SQLite reserved word as table name fails to boot", async () => {
+test("capsule with SQLite reserved words as table/column names boots and serves queries", async () => {
   const sourceFiles = tinySourceFiles(`import { capsule, query, string, table } from "pond/server"
 export default capsule({
-  schema: { "select": table({ name: string() }) },
-  queries: { items: query((ctx) => ctx.db["select"].all()) },
+  schema: { "select": table({ "order": string() }) },
+  queries: { items: query((ctx) => ctx.db["select"].orderBy("order", "asc").all()) },
   mutations: {},
 })
 `)
@@ -1544,10 +1544,32 @@ export default capsule({
     headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
     body: JSON.stringify({ sourceFiles }),
   })
-  // boot must fail (worker rejects the identifier before mounting routes)
-  assert.equal(res.status, 500)
-  const body = await res.json()
-  assert.match(body.error, /Boot failed/i)
+  // Reserved words are quoted in generated SQL, so boot succeeds.
+  assert.equal(res.status, 201)
+  const { deployId: rwDeployId } = await res.json()
+
+  // Query the reserved-word table via its subdomain — exercises quoted CREATE/SELECT/ORDER BY.
+  const http = await import("node:http")
+  const result = await new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: "127.0.0.1",
+        port,
+        method: "GET",
+        path: "/api/query/items",
+        headers: { host: `${rwDeployId}.${publicHost}:${port}` },
+      },
+      (r) => {
+        let data = ""
+        r.on("data", (c) => (data += c))
+        r.on("end", () => resolve({ status: r.statusCode, body: data }))
+      },
+    )
+    req.on("error", reject)
+    req.end()
+  })
+  assert.equal(result.status, 200)
+  assert.ok(Array.isArray(JSON.parse(result.body)))
 })
 
 test("capsule with _pond_ prefixed table name fails to boot", async () => {
