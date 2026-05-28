@@ -63,6 +63,7 @@ interface DeployRow {
   title?: string
   description?: string
   isPublic?: boolean
+  publicInspect?: boolean
 }
 
 function authHeaders(token: string): Record<string, string> {
@@ -166,6 +167,20 @@ async function deleteEnvKey(
     headers: authHeaders(token),
   })
   if (!r.ok) return { error: (await r.json().catch(() => ({}))).error ?? "delete failed" }
+  return r.json()
+}
+
+async function setVisibility(
+  token: string,
+  deployId: string,
+  publicInspect: boolean,
+): Promise<{ publicInspect: boolean } | { error: string }> {
+  const r = await fetch(`/api/deploys/${deployId}/visibility`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json", ...authHeaders(token) },
+    body: JSON.stringify({ publicInspect }),
+  })
+  if (!r.ok) return { error: (await r.json().catch(() => ({}))).error ?? "visibility update failed" }
   return r.json()
 }
 
@@ -873,7 +888,21 @@ function OverviewTab({
           <Meta
             label="Public inspect"
             value={
-              d.isPublic ? <span class="text-emerald-300">enabled</span> : <span class="text-zinc-500">disabled</span>
+              d.publicInspect ? (
+                <span class="text-emerald-300">enabled</span>
+              ) : (
+                <span class="text-zinc-500">disabled</span>
+              )
+            }
+          />
+          <Meta
+            label="In public listing"
+            value={
+              d.isPublic ? (
+                <span class="text-emerald-300">yes (capsule declares public: true)</span>
+              ) : (
+                <span class="text-zinc-500">no</span>
+              )
             }
           />
           {d.terminatesAt ? <Meta label="Terminates" value={humanAge(d.terminatesAt, true)} /> : null}
@@ -1205,6 +1234,7 @@ function SettingsTab({
     <>
       <h2 class="text-base font-semibold text-zinc-100">Settings</h2>
       <section class="space-y-4">
+        <VisibilityToggle token={token} deployId={d.deployId} initial={Boolean(d.publicInspect)} disabled={!isOwner} />
         <EnvEditor token={token} deployId={d.deployId} disabled={!isOwner} />
         <div class="rounded-xl border border-zinc-900 bg-zinc-950 p-5">
           <h3 class="text-sm font-semibold text-zinc-100">Claim token</h3>
@@ -1235,6 +1265,73 @@ function SettingsTab({
         </div>
       </section>
     </>
+  )
+}
+
+function VisibilityToggle({
+  token,
+  deployId,
+  initial,
+  disabled,
+}: {
+  token: string
+  deployId: string
+  initial: boolean
+  disabled: boolean
+}) {
+  const [enabled, setEnabled] = useState(initial)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  async function toggle(next: boolean) {
+    if (busy || disabled) return
+    setBusy(true)
+    setError(null)
+    const prev = enabled
+    setEnabled(next) // optimistic
+    const res = await setVisibility(token, deployId, next)
+    setBusy(false)
+    if ("error" in res) {
+      setError(res.error)
+      setEnabled(prev) // revert
+      return
+    }
+    setEnabled(res.publicInspect)
+  }
+
+  return (
+    <div class="rounded-xl border border-zinc-900 bg-zinc-950 p-5">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <h3 class="text-sm font-semibold text-zinc-100">Public inspect</h3>
+          <p class="mt-1 text-xs text-zinc-500">
+            When <span class="text-zinc-300">enabled</span>, anyone can read the capsule's schema and database tables
+            via <code class="rounded bg-zinc-900 px-1 py-0.5">/__pond/inspect</code> — no claim token needed. Disabled
+            by default; flip on for explicitly shared demos.
+          </p>
+          <p class="mt-1 text-xs text-zinc-600">Saving toggles the worker; ~2s redeploy.</p>
+        </div>
+        <button
+          class={`relative h-6 w-11 flex-shrink-0 rounded-full border transition disabled:opacity-50 ${
+            enabled ? "border-emerald-700/60 bg-emerald-600/40" : "border-zinc-800 bg-zinc-900"
+          }`}
+          onClick={() => void toggle(!enabled)}
+          disabled={busy || disabled}
+          aria-pressed={enabled}
+          aria-label="Toggle public inspect"
+        >
+          <span
+            class={`absolute top-0.5 h-4 w-4 rounded-full bg-zinc-100 shadow transition ${
+              enabled ? "translate-x-6" : "translate-x-0.5"
+            }`}
+          />
+        </button>
+      </div>
+      {busy ? <p class="mt-3 text-xs text-zinc-500">Redeploying capsule…</p> : null}
+      {error ? (
+        <div class="mt-3 rounded border border-red-900/60 bg-red-950/30 px-3 py-2 text-xs text-red-300">{error}</div>
+      ) : null}
+    </div>
   )
 }
 

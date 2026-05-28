@@ -1665,6 +1665,36 @@ export const hostCommand = defineCommand({
       })
     })
 
+    // Toggle a capsule's public-inspect flag without redeploying its source.
+    // Owner-only. Triggers forkDeploy because the worker reads the flag from
+    // its spawn args — changing it without restart would leave the running
+    // worker with stale state.
+    app.patch("/api/deploys/:deployId/visibility", async (c) => {
+      const deployId = c.req.param("deployId")
+      const r = requireDeployOwner(c, deployId)
+      if (r instanceof Response) return r
+      const body = (await c.req.json().catch(() => null)) as { publicInspect?: unknown } | null
+      if (!body || typeof body.publicInspect !== "boolean") {
+        return c.json({ error: "body must be { publicInspect: boolean }" }, 400)
+      }
+      r.record.publicInspect = body.publicInspect
+      r.record.updatedAt = new Date().toISOString()
+      writeRecord(r.record)
+      try {
+        await forkDeploy(r.record)
+      } catch (err: any) {
+        return c.json({ error: `Boot failed: ${err?.message ?? err}` }, 500)
+      }
+      const actor = authUser(c)
+      if (actor) {
+        audit(actorFor(actor, false), "deploy.visibility_update", {
+          targetDeployId: deployId,
+          metadata: { publicInspect: r.record.publicInspect },
+        })
+      }
+      return c.json({ deployId, publicInspect: r.record.publicInspect })
+    })
+
     // Sample recent rows from a named table in the capsule's DB. Used by the
     // dashboard Overview "Recent activity" panel and by the Tables tab for a
     // drill-down preview. Read-only WAL-safe open; identifier whitelisted
