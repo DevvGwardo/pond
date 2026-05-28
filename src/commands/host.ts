@@ -3330,8 +3330,21 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
     }
     if (capsuleCgroupRoot) {
       console.log(`  capsule isolation: cgroup v2 enabled at ${capsuleCgroupRoot} (per-capsule cpu/memory/pids caps)`)
+      console.log(`  capsule egress policy: ${egressMode}`)
     } else {
       console.log("  capsule isolation: cgroup limits OFF (heap cap only) — set --capsule-cgroup-root to enable")
+      // The OS egress firewall (deploy/capsule-egress.nft) matches on capsule
+      // cgroup membership. With no cgroup root, no capsule socket carries the
+      // `pond` cgroup tag, so a loaded nft ruleset matches NOTHING — capsules
+      // have unrestricted OS-level egress even though `nft -f` succeeded. Warn
+      // loudly so an operator doesn't get a false sense of security. (In
+      // 'sealed' mode the JS-layer block still applies, but it is bypassable by
+      // native addons / DNS — the OS firewall is the real boundary.)
+      console.log(
+        `  ⚠ capsule egress policy '${egressMode}': the nft egress firewall keys on cgroup membership, ` +
+          `so with cgroup isolation OFF any loaded capsule-egress.nft rules match NOTHING (no OS-level egress ` +
+          `enforcement). Run deploy/setup-capsule-isolation.sh and set --capsule-cgroup-root. See deploy/HARDENING.md.`,
+      )
     }
     if (hostname === "0.0.0.0" || hostname === "::") {
       console.log(

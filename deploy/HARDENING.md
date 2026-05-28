@@ -44,6 +44,16 @@ Then set `POND_CAPSULE_CGROUP_ROOT=/sys/fs/cgroup/pond` in `deploy/.env`. The
 `/sys/fs/cgroup` mount is already enabled in `docker-compose.yml`. The host logs
 `capsule isolation: cgroup v2 enabled` when it takes effect.
 
+> **⚠ Silent egress no-op.** The nft egress firewall matches on capsule **cgroup
+> membership** (`socket cgroupv2 level 1 "pond"`). If cgroup isolation is OFF
+> (this step skipped, wrong `POND_RUN_USER`, or delegation failed), a loaded
+> `capsule-egress.nft` ruleset matches **nothing** — `nft -f` succeeds but
+> capsules get unrestricted OS-level egress. Do NOT trust the firewall until you
+> see `capsule isolation: cgroup v2 enabled` at startup; the host now prints a
+> `⚠ ... match NOTHING` warning when egress is requested without cgroups. Verify
+> with `nft list table inet pond` showing a nonzero `counter` on the drop rule
+> under load.
+
 **`POND_RUN_USER=node`** matters: the container now runs as the non-root `node`
 user (see §3), and cgroup v2 delegation hands the subtree to that user so the
 control plane can create per-capsule cgroups without root.

@@ -92,6 +92,58 @@ test("egress proxy rejects an invalid/absent credential (403)", async () => {
   assert.equal(none.status, 403, "missing credential denied")
 })
 
+test("egress proxy CONNECT tunnels to an allowlisted host (happy path)", async () => {
+  // Local TCP echo server stands in for an allowlisted upstream (127.0.0.1).
+  const echo = net.createServer((sock) => sock.pipe(sock))
+  await new Promise((r) => echo.listen(0, "127.0.0.1", r))
+  cleanup.push(() => new Promise((r) => echo.close(() => r())))
+  const targetPort = echo.address().port
+
+  const proxy = await startEgressProxy({ port: 0 }, deps)
+  cleanup.push(proxy.close)
+
+  const echoed = await new Promise((resolve, reject) => {
+    const sock = net.connect(proxy.port, "127.0.0.1", () => {
+      sock.write(
+        `CONNECT 127.0.0.1:${targetPort} HTTP/1.1\r\nHost: 127.0.0.1:${targetPort}\r\nProxy-Authorization: ${basic("deploy-a", "secret-a")}\r\n\r\n`,
+      )
+    })
+    let phase = "status"
+    let buf = ""
+    sock.on("data", (c) => {
+      if (phase === "status") {
+        buf += c
+        if (buf.includes("\r\n\r\n")) {
+          assert.match(buf.split("\r\n")[0], /200/, "CONNECT should be established for an allowlisted host")
+          phase = "echo"
+          sock.write("ping")
+        }
+      } else {
+        resolve(c.toString())
+        sock.end()
+      }
+    })
+    sock.on("error", reject)
+  })
+  assert.equal(echoed, "ping", "data should tunnel through to the upstream and echo back")
+})
+
+test("egress proxy rejects a non-http(s) scheme on the forward path (400)", async () => {
+  const proxy = await startEgressProxy({ port: 0 }, deps)
+  cleanup.push(proxy.close)
+  const res = await proxiedHttpGet(proxy.port, "ftp://127.0.0.1/x", basic("deploy-a", "secret-a"))
+  assert.equal(res.status, 400, "only absolute http URIs are forward-proxied; https uses CONNECT")
+})
+
+test("egress proxy rejects a malformed Proxy-Authorization header (403)", async () => {
+  const proxy = await startEgressProxy({ port: 0 }, deps)
+  cleanup.push(proxy.close)
+  const notBasic = await proxiedHttpGet(proxy.port, "http://127.0.0.1/", "Bearer abc")
+  assert.equal(notBasic.status, 403, "non-Basic scheme denied")
+  const badB64 = await proxiedHttpGet(proxy.port, "http://127.0.0.1/", "Basic !!!not-base64!!!")
+  assert.equal(badB64.status, 403, "non-base64 credential denied")
+})
+
 test("egress proxy CONNECT denies a disallowed host before tunneling", async () => {
   const proxy = await startEgressProxy({ port: 0 }, deps)
   cleanup.push(proxy.close)
