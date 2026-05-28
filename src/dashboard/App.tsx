@@ -822,6 +822,7 @@ function LiveThumb({ url, title, fallback }: { url: string; title: string; fallb
           loading="lazy"
           tabIndex={-1}
           aria-hidden="true"
+          inert
           sandbox="allow-scripts allow-same-origin"
           referrerpolicy="no-referrer"
           onLoad={() => setLoaded(true)}
