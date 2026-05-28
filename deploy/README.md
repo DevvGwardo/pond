@@ -46,6 +46,55 @@ pond login --api https://pond.example.com --username your-name
 
 The full step-by-step (Oracle Cloud, DNS, security review, backups, upgrades, migration to Hetzner) is in [`docs/operations.md`](../docs/operations.md).
 
+## Per-capsule isolation (cgroups + egress)
+
+Capsules run as forked child processes of the control plane. By default each is
+bounded only by a V8 heap cap (`--max-old-space-size`), so a capsule in a hot
+loop, a memory balloon, or a fork bomb degrades every other deploy on the box,
+and the in-process network block is leaky (DNS lookups and native addons escape
+it — see the comments in `src/host/deploy-worker.ts`).
+
+Two extra layers close those gaps. Both are opt-in and the host runs fine
+without them; it prints which state it's in at startup
+(`capsule isolation: cgroup v2 enabled …` vs `… OFF`).
+
+1. **Container caps (always on).** `docker-compose.yml` bounds the whole
+   `pond-host` container (`mem_limit`, `cpus`, `pids_limit`). Tune these to your
+   host — they cap the blast radius even before per-capsule limits exist.
+
+2. **Per-capsule cgroups + egress firewall (run the setup script).** Each
+   capsule gets its own cgroup v2 (`cpu.max` / `memory.max` / `pids.max`, from
+   its `DeployQuota`), and outbound traffic from capsule cgroups is default-deny
+   via nftables (no DNS, no new connections — only loopback and replies on
+   established flows).
+
+### Enable it (Docker path — what pond.run uses)
+
+```bash
+# 1. Create the delegated cgroup root + load the egress rules (run on the host).
+sudo POND_CAPSULE_CGROUP_ROOT=/sys/fs/cgroup/pond \
+  ./deploy/setup-capsule-isolation.sh
+
+# 2. Give the container a writable cgroup mount: uncomment in docker-compose.yml
+#      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+
+# 3. Point pond-host at the cgroup root: uncomment in deploy/.env
+#    POND_CAPSULE_CGROUP_ROOT=/sys/fs/cgroup/pond
+
+# 4. Recreate the stack.
+docker compose -f deploy/docker-compose.yml up -d --force-recreate pond-host
+docker logs --tail 5 deploy-pond-host-1   # expect "capsule isolation: cgroup v2 enabled"
+```
+
+The container runs as root, so it can create per-capsule cgroups and migrate
+worker pids freely. For the systemd / bare-VM path, see the commented
+`Delegate=` block in `pond-host.service` (it needs `ProtectControlGroups=false`
+and the service's own delegated cgroup as the root).
+
+Per-deploy limits live in the `deploy_quotas` table (`maxCpuPercent`,
+`maxMemoryMb`); admins can adjust them via `PATCH /api/deploys/:id/quota`.
+Defaults: anonymous 25% CPU / 128 MB, owned 50% CPU / 256 MB.
+
 ## Upgrading
 
 After pushing new commits to `main`, ssh to the host and run:

@@ -8,6 +8,13 @@ import { randomBytes, timingSafeEqual } from "node:crypto"
 import { fork, type ChildProcess } from "node:child_process"
 import * as net from "node:net"
 import { openControlDb, DEFAULT_QUOTA, ANONYMOUS_QUOTA, type ControlDb, type UserRow } from "../host/control-db.js"
+import {
+  cgroupLimitsFor,
+  probeCapsuleCgroup,
+  joinManagerCgroup,
+  applyCapsuleCgroup,
+  removeCapsuleCgroup,
+} from "../host/cgroup.js"
 import { findPackageJsonLifecycleScripts } from "../host/package-json-validation.js"
 import { createHash } from "node:crypto"
 import { buildForDeploy } from "../runtime.js"
@@ -487,6 +494,13 @@ export const hostCommand = defineCommand({
       description: "Read client IP from x-forwarded-for (also POND_TRUST_PROXY_HEADERS=1)",
       default: false,
     },
+    "capsule-cgroup-root": {
+      type: "string",
+      description:
+        "Path to a delegated cgroup v2 subtree (e.g. /sys/fs/cgroup/pond.slice/capsules). When set and valid, " +
+        "each capsule runs in its own child cgroup with cpu/memory/pids limits. Also POND_CAPSULE_CGROUP_ROOT.",
+      default: "",
+    },
   },
   async run({ args }) {
     const port = parseInt(typeof args.port === "string" ? args.port : "8787", 10)
@@ -511,6 +525,16 @@ export const hostCommand = defineCommand({
     const tokenFile = path.join(dataDir, "host-token")
     const apiUrl = `http://${hostname}:${port}`
     const runningChildren = new Map<string, { child: ChildProcess; port: number }>()
+    // Crash-recovery state. A worker that exits unexpectedly is respawned with
+    // backoff, but only RESTART_MAX times inside a rolling RESTART_WINDOW_MS so
+    // a crash-looping capsule can't peg the CPU for its neighbours. The budget
+    // resets on any user-initiated (re)deploy — see forkDeploy's `auto` flag.
+    const restartState = new Map<string, { windowStart: number; count: number }>()
+    const inFlightBoots = new Map<string, Promise<{ child: ChildProcess; port: number } | null>>()
+    let shuttingDown = false
+    const RESTART_MAX = 5
+    const RESTART_WINDOW_MS = 60_000
+    const RESTART_BACKOFF_MS = [500, 1000, 2000, 5000, 10000]
     const workerPath = path.resolve(import.meta.dirname, "../host/deploy-worker.js")
     const pondSrcDir = path.resolve(import.meta.dirname, "..")
     const pondNodeModulesDir = path.resolve(import.meta.dirname, "../../node_modules")
@@ -536,6 +560,23 @@ export const hostCommand = defineCommand({
     if (!sandboxAvailable && anonymousEnabled) {
       console.log(
         `[pond host] Node ${process.versions.node} — permission model disabled. Upgrade to Node 22+ for anonymous deploy sandboxing.`,
+      )
+    }
+
+    // Per-capsule cgroup v2 isolation. Validated once at startup; null disables
+    // it (non-Linux, no delegation) and capsules fall back to the heap cap only.
+    const capsuleCgroupRootRaw =
+      process.env.POND_CAPSULE_CGROUP_ROOT ??
+      (typeof args["capsule-cgroup-root"] === "string" ? args["capsule-cgroup-root"] : "")
+    const capsuleCgroupRoot = probeCapsuleCgroup(capsuleCgroupRootRaw || null)
+    if (capsuleCgroupRootRaw && !capsuleCgroupRoot) {
+      console.log(
+        `[pond host] capsule cgroup isolation requested (${capsuleCgroupRootRaw}) but the path is not a delegated cgroup v2 subtree with cpu/memory/pids — running without per-capsule CPU/memory caps.`,
+      )
+    }
+    if (capsuleCgroupRoot && !joinManagerCgroup(capsuleCgroupRoot)) {
+      console.log(
+        `[pond host] note: could not move the manager into ${capsuleCgroupRoot}/manager — per-capsule limits may not bind unless this process is cgroup-delegated (see deploy/setup-capsule-isolation.sh).`,
       )
     }
 
@@ -683,8 +724,12 @@ export const hostCommand = defineCommand({
 
     async function forkDeploy(
       record: HostedDeployRecord,
-      opts: { restrictNetwork?: boolean; useSandbox?: boolean } = {},
+      opts: { restrictNetwork?: boolean; useSandbox?: boolean; auto?: boolean } = {},
     ): Promise<void> {
+      // A user-initiated (re)deploy ships potentially-fixed code, so it earns a
+      // fresh crash budget. Automatic respawns (opts.auto) must NOT reset it,
+      // or a fast boot→crash loop would never trip RESTART_MAX.
+      if (!opts.auto) restartState.delete(record.deployId)
       const dir = deployDirFor(record.deployId)
       const bundlePath = path.join(dir, "deploy-bundle.mjs")
       const clientPath = path.join(dir, "client.html")
@@ -726,12 +771,22 @@ export const hostCommand = defineCommand({
       })
 
       const deployId = record.deployId
+      // Place the worker in its own cgroup before it does any real work, so the
+      // bundle import and request handling are CPU/memory/pid bounded from the
+      // start. No-op unless the host runs with a valid --capsule-cgroup-root.
+      if (capsuleCgroupRoot && typeof child.pid === "number") {
+        const placed = applyCapsuleCgroup(capsuleCgroupRoot, deployId, child.pid, cgroupLimitsFor(quota))
+        if (!placed) {
+          console.error(`[pond host] could not place deploy ${deployId} (pid ${child.pid}) in a cgroup`)
+        }
+      }
       child.on("exit", (code, signal) => {
         const cur = runningChildren.get(deployId)
         if (cur && cur.child === child) {
           runningChildren.delete(deployId)
           if (code !== 0 && signal !== "SIGTERM" && signal !== "SIGINT") {
             console.error(`[pond host] deploy ${deployId} worker exited unexpectedly (code=${code}, signal=${signal})`)
+            scheduleRespawn(deployId)
           }
         }
       })
@@ -788,6 +843,74 @@ export const hostCommand = defineCommand({
       }
     }
 
+    // Derive the sandbox/network options a deploy should boot with from its
+    // current claim status. Returns null when the deploy should stay down
+    // (anonymous deploy already terminated past its grace window).
+    function bootOptsForRecord(deployId: string): { useSandbox: boolean; restrictNetwork: boolean } | null {
+      const anon = controlDb.findAnonymous(deployId)
+      if (anon && anon.terminated === 1) return null
+      const isAnonUnclaimed = anon !== null
+      return { useSandbox: isAnonUnclaimed, restrictNetwork: isAnonUnclaimed }
+    }
+
+    // Respawn a worker that died unexpectedly, with backoff and a hard cap so a
+    // capsule that crashes on boot can't spin forever and starve its neighbours.
+    function scheduleRespawn(deployId: string) {
+      if (shuttingDown) return
+      const record = readRecord(deployId)
+      if (!record) return
+      const opts = bootOptsForRecord(deployId)
+      if (!opts) return
+      const now = Date.now()
+      let st = restartState.get(deployId)
+      if (!st || now - st.windowStart > RESTART_WINDOW_MS) {
+        st = { windowStart: now, count: 0 }
+        restartState.set(deployId, st)
+      }
+      if (st.count >= RESTART_MAX) {
+        record.bootError = `Worker crashed ${RESTART_MAX}× within ${Math.round(RESTART_WINDOW_MS / 1000)}s — auto-restart paused until next deploy`
+        writeRecord(record)
+        console.error(`[pond host] deploy ${deployId} crash-looping — auto-restart paused`)
+        return
+      }
+      const delay = RESTART_BACKOFF_MS[Math.min(st.count, RESTART_BACKOFF_MS.length - 1)]
+      st.count++
+      const timer = setTimeout(() => {
+        void forkDeploy(record, { ...opts, auto: true }).catch((err) => {
+          console.error(`[pond host] respawn failed for ${deployId}: ${err?.message ?? err}`)
+        })
+      }, delay)
+      timer.unref()
+    }
+
+    // Boot a deploy on demand when a request arrives for one that isn't running
+    // (host restarted, or it was paused). Deduped via inFlightBoots so a burst
+    // of concurrent requests triggers a single fork.
+    async function ensureBooted(deployId: string): Promise<{ child: ChildProcess; port: number } | null> {
+      const existing = runningChildren.get(deployId)
+      if (existing) return existing
+      const inFlight = inFlightBoots.get(deployId)
+      if (inFlight) return inFlight
+      const p = (async () => {
+        const record = readRecord(deployId)
+        if (!record) return null
+        const opts = bootOptsForRecord(deployId)
+        if (!opts) return null
+        try {
+          await forkDeploy(record, { ...opts, auto: true })
+        } catch {
+          return null
+        }
+        return runningChildren.get(deployId) ?? null
+      })()
+      inFlightBoots.set(deployId, p)
+      try {
+        return await p
+      } finally {
+        inFlightBoots.delete(deployId)
+      }
+    }
+
     for (const entry of fs.readdirSync(deploysDir, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue
       const record = readRecord(entry.name)
@@ -819,6 +942,8 @@ export const hostCommand = defineCommand({
       for (const id of controlDb.listForDeletion(now)) {
         try {
           stopDeploy(id)
+          restartState.delete(id)
+          if (capsuleCgroupRoot) removeCapsuleCgroup(capsuleCgroupRoot, id)
           fs.rmSync(deployDirFor(id), { recursive: true, force: true })
           controlDb.deleteAnonymous(id)
           controlDb.deleteQuota(id)
@@ -1443,6 +1568,8 @@ export const hostCommand = defineCommand({
       const auth = authorizeDeployMutation(c, record)
       if (auth instanceof Response) return auth
       await stopDeploy(deployId)
+      restartState.delete(deployId)
+      if (capsuleCgroupRoot) removeCapsuleCgroup(capsuleCgroupRoot, deployId)
       fs.rmSync(deployDirFor(deployId), { recursive: true, force: true })
       controlDb.deleteDeployOwner(deployId)
       controlDb.deleteAnonymous(deployId)
@@ -1464,12 +1591,18 @@ export const hostCommand = defineCommand({
         maxBundleBytes?: unknown
         maxDiskBytes?: unknown
         maxMemoryMb?: unknown
+        maxCpuPercent?: unknown
       } | null
       if (!body) return c.json({ error: "Invalid JSON body" }, 400)
-      if (body.maxBundleBytes === undefined && body.maxDiskBytes === undefined && body.maxMemoryMb === undefined) {
-        return c.json({ error: "At least one of maxBundleBytes/maxDiskBytes/maxMemoryMb required" }, 400)
+      if (
+        body.maxBundleBytes === undefined &&
+        body.maxDiskBytes === undefined &&
+        body.maxMemoryMb === undefined &&
+        body.maxCpuPercent === undefined
+      ) {
+        return c.json({ error: "At least one of maxBundleBytes/maxDiskBytes/maxMemoryMb/maxCpuPercent required" }, 400)
       }
-      const patch: { maxBundleBytes?: number; maxDiskBytes?: number; maxMemoryMb?: number } = {}
+      const patch: { maxBundleBytes?: number; maxDiskBytes?: number; maxMemoryMb?: number; maxCpuPercent?: number } = {}
       if (body.maxBundleBytes !== undefined) {
         if (typeof body.maxBundleBytes !== "number" || body.maxBundleBytes <= 0) {
           return c.json({ error: "maxBundleBytes must be positive number" }, 400)
@@ -1488,9 +1621,15 @@ export const hostCommand = defineCommand({
         }
         patch.maxMemoryMb = body.maxMemoryMb
       }
+      if (body.maxCpuPercent !== undefined) {
+        if (typeof body.maxCpuPercent !== "number" || body.maxCpuPercent <= 0) {
+          return c.json({ error: "maxCpuPercent must be positive number" }, 400)
+        }
+        patch.maxCpuPercent = body.maxCpuPercent
+      }
       const prev = controlDb.getQuota(deployId)
       const next = controlDb.setQuota(deployId, patch)
-      if (next.maxMemoryMb !== prev.maxMemoryMb) {
+      if (next.maxMemoryMb !== prev.maxMemoryMb || next.maxCpuPercent !== prev.maxCpuPercent) {
         try {
           await forkDeploy(record)
         } catch (err: any) {
@@ -2972,7 +3111,7 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
 
       const deployId = deployIdFromHost(c.req.header("host"))
       if (!deployId) return c.json({ error: "Not found" }, 404)
-      const entry = runningChildren.get(deployId)
+      const entry = runningChildren.get(deployId) ?? (await ensureBooted(deployId))
       if (!entry) return c.json({ error: "Unknown deploy" }, 404)
       const url = new URL(c.req.url)
       const target = `http://127.0.0.1:${entry.port}${url.pathname}${url.search}`
@@ -3060,6 +3199,7 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
     })
 
     const shutdown = async () => {
+      shuttingDown = true
       console.log("\n[pond host] shutting down")
       for (const deployId of [...runningChildren.keys()]) {
         await stopDeploy(deployId)
@@ -3086,6 +3226,11 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
       )
     } else {
       console.log("  anonymous deploys: disabled\n")
+    }
+    if (capsuleCgroupRoot) {
+      console.log(`  capsule isolation: cgroup v2 enabled at ${capsuleCgroupRoot} (per-capsule cpu/memory/pids caps)`)
+    } else {
+      console.log("  capsule isolation: cgroup limits OFF (heap cap only) — set --capsule-cgroup-root to enable")
     }
     if (hostname === "0.0.0.0" || hostname === "::") {
       console.log(

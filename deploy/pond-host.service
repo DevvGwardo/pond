@@ -50,5 +50,21 @@ ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 
+# ── Per-capsule cgroup isolation (optional) ─────────────────────────────────
+# To give every capsule its own cpu/memory/pids cgroup on the bare-VM path,
+# uncomment the three lines below. Delegate= hands this service a writable
+# cgroup subtree it can carve per-capsule children out of; it also requires
+# relaxing ProtectControlGroups above to read-write — change the line to:
+#   ProtectControlGroups=false
+# Then point pond-host at its own delegated cgroup. Confirm the exact path with
+#   systemctl show -p ControlGroup pond-host.service
+# (it is normally /sys/fs/cgroup/system.slice/pond-host.service).
+#
+# Delegate=cpu memory pids
+# Environment=POND_CAPSULE_CGROUP_ROOT=/sys/fs/cgroup/system.slice/pond-host.service
+#
+# The Docker path is simpler — see deploy/docker-compose.yml + README. Either
+# way the host prints "capsule isolation: cgroup v2 enabled" once it works.
+
 [Install]
 WantedBy=multi-user.target

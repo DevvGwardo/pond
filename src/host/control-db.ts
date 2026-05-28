@@ -16,6 +16,9 @@ export interface DeployQuota {
   maxBundleBytes: number
   maxDiskBytes: number
   maxMemoryMb: number
+  // Percent of a single CPU the worker may use, enforced via cgroup cpu.max
+  // when the host runs with --capsule-cgroup-root. 100 = one full core.
+  maxCpuPercent: number
 }
 
 /** Grace window during which a freshly-rotated user's previous token still authenticates. */
@@ -25,12 +28,14 @@ export const DEFAULT_QUOTA: Omit<DeployQuota, "deployId"> = {
   maxBundleBytes: 64 * 1024 * 1024,
   maxDiskBytes: 512 * 1024 * 1024,
   maxMemoryMb: 256,
+  maxCpuPercent: 50,
 }
 
 export const ANONYMOUS_QUOTA: Omit<DeployQuota, "deployId"> = {
   maxBundleBytes: 16 * 1024 * 1024,
   maxDiskBytes: 128 * 1024 * 1024,
   maxMemoryMb: 128,
+  maxCpuPercent: 25,
 }
 
 export interface AnonymousDeployRow {
@@ -141,7 +146,8 @@ export function openControlDb(dataDir: string): ControlDb {
       deployId TEXT PRIMARY KEY,
       maxBundleBytes INTEGER,
       maxDiskBytes INTEGER,
-      maxMemoryMb INTEGER
+      maxMemoryMb INTEGER,
+      maxCpuPercent INTEGER
     );
     CREATE TABLE IF NOT EXISTS anonymous_deploys (
       deployId TEXT PRIMARY KEY,
@@ -194,6 +200,12 @@ export function openControlDb(dataDir: string): ControlDb {
     db.exec(`ALTER TABLE anonymous_deploys ADD COLUMN terminated INTEGER NOT NULL DEFAULT 0`)
   }
 
+  // Migrate pre-CPU-quota DBs that lack the maxCpuPercent column.
+  const quotaCols = (db.prepare("PRAGMA table_info(deploy_quotas)").all() as Array<{ name: string }>).map((c) => c.name)
+  if (!quotaCols.includes("maxCpuPercent")) {
+    db.exec(`ALTER TABLE deploy_quotas ADD COLUMN maxCpuPercent INTEGER`)
+  }
+
   // Migrate pre-grace-window DBs to add previous-token columns on users.
   const userCols = (db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>).map((c) => c.name)
   if (!userCols.includes("previousTokenHash")) {
@@ -230,12 +242,12 @@ export function openControlDb(dataDir: string): ControlDb {
   const selectDeploysForUser = db.prepare("SELECT deployId FROM deploy_owners WHERE userId = ?")
   const deleteOwner = db.prepare("DELETE FROM deploy_owners WHERE deployId = ?")
   const selectQuota = db.prepare(
-    "SELECT deployId, maxBundleBytes, maxDiskBytes, maxMemoryMb FROM deploy_quotas WHERE deployId = ?",
+    "SELECT deployId, maxBundleBytes, maxDiskBytes, maxMemoryMb, maxCpuPercent FROM deploy_quotas WHERE deployId = ?",
   )
   const upsertQuota = db.prepare(
-    "INSERT INTO deploy_quotas (deployId, maxBundleBytes, maxDiskBytes, maxMemoryMb) VALUES (?, ?, ?, ?) " +
+    "INSERT INTO deploy_quotas (deployId, maxBundleBytes, maxDiskBytes, maxMemoryMb, maxCpuPercent) VALUES (?, ?, ?, ?, ?) " +
       "ON CONFLICT(deployId) DO UPDATE SET maxBundleBytes = excluded.maxBundleBytes, " +
-      "maxDiskBytes = excluded.maxDiskBytes, maxMemoryMb = excluded.maxMemoryMb",
+      "maxDiskBytes = excluded.maxDiskBytes, maxMemoryMb = excluded.maxMemoryMb, maxCpuPercent = excluded.maxCpuPercent",
   )
   const deleteQuotaStmt = db.prepare("DELETE FROM deploy_quotas WHERE deployId = ?")
   const insertAnon = db.prepare(
@@ -349,13 +361,20 @@ export function openControlDb(dataDir: string): ControlDb {
     },
     getQuota(deployId) {
       const row = selectQuota.get(deployId) as
-        | { deployId: string; maxBundleBytes: number | null; maxDiskBytes: number | null; maxMemoryMb: number | null }
+        | {
+            deployId: string
+            maxBundleBytes: number | null
+            maxDiskBytes: number | null
+            maxMemoryMb: number | null
+            maxCpuPercent: number | null
+          }
         | undefined
       return {
         deployId,
         maxBundleBytes: row?.maxBundleBytes ?? DEFAULT_QUOTA.maxBundleBytes,
         maxDiskBytes: row?.maxDiskBytes ?? DEFAULT_QUOTA.maxDiskBytes,
         maxMemoryMb: row?.maxMemoryMb ?? DEFAULT_QUOTA.maxMemoryMb,
+        maxCpuPercent: row?.maxCpuPercent ?? DEFAULT_QUOTA.maxCpuPercent,
       }
     },
     setQuota(deployId, patch) {
@@ -365,8 +384,9 @@ export function openControlDb(dataDir: string): ControlDb {
         maxBundleBytes: patch.maxBundleBytes ?? cur.maxBundleBytes,
         maxDiskBytes: patch.maxDiskBytes ?? cur.maxDiskBytes,
         maxMemoryMb: patch.maxMemoryMb ?? cur.maxMemoryMb,
+        maxCpuPercent: patch.maxCpuPercent ?? cur.maxCpuPercent,
       }
-      upsertQuota.run(deployId, next.maxBundleBytes, next.maxDiskBytes, next.maxMemoryMb)
+      upsertQuota.run(deployId, next.maxBundleBytes, next.maxDiskBytes, next.maxMemoryMb, next.maxCpuPercent)
       return next
     },
     deleteQuota(deployId) {

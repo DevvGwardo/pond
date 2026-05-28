@@ -1,0 +1,55 @@
+#!/usr/sbin/nft -f
+#
+# Default-deny egress for pond capsules.
+#
+# The JS-level network block in src/host/deploy-worker.ts raises the bar but is
+# leaky by its own admission: a capsule can still exfiltrate via dns.lookup()
+# (the resolver query leaves the box before any TCP connect) or by shipping a
+# native addon that bypasses the patched net.Socket. The only place to close
+# that for real is the OS egress path — here.
+#
+# This ruleset drops all outbound traffic originating from the capsule cgroup
+# subtree (everything under <POND_CAPSULE_CGROUP_ROOT>/capsule-*) except:
+#   - loopback (a capsule talking to itself)
+#   - replies on already-established/related connections (so inbound requests
+#     proxied in from the control plane can be answered)
+# Notably it does NOT allow DNS. Anonymous capsules have no legitimate need to
+# resolve external names; blocking 53/udp+tcp is what shuts the DNS-exfil door.
+#
+# cgroup matching: `socket cgroupv2 level N "path"` matches a packet whose
+# socket's cgroup ancestor at depth N equals "path". With capsules living at
+# /sys/fs/cgroup/pond/capsule-<id>, the ancestor at level 1 is "pond" — so
+# `socket cgroupv2 level 1 "pond"` matches every capsule. If you point
+# POND_CAPSULE_CGROUP_ROOT somewhere deeper (e.g. a systemd slice), adjust the
+# level/path below to name the common ancestor of the capsule cgroups.
+#
+# Apply:   sudo nft -f deploy/capsule-egress.nft
+# Inspect: sudo nft list table inet pond
+# Persist: include this file from /etc/nftables.conf (or copy its table in).
+
+table inet pond {
+	chain capsule_egress {
+		# Hook into the output path. priority 0, policy accept — we only act
+		# on packets that match the capsule cgroup, leaving host traffic alone.
+		type filter hook output priority 0; policy accept;
+
+		# Everything below applies ONLY to packets from a capsule cgroup.
+		# Non-capsule (control plane, system) traffic falls through untouched.
+		socket cgroupv2 level 1 "pond" jump capsule_filter
+	}
+
+	chain capsule_filter {
+		# Let a capsule reach itself / sibling ports on loopback.
+		oifname "lo" accept
+
+		# Allow replies on connections that were opened from outside (the
+		# control-plane proxy forwarding a request in). New outbound flows from
+		# the capsule are not "established" and fall through to the drop.
+		ct state established,related accept
+
+		# Anything else a capsule tries to send outbound — TCP connects, raw
+		# UDP, and crucially DNS queries — is dropped. Use `reject` instead of
+		# `drop` if you'd rather capsules fail fast than hang.
+		counter drop
+	}
+}

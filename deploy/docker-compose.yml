@@ -14,12 +14,27 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    # Bound the whole control-plane container so a runaway capsule (or a bug in
+    # the host process) can't exhaust the box and take every deploy down with
+    # it. TUNE these to your host's size — the values below assume a small VM.
+    # Per-capsule cpu/memory/pids caps are layered on top via the cgroup
+    # isolation setup (deploy/setup-capsule-isolation.sh + README).
+    mem_limit: 4g
+    cpus: "2.0"
+    # Container-wide process ceiling. Must comfortably exceed the sum of active
+    # capsules (each is itself capped at 256 pids by its own cgroup).
+    pids_limit: 4096
     # The tunnel reaches us over the compose network — bind to 0.0.0.0
     # *inside* the container only; the host port is NOT published.
     expose:
       - "8787"
     volumes:
       - pond-data:/data
+      # Per-capsule cgroup isolation needs a writable cgroup v2 subtree inside
+      # the container. Uncomment this mount AND set POND_CAPSULE_CGROUP_ROOT in
+      # .env (e.g. /sys/fs/cgroup/pond) to enable it. See deploy/README.md →
+      # "Per-capsule isolation". Without it, capsules fall back to the heap cap.
+      # - /sys/fs/cgroup:/sys/fs/cgroup:rw
     command:
       - node
       - /app/src/cli.js
