@@ -32,6 +32,18 @@ The host operator reviews reports within reasonable time (no SLA) and may take d
 
 Anonymous deploys are sandboxed via Node's `--permission` filesystem isolation, a JS-level network shim (now also blocking `dns.lookup`/`dns.resolve`, not just sockets), and — when the host runs as root — **OS-level privilege separation**: each anonymous-unclaimed worker is dropped to a dedicated unprivileged uid/gid, so a sandbox escape lands as a powerless user rather than the control plane. **The JS network shim is still best-effort, not the boundary**; the real outbound boundary is the OS egress firewall, which operators concerned about lateral movement / DNS exfiltration should enable (see the operations guide). There is no per-tenant VM or network namespace yet — capsules share the host loopback.
 
+## The anonymous trust boundary
+
+"Anonymous" here means "no account required," **not** "arbitrary untrusted code with no recourse." Anonymous deploys are bounded by:
+
+- **A human/bot challenge** — when the operator configures Cloudflare Turnstile, an anonymous deploy must pass a verified challenge before it is accepted.
+- **Per-IP rate limits** — 5 deploys / IP / hour by default.
+- **The sandbox + egress policy** described above.
+- **An automatic time-to-live** — unclaimed deploys are terminated after the grace window and deleted after the retention window.
+- **A manual operator kill switch** — the host operator can terminate any deploy immediately via `pond admin terminate <deployId>`.
+
+These layers raise the cost of abuse and give the operator immediate recourse; they do not turn the JS-level sandbox into a hardened multi-tenant boundary. Treat the host as semi-trusted and review the [operations guide](./operations.md) before exposing it publicly.
+
 ## No warranty
 
 Pond is provided as-is. The host operator makes no guarantees of availability, durability, performance, or fitness for any purpose. **Do not deploy production workloads here.**

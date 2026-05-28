@@ -17,6 +17,7 @@ import {
 } from "../host/cgroup.js"
 import { resolveSandboxUser, DEFAULT_SANDBOX_USER, type SandboxUser } from "../host/sandbox-user.js"
 import { findPackageJsonLifecycleScripts } from "../host/package-json-validation.js"
+import { verifyTurnstile } from "../host/turnstile.js"
 import { createHash } from "node:crypto"
 import { buildForDeploy } from "../runtime.js"
 import { buildClient } from "../bundler.js"
@@ -490,6 +491,13 @@ export const hostCommand = defineCommand({
       description: "Max anonymous POST /api/deploys per IP per rolling hour",
       default: "5",
     },
+    "turnstile-secret": {
+      type: "string",
+      description:
+        "Cloudflare Turnstile secret. When set, anonymous POST /api/deploys must carry a verified Turnstile " +
+        "token (x-pond-turnstile-token header or turnstileToken body field). Unset = no challenge. Also POND_TURNSTILE_SECRET.",
+      default: "",
+    },
     "trust-proxy": {
       type: "boolean",
       description: "Read client IP from x-forwarded-for (also POND_TRUST_PROXY_HEADERS=1)",
@@ -583,6 +591,9 @@ export const hostCommand = defineCommand({
       typeof args["anonymous-rate-per-hour"] === "string" ? args["anonymous-rate-per-hour"] : "5",
       10,
     )
+    const turnstileSecret =
+      process.env.POND_TURNSTILE_SECRET ??
+      (typeof args["turnstile-secret"] === "string" ? args["turnstile-secret"] : "")
     const trustProxy = process.env.POND_TRUST_PROXY_HEADERS === "1" || args["trust-proxy"] === true
 
     // Uniform capsule egress policy (applies to ALL capsules regardless of
@@ -1378,8 +1389,21 @@ export const hostCommand = defineCommand({
         const body = (await c.req.json().catch(() => null)) as {
           sourceFiles?: unknown
           publicInspect?: unknown
+          turnstileToken?: unknown
         } | null
         if (!body) return c.json({ error: "Invalid JSON body" }, 400)
+        // Human/bot challenge for anonymous deploys. No-op unless the operator
+        // configured a Turnstile secret; authenticated deploys are never
+        // challenged. Token may ride in a header or the JSON body.
+        if (isAnonymous && turnstileSecret) {
+          const headerToken = c.req.header("x-pond-turnstile-token") ?? ""
+          const bodyToken = typeof body.turnstileToken === "string" ? body.turnstileToken : ""
+          const token = headerToken || bodyToken
+          const verdict = await verifyTurnstile(turnstileSecret, token, clientIp(c))
+          if (!verdict.ok) {
+            return c.json({ error: "Turnstile verification failed", errorCodes: verdict.errorCodes }, 403)
+          }
+        }
         const validated = validateSourceFiles(body.sourceFiles)
         if (!validated.ok) return c.json({ error: validated.error }, 400)
         const deployId = randomBytes(8).toString("hex")
@@ -1735,6 +1759,30 @@ export const hostCommand = defineCommand({
       const actor = auth.kind === "claim" ? "__claim_token__" : actorFor(auth.user, false)
       audit(actor, "deploy.delete", { targetDeployId: deployId })
       return c.json({ ok: true })
+    })
+
+    // Operator kill switch. Mirrors the sweep's terminate path (stopDeploy +
+    // markTerminated) but on demand, gated by the host token / an admin user —
+    // backs `pond admin terminate <deployId>`. Anonymous deploys are marked
+    // terminated so they stay down (bootOptsForRecord returns null) and the
+    // retention sweep still deletes them; non-anonymous deploys are stopped
+    // (the operator can DELETE them outright if they want the bytes gone too).
+    app.post("/api/admin/deploys/:deployId/terminate", async (c) => {
+      const deployId = c.req.param("deployId")
+      const record = readRecord(deployId)
+      if (!record) return c.json({ error: "Not found" }, 404)
+      const r = requireAdmin(c)
+      if (r instanceof Response) return r
+      await stopDeploy(deployId)
+      restartState.delete(deployId)
+      const anonymous = controlDb.findAnonymous(deployId) !== null
+      if (anonymous) controlDb.markTerminated(deployId)
+      invalidatePublicListing()
+      audit(actorFor(r.user, r.viaHostToken), "deploy.terminate", {
+        targetDeployId: deployId,
+        metadata: { anonymous },
+      })
+      return c.json({ ok: true, deployId, anonymous, terminated: true })
     })
 
     app.put("/api/deploys/:deployId/quota", async (c) => {
@@ -3392,6 +3440,13 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
       )
     } else {
       console.log("  anonymous deploys: disabled\n")
+    }
+    if (anonymousEnabled) {
+      console.log(
+        turnstileSecret
+          ? `  anonymous deploy challenge: Cloudflare Turnstile enabled (from ${process.env.POND_TURNSTILE_SECRET ? "POND_TURNSTILE_SECRET" : "--turnstile-secret"})`
+          : "  anonymous deploy challenge: none (set --turnstile-secret / POND_TURNSTILE_SECRET to require Turnstile)",
+      )
     }
     if (capsuleCgroupRoot) {
       console.log(`  capsule isolation: cgroup v2 enabled at ${capsuleCgroupRoot} (per-capsule cpu/memory/pids caps)`)
