@@ -813,7 +813,7 @@ pond deploy
 # → deployId: abc123…, claimToken: tk_…  (one-time disclosure; server stores only the hash)
 
 pond claim                          # uses .pond/deploy.json (existing user, must be current owner)
-pond claim --signup devgwardo       # claim + create user (anonymous deploys only)
+pond claim --signup your-username   # claim + create user (anonymous deploys only)
 ```
 
 Since 0.3.10, the control plane stores only `sha256(claimToken)` on disk — a backup leak no longer yields usable tokens. The plaintext lives only in your local `.pond/deploy.json` (mode `0o600`) and is returned once at create time.
@@ -917,10 +917,10 @@ Attach an existing user identity for a pond control plane. Saves the token to `~
 
 ```sh
 # Attach an existing token (most common path)
-pond login --username devgwardo --token usr_xxxxxxxx
+pond login --username your-username --token usr_xxxxxxxx
 
 # Self-hosted control plane
-pond login --api https://pond.example.com --username devgwardo --token usr_xxxxxxxx
+pond login --api https://pond.example.com --username your-username --token usr_xxxxxxxx
 
 # Self-hosted bootstrap (POND_HOST_TOKEN must be set, or pass --admin-token)
 POND_HOST_TOKEN=<bootstrap-token> pond login --api https://pond.example.com --username admin
@@ -1065,7 +1065,7 @@ Manage the local dev-server guest identity. Useful only against `pond dev` — p
 Set the current guest's display name so you can simulate a logged-in user without a real OAuth flow.
 
 ```sh
-pond auth as --name devgwardo
+pond auth as --name your-username
 ```
 
 ---
