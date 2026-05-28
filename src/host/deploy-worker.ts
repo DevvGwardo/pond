@@ -1,3 +1,4 @@
+import { createRequire } from "node:module"
 import { serveBundleServer } from "../start-server.js"
 
 interface BootOptions {
@@ -23,6 +24,70 @@ let server: { close: (cb?: (err?: Error) => void) => void } | null = null
 
 function send(msg: object) {
   if (process.send) process.send(msg)
+}
+
+// Remove every JS-reachable path to running native code inside a capsule
+// worker. This is the filesystem analogue of installNetworkRestriction: the
+// Node `--permission` model is the only thing isolating one tenant's files
+// from another's on the shared-uid host, and `--allow-addons` (which the
+// runtime needs because better-sqlite3 is a native addon) "could invalidate
+// the permission model" — Node says so itself. A capsule that loads ANY native
+// code escapes the fs sandbox entirely (libc open() bypasses --permission), so
+// it could read the control DB, sibling deploys' secrets, the host token, etc.
+//
+// This runs before any capsule code, so the only remaining native-load surfaces are:
+//   1. process.dlopen — backs require('*.node') and better-sqlite3's
+//      { nativeBinding } option. Sealed non-configurable so capsule code can't
+//      restore it.
+//   2. better-sqlite3's Database.prototype.loadExtension — a C-level dlopen
+//      inside libsqlite that process.dlopen does NOT cover. Sealed separately.
+// Realm escapes (worker_threads / child_process, which would start with a fresh
+// unsealed process) are already denied: the worker is launched without
+// --allow-worker / --allow-child-process, so the permission model blocks them.
+//
+// Called unconditionally for every capsule (claimed or anonymous): a malicious
+// owner is just as able to read another tenant's data as an anonymous one.
+export function installSandboxHardening() {
+  // Warm + patch better-sqlite3 while process.dlopen still works. The binding
+  // loads LAZILY on the first `new Database()`, so we force it now (an in-memory
+  // db touches no files) — otherwise the runtime's first real `new Database()`
+  // would hit the sealed dlopen below and fail boot.
+  try {
+    const require = createRequire(import.meta.url)
+    const bs = require("better-sqlite3") as (new (path: string) => { close(): void }) & {
+      prototype?: Record<string, unknown>
+    }
+    try {
+      new bs(":memory:").close()
+    } catch {
+      // binding already warm, or :memory: unsupported here — best-effort
+    }
+    const proto = bs?.prototype
+    if (proto && typeof proto.loadExtension === "function") {
+      Object.defineProperty(proto, "loadExtension", {
+        value: () => {
+          throw new Error("SQLite extension loading is disabled in the capsule sandbox")
+        },
+        writable: false,
+        configurable: false,
+      })
+    }
+  } catch {
+    // better-sqlite3 not resolvable here — nothing to seal, best-effort
+  }
+  // Seal process.dlopen last so the require above could still load the addon.
+  try {
+    Object.defineProperty(process, "dlopen", {
+      value: () => {
+        throw new Error("Loading native addons is disabled in the capsule sandbox")
+      },
+      writable: false,
+      configurable: false,
+      enumerable: false,
+    })
+  } catch {
+    // already sealed / non-configurable — best-effort
+  }
 }
 
 // Exported only so the regression test can exercise the shim in an isolated
@@ -176,6 +241,10 @@ export async function installNetworkRestriction() {
 process.on("message", async (msg: ParentMessage) => {
   if (msg.type === "boot") {
     try {
+      // Always run, before the capsule bundle is imported by serveBundleServer:
+      // the fs/native-code escape applies to every capsule regardless of network
+      // policy or claim status.
+      installSandboxHardening()
       if (msg.options.restrictNetwork) {
         await installNetworkRestriction()
       }

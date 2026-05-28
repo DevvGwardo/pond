@@ -22,6 +22,13 @@ These are in the code and covered by the test suite:
 - `publicInspect` exposes read-only inspect only; backup/restore/logs require
   the claim token.
 - Uniform Node `--permission` sandbox for all capsules.
+- Native-code lockdown in every worker (`installSandboxHardening`): `process.dlopen`
+  and better-sqlite3's `loadExtension` are sealed before any capsule code runs, so
+  a capsule can't load a native addon / SQLite extension to bypass `--permission`'s
+  filesystem limits (libc `open()` is not mediated by the permission model). The
+  runtime's own better-sqlite3 binding is warmed first, so legitimate `ctx.db` use
+  is unaffected. Realm escapes are denied separately: the worker runs without
+  `--allow-worker` / `--allow-child-process`.
 - Runtime disk watchdog stops a capsule that exceeds its disk quota; the
   `/__pond/db/restore` upload is bounded by the deploy's disk quota.
 - Per-IP anonymous rate limiting prefers `CF-Connecting-IP` (unspoofable behind
@@ -131,10 +138,83 @@ the nft rule). To finish end-to-end:
    the proxy) is dropped at the OS layer.
 6. Remove the startup gate in `host.ts` that currently rejects `proxy` mode.
 
-## 6. Known residual gaps
+## 6. Per-capsule filesystem isolation: `bwrap` (Linux host)
+
+This is the structural fix for the filesystem half of the threat model — the
+analogue of the nft egress firewall. The Node `--permission` model + native-code
+lockdown (§1) is a JS-layer speed bump; `bwrap` is a kernel-enforced boundary.
+
+`--capsule-fs-isolation` / `POND_CAPSULE_FS_ISOLATION`:
+
+- **`off`** (default) — capsules are isolated only by the Node `--permission`
+  model. One shared uid, one container; a missed native-load surface or a host
+  on Node < 22 means a capsule can read `control.db` and sibling secrets.
+- **`bwrap`** — each capsule worker is launched inside a
+  [bubblewrap](https://github.com/containers/bubblewrap) mount namespace built
+  from an **allowlist**: only the capsule's own deploy dir (rw) and the pond
+  runtime + `node_modules` (ro) are bound, plus read-only system dirs for the
+  node binary. `control.db`, the host-token file, and every sibling deploy dir
+  live under the control-plane data dir, which is **never bound** — they do not
+  exist in the capsule's filesystem at all. The `--permission` flags are kept
+  inside the sandbox as defense-in-depth.
+
+**Fail-closed.** `bwrap` mode requires Linux + the `bwrap` binary on `PATH`. If
+either is missing the host **refuses to start** rather than silently booting
+capsules unconfined (same rule as `proxy` egress). Install on Debian/Ubuntu:
+
+```bash
+sudo apt-get install -y bubblewrap
+# Unprivileged user namespaces must be permitted (default on most distros):
+sysctl kernel.unprivileged_userns_clone   # want 1, if the knob exists
+```
+
+Enable it:
+
+```bash
+# deploy/.env
+POND_CAPSULE_FS_ISOLATION=bwrap
+```
+
+**Verify on the host** (cannot be checked on a macOS dev box — bwrap is
+Linux-only):
+
+1. Host boots and logs `capsule fs isolation: bubblewrap enabled`.
+2. Deploy a capsule and confirm it serves `/api/health` and its own `ctx.db`
+   reads/writes still work (the deploy dir is rw-bound).
+3. From inside a capsule (e.g. a temporary deploy whose handler shells out or
+   reads files), confirm the control plane is invisible:
+   - `ls ../` / the data-dir path → no `control.db`, no `host-token`, no sibling
+     `deploys/<other-id>` directories.
+   - Attempting to read another deploy's dir by absolute path → ENOENT.
+4. Confirm the worker still talks to the control plane (the boot `booted`
+   message arrives within 10s — this exercises the IPC channel through bwrap,
+   the one piece that must be validated on Linux; if the worker never boots,
+   the NODE_CHANNEL_FD is not surviving the bwrap exec — see the note below).
+
+> **IPC-through-bwrap note.** The control plane drives each worker over a Node
+> IPC channel (the `boot`/`booted` messages). `fork` wires this automatically;
+> in `bwrap` mode the host `spawn`s `bwrap` with the same `ipc` stdio so the
+> channel fd (`NODE_CHANNEL_FD`) is inherited by the inner node. bwrap is not
+> given `--args`, so it consumes no extra fds. This is the only part of the
+> feature that cannot be verified off-Linux; if boots time out under `bwrap`,
+> that fd inheritance is the first thing to check.
+
+## 7. Known residual gaps
 
 - **DNS / native-addon exfil** is closed only at the OS layer (nft drops 53 and
   all non-proxy egress). The JS sandbox is defense-in-depth, not the boundary.
+- **Filesystem isolation between tenants** rests on the Node `--permission` model
+  plus the native-code lockdown (§1) **when `--capsule-fs-isolation=off`** (the
+  default). In that mode every capsule and the control plane share one uid in one
+  container with **no OS-level filesystem boundary behind `--permission`** — if a
+  future native-load surface is missed, or `--permission` is off (Node < 22, or
+  `sandboxAvailable` false), a capsule can read the control DB and sibling
+  deploys' secrets. The kernel-enforced fix now exists as an opt-in: set
+  `--capsule-fs-isolation=bwrap` on a Linux host (§6). Treat the lockdown as the
+  speed bump and bwrap as the real boundary, exactly as the JS network shim
+  relates to the nft firewall. Remaining work to make it the default: validate
+  the IPC-through-bwrap path on Linux (§6) and confirm no hosted-app regressions,
+  then flip the default once verified in production.
 - **Capsule-to-capsule on loopback** is closed for _new_ connections by the nft
   rule, but capsules still share a network namespace. Per-tenant netns (or
   microVMs) is the structural fix.

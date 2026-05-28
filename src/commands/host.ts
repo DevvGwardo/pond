@@ -5,7 +5,7 @@ import { bodyLimit } from "hono/body-limit"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { randomBytes, timingSafeEqual } from "node:crypto"
-import { fork, type ChildProcess } from "node:child_process"
+import { fork, spawn, type ChildProcess } from "node:child_process"
 import * as net from "node:net"
 import { openControlDb, DEFAULT_QUOTA, ANONYMOUS_QUOTA, type ControlDb, type UserRow } from "../host/control-db.js"
 import {
@@ -15,6 +15,12 @@ import {
   applyCapsuleCgroup,
   removeCapsuleCgroup,
 } from "../host/cgroup.js"
+import {
+  resolveFsIsolationMode,
+  bwrapAvailable,
+  buildBwrapArgv,
+  type CapsuleFsIsolationMode,
+} from "../host/capsule-fs-sandbox.js"
 import { findPackageJsonLifecycleScripts } from "../host/package-json-validation.js"
 import { verifyTurnstile } from "../host/turnstile.js"
 import { createHash } from "node:crypto"
@@ -525,6 +531,16 @@ export const hostCommand = defineCommand({
         "Loopback port for the allowlisting egress proxy when --capsule-egress=proxy. Also POND_EGRESS_PROXY_PORT.",
       default: "8788",
     },
+    "capsule-fs-isolation": {
+      type: "string",
+      description:
+        "Per-capsule OS filesystem isolation: 'off' (default; rely on the Node --permission model only) or " +
+        "'bwrap' (Linux: confine each capsule worker in a bubblewrap mount namespace that exposes only its own " +
+        "deploy dir rw + the pond runtime ro, so control.db and sibling deploys are physically unreachable). " +
+        "'bwrap' REQUIRES Linux + bubblewrap installed; the host refuses to start otherwise rather than running " +
+        "unconfined. Also POND_CAPSULE_FS_ISOLATION.",
+      default: "off",
+    },
   },
   async run({ args }) {
     const port = parseInt(typeof args.port === "string" ? args.port : "8787", 10)
@@ -611,6 +627,23 @@ export const hostCommand = defineCommand({
       console.log(
         `[pond host] Node ${process.versions.node} — permission model disabled. Upgrade to Node 22+ for anonymous deploy sandboxing.`,
       )
+    }
+
+    // Per-capsule OS filesystem isolation (bubblewrap). Fail CLOSED: if 'bwrap'
+    // is requested but the platform/binary can't provide it, refuse to start
+    // rather than silently booting capsules with only the JS --permission
+    // boundary — the same "never fail open" rule the egress proxy follows.
+    const fsIsolationMode: CapsuleFsIsolationMode = resolveFsIsolationMode(
+      process.env.POND_CAPSULE_FS_ISOLATION ??
+        (typeof args["capsule-fs-isolation"] === "string" ? args["capsule-fs-isolation"] : "off"),
+    )
+    if (fsIsolationMode === "bwrap" && !bwrapAvailable()) {
+      console.error(
+        process.platform !== "linux"
+          ? `[pond host] --capsule-fs-isolation=bwrap requires Linux (got ${process.platform}). Refusing to start unconfined.`
+          : "[pond host] --capsule-fs-isolation=bwrap requested but `bwrap` (bubblewrap) is not available on PATH. Install bubblewrap or unset the flag. Refusing to start unconfined.",
+      )
+      process.exit(1)
     }
 
     // Per-capsule cgroup v2 isolation. Validated once at startup; null disables
@@ -796,10 +829,12 @@ export const hostCommand = defineCommand({
       // Resolve symlinks: the permission model checks REAL paths (macOS /tmp →
       // /private/tmp), and the worker uses cwd to compute its data.db location,
       // so cwd / bundlePath must be in real form when the sandbox is active.
-      const realDir = useSandbox && sandboxAvailable ? fs.realpathSync(dir) : dir
-      const realBundlePath = useSandbox && sandboxAvailable ? fs.realpathSync(bundlePath) : bundlePath
+      // bwrap also binds literal paths, so it needs the real form too.
+      const needsRealPaths = (useSandbox && sandboxAvailable) || fsIsolationMode === "bwrap"
+      const realDir = needsRealPaths ? fs.realpathSync(dir) : dir
+      const realBundlePath = needsRealPaths ? fs.realpathSync(bundlePath) : bundlePath
       const realClientPath = fs.existsSync(clientPath)
-        ? useSandbox && sandboxAvailable
+        ? needsRealPaths
           ? fs.realpathSync(clientPath)
           : clientPath
         : undefined
@@ -820,12 +855,33 @@ export const hostCommand = defineCommand({
           "--allow-addons",
         )
       }
-      const child = fork(workerPath, [], {
-        cwd: realDir,
-        env: scopedEnvFor(record),
-        stdio: ["ignore", "inherit", "inherit", "ipc"],
-        execArgv,
-      })
+      // The IPC channel ("ipc" in stdio) carries the boot message + booted/error
+      // replies below. fork wires it automatically; under bwrap we spawn the
+      // bwrap wrapper with the same stdio so Node's IPC fd is inherited by the
+      // inner node process (NODE_CHANNEL_FD rides through bwrap's env + fds).
+      let child: ChildProcess
+      if (fsIsolationMode === "bwrap") {
+        const argv = buildBwrapArgv({
+          nodeBin: process.execPath,
+          nodeExecArgv: execArgv,
+          workerPath: fs.realpathSync(workerPath),
+          deployDir: realDir,
+          pondSrcDir: fs.realpathSync(pondSrcDir),
+          pondNodeModulesDir: fs.realpathSync(pondNodeModulesDir),
+        })
+        child = spawn(argv[0], argv.slice(1), {
+          cwd: realDir,
+          env: scopedEnvFor(record),
+          stdio: ["ignore", "inherit", "inherit", "ipc"],
+        })
+      } else {
+        child = fork(workerPath, [], {
+          cwd: realDir,
+          env: scopedEnvFor(record),
+          stdio: ["ignore", "inherit", "inherit", "ipc"],
+          execArgv,
+        })
+      }
 
       const deployId = record.deployId
       // Place the worker in its own cgroup before it does any real work, so the
@@ -3402,6 +3458,17 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
         `  ⚠ capsule egress policy '${egressMode}': the nft egress firewall keys on cgroup membership, ` +
           `so with cgroup isolation OFF any loaded capsule-egress.nft rules match NOTHING (no OS-level egress ` +
           `enforcement). Run deploy/setup-capsule-isolation.sh and set --capsule-cgroup-root. See deploy/HARDENING.md.`,
+      )
+    }
+    if (fsIsolationMode === "bwrap") {
+      console.log(
+        "  capsule fs isolation: bubblewrap enabled — each capsule worker is confined to its own deploy dir " +
+          "(rw) + pond runtime (ro); control.db and sibling deploys are not in its mount namespace.",
+      )
+    } else {
+      console.log(
+        "  capsule fs isolation: OFF (Node --permission only) — set --capsule-fs-isolation=bwrap on a Linux host " +
+          "with bubblewrap for a kernel-enforced per-tenant filesystem boundary. See deploy/HARDENING.md.",
       )
     }
     if (hostname === "0.0.0.0" || hostname === "::") {
