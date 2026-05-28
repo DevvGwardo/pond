@@ -1053,6 +1053,10 @@ export const hostCommand = defineCommand({
         .filter((rec): rec is HostedDeployRecord => rec !== null)
         .map((rec) => {
           const anon = controlDb.findAnonymous(rec.deployId)
+          // Custom subdomains added via `pond domains add` aren't on the
+          // record — they live in control-db. Surface them so the dashboard
+          // can prefer the friendly URL over the hash one.
+          const domains = controlDb.listDomainsForDeploy(rec.deployId).map((d) => urlForCustomDomain(d.subdomain))
           return {
             deployId: rec.deployId,
             url: rec.url,
@@ -1069,6 +1073,7 @@ export const hostCommand = defineCommand({
             title: rec.title,
             description: rec.description,
             isPublic: rec.isPublic === true,
+            domains,
           }
         })
       return c.json({ deploys: records })

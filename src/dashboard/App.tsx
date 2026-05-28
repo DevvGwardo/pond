@@ -64,6 +64,13 @@ interface DeployRow {
   description?: string
   isPublic?: boolean
   publicInspect?: boolean
+  // Custom subdomains added via `pond domains add`. First entry is the
+  // preferred display URL; the hash `url` is shown as secondary.
+  domains?: string[]
+}
+
+function primaryUrl(d: DeployRow): string {
+  return d.domains && d.domains.length > 0 ? d.domains[0] : d.url
 }
 
 function authHeaders(token: string): Record<string, string> {
@@ -593,8 +600,13 @@ function DeployCard({
             <StatusPill d={d} isOwner={isOwner} />
           </div>
           <p class="mt-1 flex flex-wrap items-center gap-x-2 text-xs text-zinc-500">
-            <a class="font-mono text-zinc-400 hover:text-emerald-300" href={d.url} target="_blank" rel="noreferrer">
-              {d.url.replace(/^https?:\/\//, "")}
+            <a
+              class="font-mono text-zinc-400 hover:text-emerald-300"
+              href={primaryUrl(d)}
+              target="_blank"
+              rel="noreferrer"
+            >
+              {primaryUrl(d).replace(/^https?:\/\//, "")}
             </a>
             <span class="text-zinc-800">·</span>
             <span class="font-mono text-zinc-600">{shortId}</span>
@@ -606,7 +618,7 @@ function DeployCard({
         <div class="flex flex-shrink-0 flex-wrap items-center gap-2">
           <a
             class="rounded-md border border-zinc-800 bg-black px-3 py-1.5 text-xs text-zinc-300 transition hover:border-zinc-600 hover:text-zinc-100"
-            href={d.url}
+            href={primaryUrl(d)}
             target="_blank"
             rel="noreferrer"
           >
@@ -738,14 +750,37 @@ function DeployDetail({
             </button>
             <h1 class="truncate text-2xl font-semibold tracking-tight text-zinc-50">{heading}</h1>
             <p class="mt-1 flex flex-wrap items-center gap-x-2 text-sm text-zinc-500">
-              <a class="font-mono text-zinc-400 hover:text-emerald-300" href={d.url} target="_blank" rel="noreferrer">
-                {d.url.replace(/^https?:\/\//, "")}
+              <a
+                class="font-mono text-zinc-400 hover:text-emerald-300"
+                href={primaryUrl(d)}
+                target="_blank"
+                rel="noreferrer"
+              >
+                {primaryUrl(d).replace(/^https?:\/\//, "")}
               </a>
               <span class="text-zinc-800">·</span>
               <span class="font-mono text-zinc-600">{d.deployId.slice(0, 12)}</span>
               <span class="text-zinc-800">·</span>
               <span class={`font-medium ${liveTagColor}`}>{liveTag}</span>
             </p>
+            {d.domains && d.domains.length > 0 && primaryUrl(d) !== d.url ? (
+              <p class="mt-1 text-xs text-zinc-600">
+                also at{" "}
+                <a class="font-mono hover:text-zinc-400" href={d.url} target="_blank" rel="noreferrer">
+                  {d.url.replace(/^https?:\/\//, "")}
+                </a>
+                {d.domains.length > 1
+                  ? d.domains.slice(1).map((u) => (
+                      <>
+                        ,{" "}
+                        <a class="font-mono hover:text-zinc-400" href={u} target="_blank" rel="noreferrer">
+                          {u.replace(/^https?:\/\//, "")}
+                        </a>
+                      </>
+                    ))
+                  : null}
+              </p>
+            ) : null}
           </div>
           <div class="flex items-center gap-2">
             <button
@@ -756,7 +791,7 @@ function DeployDetail({
             </button>
             <a
               class="rounded-md border border-zinc-800 bg-black px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-zinc-600 hover:text-zinc-100"
-              href={d.url}
+              href={primaryUrl(d)}
               target="_blank"
               rel="noreferrer"
             >
@@ -799,7 +834,7 @@ function DeployDetail({
           <OutlineCard inspect={inspect} loading={inspectLoading} />
           <a
             class="block rounded-xl border border-emerald-900/60 bg-emerald-950/30 px-4 py-3 text-center text-sm font-semibold text-emerald-200 transition hover:border-emerald-700 hover:bg-emerald-950/60"
-            href={d.url}
+            href={primaryUrl(d)}
             target="_blank"
             rel="noreferrer"
           >
