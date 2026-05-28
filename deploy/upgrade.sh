@@ -55,15 +55,28 @@ if [[ ${#MISSING[@]} -gt 0 ]]; then
   exit 1
 fi
 
+HAS_GIT=0
+if git rev-parse --git-dir >/dev/null 2>&1; then HAS_GIT=1; fi
+
 if [[ "$SKIP_PULL" -eq 0 ]]; then
-  echo "→ git fetch origin"
-  git fetch --quiet origin
-  echo "→ git pull --ff-only origin main"
-  git pull --ff-only origin main
+  if [[ "$HAS_GIT" -eq 0 ]]; then
+    echo "no .git directory here — skipping git pull (sync source out-of-band, e.g. rsync, before rerunning)." >&2
+    echo "if you want this checkout to be git-tracked, run \`git init && git remote add origin <url> && git fetch && git reset --hard origin/main\`." >&2
+  else
+    echo "→ git fetch origin"
+    git fetch --quiet origin
+    echo "→ git pull --ff-only origin main"
+    git pull --ff-only origin main
+  fi
 fi
 
-CURRENT_COMMIT="$(git rev-parse --short HEAD)"
-echo "→ at commit: $CURRENT_COMMIT"
+if [[ "$HAS_GIT" -eq 1 ]]; then
+  CURRENT_COMMIT="$(git rev-parse --short HEAD)"
+  echo "→ at commit: $CURRENT_COMMIT"
+else
+  CURRENT_COMMIT="(no-git)"
+  echo "→ no .git — rebuilding from current source on disk"
+fi
 
 echo "→ docker compose -f deploy/docker-compose.yml build pond-host"
 docker compose -f deploy/docker-compose.yml build pond-host
