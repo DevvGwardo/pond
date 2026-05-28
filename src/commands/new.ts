@@ -318,13 +318,30 @@ export const newCommand = defineCommand({
         eraseLive()
 
         if (result.ok) {
+          const sv = fileSize(serverPath)
+          const cl = fileSize(clientPath)
+          // A clean exit is not proof the agent built anything: an agent whose
+          // own LLM call fails (e.g. a 404 from its backend) can still exit 0
+          // and leave both files at their scaffolded stub size. Treat "exited
+          // ok but wrote nothing" as a failure so we cascade to the next
+          // detected agent instead of reporting a successful build that
+          // produced an empty stub.
+          const wroteServer = sv !== null && sv !== baselineServer
+          const wroteClient = cl !== null && cl !== baselineClient
+          if (!wroteServer && !wroteClient) {
+            errors.push({ name: candidate.name, error: "exited without modifying server/index.ts or client/index.tsx" })
+            console.error(`\n  ${candidate.name} produced no changes (files left at stub size) — treating as failure`)
+            const remaining = detected.slice(detected.indexOf(candidate) + 1)
+            if (remaining.length) {
+              console.error(`  Falling back to: ${remaining.map((a) => a.name).join(" → ")}`)
+            }
+            continue
+          }
           const summary = supportsLiveEvents
             ? ` — ${toolCount} action${toolCount === 1 ? "" : "s"}`
             : totalBytes > 0
               ? ` — ${(totalBytes / 1024).toFixed(1)} KB streamed`
               : ""
-          const sv = fileSize(serverPath)
-          const cl = fileSize(clientPath)
           console.log(`\n  ${candidate.name} finished in ${fmtElapsed(Date.now() - startedAt)}${summary}`)
           if (sv !== null && cl !== null) {
             console.log(`    server/index.ts: ${fmtBytes(sv)}    client/index.tsx: ${fmtBytes(cl)}`)
