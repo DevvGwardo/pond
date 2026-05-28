@@ -1,5 +1,5 @@
-import { Fragment } from "preact"
-import { useEffect, useMemo, useState } from "preact/hooks"
+import { Fragment, type VNode } from "preact"
+import { useEffect, useMemo, useRef, useState } from "preact/hooks"
 
 declare global {
   interface Window {
@@ -39,6 +39,21 @@ function storeToken(t: string) {
 function clearToken() {
   try {
     window.localStorage.removeItem(TOKEN_KEY)
+  } catch {}
+}
+
+const VIEW_KEY = "pond-dashboard-view"
+type ProjectView = "grid" | "list"
+function loadView(): ProjectView {
+  try {
+    return window.localStorage.getItem(VIEW_KEY) === "list" ? "list" : "grid"
+  } catch {
+    return "grid"
+  }
+}
+function storeView(v: ProjectView) {
+  try {
+    window.localStorage.setItem(VIEW_KEY, v)
   } catch {}
 }
 
@@ -346,6 +361,11 @@ function Workspace({
   const [err, setErr] = useState<string | null>(null)
   const [reloadKey, setReloadKey] = useState(0)
   const [flash, setFlash] = useState<string | null>(null)
+  const [view, setView] = useState<ProjectView>(() => loadView())
+  function chooseView(v: ProjectView) {
+    setView(v)
+    storeView(v)
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -484,21 +504,26 @@ function Workspace({
         </div>
       ) : null}
       <main class="mx-auto max-w-7xl px-6 py-8">
-        <section class="grid grid-cols-2 gap-3 sm:grid-cols-4 mb-8">
+        <section class="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
           <KpiTile label="Total deploys" value={stats.total} accent />
           <KpiTile label="Live" value={stats.live} accent />
           <KpiTile label="Anonymous" value={stats.anon} accent={stats.anon > 0} muted={stats.anon === 0} />
           <KpiTile label="Owned by you" value={stats.mine} accent />
         </section>
 
+        <ActivityChart deploys={deploys} className="mb-8" />
+
         <section>
-          <div class="mb-3 flex items-end justify-between">
+          <div class="mb-3 flex items-end justify-between gap-3">
             <h2 class="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500">Your projects</h2>
-            {!loading && deploys.length > 0 ? (
-              <p class="text-xs text-zinc-600">
-                {deploys.length} {deploys.length === 1 ? "result" : "results"}
-              </p>
-            ) : null}
+            <div class="flex items-center gap-3">
+              {!loading && deploys.length > 0 ? (
+                <p class="text-xs text-zinc-600">
+                  {deploys.length} {deploys.length === 1 ? "result" : "results"}
+                </p>
+              ) : null}
+              <ViewToggle view={view} onChange={chooseView} />
+            </div>
           </div>
           {loading ? (
             <div class="rounded-xl border border-zinc-900 bg-zinc-950 px-5 py-12 text-center text-sm text-zinc-500">
@@ -513,6 +538,19 @@ function Workspace({
                   pond new my-app && cd my-app && pond deploy
                 </code>
               </p>
+            </div>
+          ) : view === "grid" ? (
+            <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {deploys.map((d) => (
+                <DeployGridCard
+                  key={d.deployId}
+                  d={d}
+                  me={me}
+                  token={token}
+                  onRotateClaim={() => void handleRotateClaim(d)}
+                  onDelete={() => void handleDelete(d)}
+                />
+              ))}
             </div>
           ) : (
             <div class="space-y-3">
@@ -553,16 +591,44 @@ function KpiTile({
       <p class={`mt-2 font-mono text-3xl font-semibold tabular-nums ${muted ? "text-zinc-600" : "text-zinc-50"}`}>
         {value}
       </p>
-      {accent && !muted ? (
-        <svg
-          class="pointer-events-none absolute bottom-0 left-0 h-8 w-12"
-          viewBox="0 0 48 32"
-          preserveAspectRatio="none"
-        >
-          <polygon points="0,32 48,32 0,0" fill="rgb(16 185 129 / 0.18)" />
-          <polyline points="0,32 48,32" stroke="rgb(16 185 129 / 0.6)" stroke-width="1" fill="none" />
-        </svg>
-      ) : null}
+    </div>
+  )
+}
+
+function ViewToggle({ view, onChange }: { view: ProjectView; onChange: (v: ProjectView) => void }) {
+  const btn = (v: ProjectView, label: string, icon: VNode) => (
+    <button
+      type="button"
+      aria-pressed={view === v}
+      title={`${label} view`}
+      onClick={() => onChange(v)}
+      class={`flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium transition ${
+        view === v ? "bg-zinc-800 text-zinc-100" : "text-zinc-500 hover:text-zinc-300"
+      }`}
+    >
+      {icon}
+      <span class="hidden sm:inline">{label}</span>
+    </button>
+  )
+  const gridIcon = (
+    <svg viewBox="0 0 16 16" class="h-3.5 w-3.5" fill="currentColor" aria-hidden="true">
+      <rect x="1" y="1" width="6" height="6" rx="1" />
+      <rect x="9" y="1" width="6" height="6" rx="1" />
+      <rect x="1" y="9" width="6" height="6" rx="1" />
+      <rect x="9" y="9" width="6" height="6" rx="1" />
+    </svg>
+  )
+  const listIcon = (
+    <svg viewBox="0 0 16 16" class="h-3.5 w-3.5" fill="currentColor" aria-hidden="true">
+      <rect x="1" y="2" width="14" height="2.5" rx="1" />
+      <rect x="1" y="6.75" width="14" height="2.5" rx="1" />
+      <rect x="1" y="11.5" width="14" height="2.5" rx="1" />
+    </svg>
+  )
+  return (
+    <div class="flex items-center gap-0.5 rounded-lg border border-zinc-800 bg-zinc-950 p-0.5">
+      {btn("grid", "Grid", gridIcon)}
+      {btn("list", "List", listIcon)}
     </div>
   )
 }
@@ -641,6 +707,208 @@ function DeployCard({
               </button>
               <button
                 class="rounded-md border border-red-900/60 bg-black px-3 py-1.5 text-xs text-red-300 transition hover:border-red-700 hover:bg-red-950/40"
+                onClick={onDelete}
+              >
+                Delete
+              </button>
+            </Fragment>
+          ) : null}
+        </div>
+      </div>
+    </article>
+  )
+}
+
+// Day-by-day app-creation activity over the trailing window, bucketed from each
+// deploy's createdAt. Pure client-side — no extra API call.
+function ActivityChart({ deploys, className = "" }: { deploys: DeployRow[]; className?: string }) {
+  const DAYS = 30
+  const { bars, max, total, firstLabel, midLabel } = useMemo(() => {
+    const now = new Date()
+    const startMs = new Date(now.getFullYear(), now.getMonth(), now.getDate() - (DAYS - 1)).getTime()
+    const counts = new Array<number>(DAYS).fill(0)
+    for (const d of deploys) {
+      const t = Date.parse(d.createdAt)
+      if (Number.isNaN(t)) continue
+      const dt = new Date(t)
+      const dayMs = new Date(dt.getFullYear(), dt.getMonth(), dt.getDate()).getTime()
+      const idx = Math.round((dayMs - startMs) / 86_400_000)
+      if (idx >= 0 && idx < DAYS) counts[idx]++
+    }
+    const bars = counts.map((c, i) => ({ c, date: new Date(startMs + i * 86_400_000) }))
+    const fmt = (d: Date) => d.toLocaleDateString(undefined, { month: "short", day: "numeric" })
+    return {
+      bars,
+      max: Math.max(1, ...counts),
+      total: counts.reduce((a, b) => a + b, 0),
+      firstLabel: fmt(bars[0].date),
+      midLabel: fmt(bars[Math.floor(DAYS / 2)].date),
+    }
+  }, [deploys])
+
+  return (
+    <section class={`rounded-xl border border-zinc-900 bg-zinc-950 px-5 py-4 ${className}`}>
+      <div class="mb-3 flex items-baseline justify-between gap-3">
+        <h2 class="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500">Activity</h2>
+        <p class="text-xs text-zinc-600">
+          <span class="font-mono text-zinc-300">{total}</span> {total === 1 ? "app" : "apps"} created · last {DAYS} days
+        </p>
+      </div>
+      <div class="flex h-28 items-end gap-[3px]">
+        {bars.map((b, i) => {
+          const h = b.c === 0 ? 2 : Math.max(6, Math.round((b.c / max) * 100))
+          const label = `${b.date.toLocaleDateString(undefined, {
+            weekday: "short",
+            month: "short",
+            day: "numeric",
+          })}: ${b.c} ${b.c === 1 ? "app" : "apps"}`
+          return (
+            <div
+              key={i}
+              title={label}
+              class={`flex-1 rounded-sm transition ${
+                b.c > 0 ? "bg-emerald-500/55 hover:bg-emerald-400" : "bg-zinc-800/70 hover:bg-zinc-700"
+              }`}
+              style={`height:${h}%`}
+            />
+          )
+        })}
+      </div>
+      <div class="mt-2 flex justify-between text-[10px] text-zinc-600">
+        <span>{firstLabel}</span>
+        <span>{midLabel}</span>
+        <span>Today</span>
+      </div>
+    </section>
+  )
+}
+
+// Lazy, scaled live preview of a deploy's page. The iframe src is only set once
+// the card scrolls near the viewport (avoids loading every deploy at once); a
+// fallback tile shows underneath for apps that refuse framing or haven't loaded.
+function LiveThumb({ url, title, fallback }: { url: string; title: string; fallback: string }) {
+  const ref = useRef<HTMLDivElement | null>(null)
+  const [inView, setInView] = useState(false)
+  const [loaded, setLoaded] = useState(false)
+  useEffect(() => {
+    if (inView) return
+    const el = ref.current
+    if (!el) return
+    if (typeof IntersectionObserver === "undefined") {
+      setInView(true)
+      return
+    }
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          setInView(true)
+          io.disconnect()
+        }
+      },
+      { rootMargin: "300px" },
+    )
+    io.observe(el)
+    return () => io.disconnect()
+  }, [inView])
+  return (
+    <div ref={ref} class="relative h-40 w-full overflow-hidden border-b border-zinc-900 bg-zinc-900">
+      <div class="absolute inset-0 flex items-center justify-center bg-[radial-gradient(circle_at_50%_35%,rgba(16,185,129,0.07),transparent_70%)]">
+        <span class="max-w-[80%] truncate px-2 font-mono text-[11px] text-zinc-700">{fallback}</span>
+      </div>
+      {inView ? (
+        <iframe
+          src={url}
+          title={title}
+          loading="lazy"
+          tabIndex={-1}
+          aria-hidden="true"
+          sandbox="allow-scripts allow-same-origin"
+          referrerpolicy="no-referrer"
+          onLoad={() => setLoaded(true)}
+          class={`pointer-events-none absolute left-0 top-0 origin-top-left transition-opacity duration-500 ${
+            loaded ? "opacity-100" : "opacity-0"
+          }`}
+          style="width:1000px;height:625px;transform:scale(0.4);border:0;background:#fff"
+        />
+      ) : null}
+      <span class="pointer-events-none absolute right-2 top-2 rounded bg-black/60 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-zinc-300 opacity-0 backdrop-blur transition group-hover:opacity-100">
+        live
+      </span>
+      <div class="pointer-events-none absolute inset-0 ring-1 ring-inset ring-white/5" />
+    </div>
+  )
+}
+
+function DeployGridCard({
+  d,
+  me,
+  token,
+  onRotateClaim,
+  onDelete,
+}: {
+  d: DeployRow
+  me: Me
+  token: string
+  onRotateClaim: () => void
+  onDelete: () => void
+}) {
+  const isOwner = d.ownerId === me.id
+  const heading = d.title?.trim() || "Untitled project"
+  const url = primaryUrl(d)
+  const display = url.replace(/^https?:\/\//, "")
+  const ideHref = `/ide/${d.deployId}#bearer=${encodeURIComponent(token)}`
+  return (
+    <article class="group flex flex-col overflow-hidden rounded-xl border border-zinc-900 bg-zinc-950 transition hover:border-zinc-700">
+      <a href={url} target="_blank" rel="noreferrer" class="block">
+        <LiveThumb url={url} title={heading} fallback={display} />
+      </a>
+      <div class="flex min-w-0 flex-1 flex-col gap-3 px-4 py-3">
+        <div class="min-w-0">
+          <div class="flex items-center gap-2">
+            <a
+              href={`#d/${d.deployId}`}
+              class="truncate text-sm font-semibold text-zinc-50 transition hover:text-emerald-300"
+            >
+              {heading}
+            </a>
+            <StatusPill d={d} isOwner={isOwner} />
+          </div>
+          <a
+            class="mt-1 block truncate font-mono text-xs text-zinc-500 hover:text-emerald-300"
+            href={url}
+            target="_blank"
+            rel="noreferrer"
+          >
+            {display}
+          </a>
+          <p class="mt-0.5 text-[11px] text-zinc-600">{humanAge(d.createdAt)}</p>
+        </div>
+        <div class="mt-auto flex flex-wrap items-center gap-1.5">
+          <a
+            class="rounded-md border border-zinc-800 bg-black px-2.5 py-1 text-xs text-zinc-300 transition hover:border-zinc-600 hover:text-zinc-100"
+            href={url}
+            target="_blank"
+            rel="noreferrer"
+          >
+            Open
+          </a>
+          <a
+            class="rounded-md bg-zinc-100 px-2.5 py-1 text-xs font-semibold text-zinc-950 transition hover:bg-white"
+            href={ideHref}
+          >
+            IDE →
+          </a>
+          {isOwner ? (
+            <Fragment>
+              <button
+                class="rounded-md border border-zinc-800 bg-black px-2.5 py-1 text-xs text-zinc-300 transition hover:border-zinc-600 hover:text-zinc-100"
+                onClick={onRotateClaim}
+                title="Rotate claim token (copied to clipboard)"
+              >
+                Rotate
+              </button>
+              <button
+                class="rounded-md border border-red-900/60 bg-black px-2.5 py-1 text-xs text-red-300 transition hover:border-red-700 hover:bg-red-950/40"
                 onClick={onDelete}
               >
                 Delete
