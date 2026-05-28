@@ -245,7 +245,10 @@ export async function copyTemplate(
           "db:dump": "pond db dump",
         },
         devDependencies: {
-          pond: `^${POND_VERSION}`,
+          // The runtime is published as `pondsh`; alias it to `pond` so the
+          // `pond/server` + `pond/client` import paths resolve and `npm install`
+          // succeeds. (`pond` on npm is an unrelated package.)
+          pond: `npm:pondsh@^${POND_VERSION}`,
         },
       },
       null,
