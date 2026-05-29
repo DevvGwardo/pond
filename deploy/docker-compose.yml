@@ -34,6 +34,14 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    # The entrypoint starts as root to chown the mounted volume, then drops to
+    # `node` via gosu — which needs these three caps. The control plane itself
+    # ends up unprivileged (gosu switches to uid 1000, clearing caps). Without
+    # these, the container crash-loops on "failed switching to node".
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
     # The tunnel reaches us over the compose network — bind to 0.0.0.0
     # *inside* the container only; the host port is NOT published.
     expose:
