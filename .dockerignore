@@ -1,0 +1,16 @@
+node_modules
+.git
+.pond
+.pond-host
+**/*.db
+**/*.sqlite
+**/*.sqlite3
+**/*.js.map
+.env
+.env.pond.server
+deploy/.env
+deploy/cloudflared/config.yml
+deploy/cloudflared/credentials.json
+.claude
+output
+*.log

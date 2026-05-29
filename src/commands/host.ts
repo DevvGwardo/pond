@@ -567,10 +567,14 @@ export const hostCommand = defineCommand({
     },
   },
   async run({ args }) {
-    const port = parseInt(typeof args.port === "string" ? args.port : "8787", 10)
+    // Honor the platform-provided PORT env (Railway, Heroku-style PaaS) first so
+    // the host binds the port the ingress proxy probes; fall back to --port then
+    // the default. Without this a PaaS healthcheck can't reach the control plane.
+    const port = parseInt(process.env.PORT ?? (typeof args.port === "string" ? args.port : "8787"), 10)
     const hostname = typeof args.host === "string" && args.host ? args.host : "127.0.0.1"
     const publicHost =
-      typeof args["public-host"] === "string" && args["public-host"] ? args["public-host"] : "localhost"
+      process.env.POND_PUBLIC_HOST ??
+      (typeof args["public-host"] === "string" && args["public-host"] ? args["public-host"] : "localhost")
     const publicBaseUrlRaw =
       process.env.POND_PUBLIC_BASE_URL ?? (typeof args["public-base-url"] === "string" ? args["public-base-url"] : "")
     let publicBaseUrl: URL | null = null
