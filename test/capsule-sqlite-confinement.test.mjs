@@ -113,6 +113,51 @@ try {
   out.push(/attach.*(disabl|sandbox)/i.test(e.message) ? "attach-comment:BLOCKED" : "attach-comment:FAIL-msg:" + e.message)
 }
 
+// 3d) THE NATIVE-HANDLE EXPLOIT: the JS exec/prepare wrappers sit over a raw
+//     native db object. Reach it and call its native runner directly — this
+//     skips the JS-wrapper guard entirely and must be blocked at the native
+//     layer.
+function nativeHandle(d) {
+  for (const s of Object.getOwnPropertySymbols(d)) {
+    const v = d[s]
+    if (v && typeof v === "object") {
+      const p = Object.getPrototypeOf(v)
+      if (p && typeof p.exec === "function" && typeof p.prepare === "function") return v
+    }
+  }
+  return null
+}
+try {
+  const d = new Database(":memory:")
+  const h = nativeHandle(d)
+  if (!h) { out.push("attach-native:FAIL-no-handle") }
+  else {
+    h[RUN]("ATTACH DATABASE '" + SIB + "' AS n")
+    let leaked = ""
+    try { leaked = JSON.stringify(d.prepare("SELECT v FROM n.s").get()) } catch {}
+    d.close()
+    out.push("attach-native:FAIL-ran leaked=" + leaked)
+  }
+} catch (e) {
+  out.push(/attach.*(disabl|sandbox)/i.test(e.message) ? "attach-native:BLOCKED" : "attach-native:FAIL-msg:" + e.message)
+}
+
+// 3e) NATIVE CONSTRUCTOR open of the sibling, reachable via the handle's
+//     .constructor. A plain SELECT would then read it with NO ATTACH keyword,
+//     so a SQL-text guard can't catch this — the path guard on the native ctor
+//     must.
+try {
+  const d = new Database(":memory:")
+  const h = nativeHandle(d)
+  const NativeCtor = h.constructor
+  const stolen = new NativeCtor(SIB, "x", false, true, false, 5000, null, null)
+  let leaked = ""
+  try { leaked = JSON.stringify(stolen.prepare("SELECT v FROM s", stolen, false).get()) } catch {}
+  out.push("ctor-native:FAIL-ran leaked=" + leaked)
+} catch (e) {
+  out.push(/outside the capsule sandbox/i.test(e.message) ? "ctor-native:BLOCKED" : "ctor-native:FAIL-msg:" + e.message)
+}
+
 // 4) VACUUM INTO an outside path must THROW.
 try {
   const d = new Database(":memory:")
@@ -163,6 +208,8 @@ test("installSandboxHardening blocks better-sqlite3 ATTACH/VACUUM file-escape", 
   assert.match(out, /attach-prepare:BLOCKED/, `ATTACH via prepare must be blocked: ${out}`)
   assert.match(out, /attach-run:BLOCKED/, `ATTACH via raw runner must be blocked: ${out}`)
   assert.match(out, /attach-comment:BLOCKED/, `comment-obfuscated ATTACH must be blocked: ${out}`)
+  assert.match(out, /attach-native:BLOCKED/, `ATTACH via the raw native handle must be blocked: ${out}`)
+  assert.match(out, /ctor-native:BLOCKED/, `native-constructor open of sibling must be blocked: ${out}`)
   assert.match(out, /vacuum:BLOCKED/, `VACUUM INTO outside path must be blocked: ${out}`)
   assert.match(out, /ctor:BLOCKED/, `constructor open of sibling must be blocked: ${out}`)
 })

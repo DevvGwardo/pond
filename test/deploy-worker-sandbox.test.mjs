@@ -21,12 +21,16 @@ const REPO_ROOT = path.resolve(import.meta.dirname, "..")
 const WORKER = path.join(REPO_ROOT, "src", "host", "deploy-worker.js")
 
 function runHardenedProbe() {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pond-sandbox-"))
+  // realpath so cwd / process.cwd() / the db path all agree (macOS /var ->
+  // /private/var), exactly as forkDeploy realpaths realDir before forking.
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pond-sandbox-")))
   const dbPath = path.join(tmp, "data.db")
   const src = `
 import { installSandboxHardening } from ${JSON.stringify(WORKER)}
 import { createRequire } from "node:module"
-const require = createRequire(import.meta.url)
+// Anchor module resolution at the repo (not cwd/import.meta.url): the worker
+// runs from the deploy dir, which has no node_modules of its own.
+const require = createRequire(${JSON.stringify(path.join(REPO_ROOT, "package.json"))})
 const Database = require("better-sqlite3")
 // pond's runtime opens the capsule db before hardening runs:
 const pre = new Database(${JSON.stringify(dbPath)})
@@ -68,7 +72,10 @@ console.log(out.join("\\n"))
         "-e",
         src,
       ],
-      { encoding: "utf-8", timeout: 20000 },
+      // Run from the deploy dir, exactly as the real worker does (forkDeploy
+      // sets cwd: realDir). The capsule's own data.db lives in cwd, which is what
+      // the native-construction path guard confines opens to.
+      { encoding: "utf-8", timeout: 20000, cwd: tmp },
     )
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true })

