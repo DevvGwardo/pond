@@ -1,4 +1,6 @@
+import * as fs from "node:fs"
 import { createRequire } from "node:module"
+import * as path from "node:path"
 import { serveBundleServer } from "../start-server.js"
 
 interface BootOptions {
@@ -62,14 +64,109 @@ export function installSandboxHardening() {
     } catch {
       // binding already warm, or :memory: unsupported here — best-effort
     }
-    const proto = bs?.prototype
-    if (proto && typeof proto.loadExtension === "function") {
-      Object.defineProperty(proto, "loadExtension", {
-        value: () => {
-          throw new Error("SQLite extension loading is disabled in the capsule sandbox")
+
+    // better-sqlite3's native binding calls libc open() directly, bypassing
+    // Node's --permission model, so it is a confused-deputy file primitive for a
+    // capsule. Three vectors must be closed (the dlopen/loadExtension seals below
+    // cover native-addon loading separately):
+    //   1. `new Database('<path>')` — open an arbitrary file as the main db.
+    //      --permission already blocks this (better-sqlite3 does a JS-level fs
+    //      pre-check on construction, verified), but we validate too so the
+    //      boundary survives a future better-sqlite3 that drops that pre-check.
+    //   2. `ATTACH DATABASE '<path>'` — opens a SECOND file with NO --permission
+    //      check at all (pure native open). This is the real read-exfil: a
+    //      capsule can `new Database(':memory:')` then attach /data/control.db or
+    //      a sibling deploy's db and read it. Verified empirically.
+    //   3. `VACUUM INTO '<path>'` / `db.backup('<path>')` — write the db to an
+    //      arbitrary path (a clobber primitive).
+    // ATTACH/VACUUM can only reach SQLite through the exec/prepare entry points,
+    // and the tokenizer needs the literal keyword — so guarding the SQL text at
+    // that boundary cannot be bypassed. We block ATTACH outright (capsules don't
+    // need cross-db access) rather than parsing its path expression.
+    const allowedRoot = path.resolve(process.cwd())
+    const isInsideRoot = (target: string): boolean => {
+      let resolved: string
+      try {
+        if (fs.existsSync(target)) resolved = fs.realpathSync(target)
+        else {
+          const parent = path.dirname(target)
+          if (!fs.existsSync(parent)) return false
+          resolved = path.join(fs.realpathSync(parent), path.basename(target))
+        }
+      } catch {
+        return false
+      }
+      return resolved === allowedRoot || resolved.startsWith(allowedRoot + path.sep)
+    }
+    const validateSqlitePath = (dbPath: unknown): void => {
+      if (typeof dbPath !== "string" || dbPath === ":memory:" || dbPath === "") return
+      if (!isInsideRoot(dbPath)) {
+        throw new Error(`SQLite database path "${dbPath}" is outside the capsule sandbox`)
+      }
+    }
+    // Strip comments so a `-- ATTACH` / block comment can't mask or smuggle a
+    // keyword. String literals are kept so a VACUUM INTO target path stays
+    // visible for validation; the leading-keyword checks don't false-match on
+    // strings (a statement only "starts with" ATTACH/VACUUM if it really is one).
+    const stripSqlComments = (sql: string): string => sql.replace(/--[^\n]*/g, " ").replace(/\/\*[\s\S]*?\*\//g, " ")
+    const assertNoSqliteFileEscape = (sql: unknown): void => {
+      if (typeof sql !== "string") return
+      for (const raw of stripSqlComments(sql).split(";")) {
+        const stmt = raw.trim()
+        // ATTACH opens a second file with no --permission check — block it
+        // outright (capsules have no need to attach other databases).
+        if (/^attach\b/i.test(stmt)) {
+          throw new Error("ATTACH DATABASE is disabled in the capsule sandbox")
+        }
+        // VACUUM INTO writes a db copy to a path via native open(). pond's own
+        // backup endpoint snapshots into the capsule's deploy dir, so allow an
+        // in-root target and reject writing the db anywhere else.
+        if (/^vacuum\b/i.test(stmt) && /\binto\b/i.test(stmt)) {
+          const m = stmt.match(/\binto\s+'((?:''|[^'])*)'/i)
+          const target = m ? m[1].replace(/''/g, "'") : null
+          if (target === null || !isInsideRoot(target)) {
+            throw new Error("VACUUM INTO outside the capsule sandbox is disabled")
+          }
+        }
+      }
+    }
+    const bsPath = require.resolve("better-sqlite3")
+    const bsModule = require.cache[bsPath]
+    if (bsModule) {
+      const OriginalDatabase = bsModule.exports
+      bsModule.exports = new Proxy(OriginalDatabase, {
+        construct(target, args, newTarget) {
+          validateSqlitePath(args[0])
+          return Reflect.construct(target, args, newTarget)
         },
-        writable: false,
-        configurable: false,
+      })
+    }
+
+    const proto = bs?.prototype as Record<string, unknown> | undefined
+    if (proto) {
+      const sealMethod = (name: string, value: (...a: any[]) => unknown): void => {
+        if (typeof proto[name] === "function") {
+          Object.defineProperty(proto, name, { value, writable: false, configurable: false })
+        }
+      }
+      // Guard the two SQL entry points: any ATTACH / VACUUM INTO is rejected.
+      for (const name of ["exec", "prepare"]) {
+        const original = proto[name] as (this: unknown, sql: string) => unknown
+        sealMethod(name, function (this: unknown, sql: string) {
+          assertNoSqliteFileEscape(sql)
+          return original.call(this, sql)
+        })
+      }
+      // backup(dest) opens dest via native code — confine it to the deploy dir.
+      const originalBackup = proto.backup as ((this: unknown, dest: unknown, ...rest: any[]) => unknown) | undefined
+      if (typeof originalBackup === "function") {
+        sealMethod("backup", function (this: unknown, dest: unknown, ...rest: any[]) {
+          validateSqlitePath(dest)
+          return originalBackup.call(this, dest, ...rest)
+        })
+      }
+      sealMethod("loadExtension", () => {
+        throw new Error("SQLite extension loading is disabled in the capsule sandbox")
       })
     }
   } catch {
