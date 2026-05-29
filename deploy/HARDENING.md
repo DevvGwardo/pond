@@ -65,6 +65,22 @@ Then set `POND_CAPSULE_CGROUP_ROOT=/sys/fs/cgroup/pond` in `deploy/.env`. The
 user (see §3), and cgroup v2 delegation hands the subtree to that user so the
 control plane can create per-capsule cgroups without root.
 
+**Docker-compose path (systemd cgroup driver).** When Docker uses the systemd
+cgroup driver, the compose service places the container under `pond.slice`
+(`cgroup: host` + `cgroup_parent: pond.slice`) and points pond at
+`POND_CAPSULE_CGROUP_ROOT=/sys/fs/cgroup/pond.slice`. Docker recreates
+`pond.slice` root-owned on every container start and strips its delegation, so
+delegation must be re-applied each time — not just at boot. Install
+`pond-cgroup-watch.service` (see its header); it watches Docker for pond-host
+start events and runs `pond-cgroup-delegate.sh`, which re-grants the slice to
+uid 1000 **and purges stale per-capsule cgroups** left by the previous
+container. The purge is essential: re-enabling controllers on a slice that still
+has children makes the kernel re-create their `memory.max`/`pids.max`/`cpu.max`
+root-owned, and the uid-1000 control plane then can't write them — workers get
+placed but uncapped (`memory.max=max`). With the watcher, per-capsule caps
+survive a `docker compose up -d` recreate with no reboot; verify after a
+recreate that a `capsule-*` cgroup shows a real `memory.max`/`pids.max`.
+
 ## 3. Non-root container (Dockerfile)
 
 The Dockerfile now runs as `node` (uid 1000) with `cap_drop: ALL` and

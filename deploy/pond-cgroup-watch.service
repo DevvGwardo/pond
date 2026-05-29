@@ -1,0 +1,26 @@
+# Re-delegates pond.slice to the pond container (uid 1000) on every (re)start of
+# the pond-host compose service — closing the gap where a `docker compose up -d`
+# recreate would otherwise drop per-capsule cgroup isolation until the next boot.
+# Replaces the boot-only pond-cgroup-delegate.service oneshot.
+#
+# Required only for the docker-compose path on a host using Docker's systemd
+# cgroup driver (see deploy/pond-cgroup-delegate.sh + deploy/HARDENING.md §2).
+#
+# Install:
+#   cp deploy/pond-cgroup-delegate.sh deploy/pond-cgroup-watch.sh /usr/local/sbin/
+#   chmod +x /usr/local/sbin/pond-cgroup-delegate.sh /usr/local/sbin/pond-cgroup-watch.sh
+#   cp deploy/pond-cgroup-watch.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now pond-cgroup-watch.service
+[Unit]
+Description=Re-delegate pond.slice to the pond container on every (re)start
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/pond-cgroup-watch.sh
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
