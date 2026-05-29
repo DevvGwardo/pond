@@ -30,6 +30,13 @@ services:
     # Defense-in-depth: a sandbox-escaping capsule shouldn't be able to gain
     # privileges or use ambient capabilities. The control plane needs none of
     # the default caps (cgroup management goes through v2 delegation, not caps).
+    # Run in the host cgroup namespace and under a dedicated delegated slice so
+    # the control plane (uid 1000) can move its manager + per-capsule workers
+    # into child cgroups of POND_CAPSULE_CGROUP_ROOT (=/sys/fs/cgroup/pond.slice).
+    # Without both, capsule pids start in the docker scope and the cross-subtree
+    # move is denied → "could not place deploy … in a cgroup".
+    cgroup: host
+    cgroup_parent: pond.slice
     security_opt:
       - no-new-privileges:true
     cap_drop:
