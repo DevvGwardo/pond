@@ -506,6 +506,20 @@ export const hostCommand = defineCommand({
         "Also POND_MAX_ACTIVE_CAPSULES.",
       default: "0",
     },
+    "anon-requests-per-day": {
+      type: "string",
+      description:
+        "Per-anonymous-deploy daily request cap (every proxied HTTP request counts). Over the cap returns 429 " +
+        "until the next UTC day. Claiming a deploy lifts the cap. 0 = unlimited. Also POND_ANON_REQUESTS_PER_DAY.",
+      default: "10000",
+    },
+    "anon-mutations-per-day": {
+      type: "string",
+      description:
+        "Per-anonymous-deploy daily mutation cap (POST /api/mutation/*). Over the cap returns 429 until the next " +
+        "UTC day. Claiming a deploy lifts the cap. 0 = unlimited. Also POND_ANON_MUTATIONS_PER_DAY.",
+      default: "1000",
+    },
     "turnstile-secret": {
       type: "string",
       description:
@@ -608,6 +622,22 @@ export const hostCommand = defineCommand({
       parseInt(
         process.env.POND_MAX_ACTIVE_CAPSULES ??
           (typeof args["max-active-capsules"] === "string" ? args["max-active-capsules"] : "0"),
+        10,
+      ) || 0,
+    )
+    const anonRequestsPerDay = Math.max(
+      0,
+      parseInt(
+        process.env.POND_ANON_REQUESTS_PER_DAY ??
+          (typeof args["anon-requests-per-day"] === "string" ? args["anon-requests-per-day"] : "10000"),
+        10,
+      ) || 0,
+    )
+    const anonMutationsPerDay = Math.max(
+      0,
+      parseInt(
+        process.env.POND_ANON_MUTATIONS_PER_DAY ??
+          (typeof args["anon-mutations-per-day"] === "string" ? args["anon-mutations-per-day"] : "1000"),
         10,
       ) || 0,
     )
@@ -1131,6 +1161,13 @@ export const hostCommand = defineCommand({
         controlDb.pruneRateLimits(ANON_DEPLOY_RATE_WINDOW_MS)
       } catch (e) {
         console.error("sweep prune rate_limits:", e)
+      }
+      try {
+        // Daily usage counters are only read for the current UTC day; drop
+        // everything older so the table stays one row per active deploy.
+        controlDb.pruneDailyUsage(new Date().toISOString().slice(0, 10))
+      } catch (e) {
+        console.error("sweep prune deploy_usage:", e)
       }
     }
     runSweep()
@@ -3357,6 +3394,30 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
 
       const deployId = deployIdFromHost(c.req.header("host"))
       if (!deployId) return c.json({ error: "Not found" }, 404)
+      // Per-deploy daily quota — anonymous deploys only; claiming a deploy lifts
+      // it. Checked here (before ensureBooted) so an over-quota app can't even
+      // wake its capsule. Every proxied request counts; POST /api/mutation/*
+      // also counts as a mutation. Owned/claimed deploys skip this entirely.
+      if ((anonRequestsPerDay > 0 || anonMutationsPerDay > 0) && controlDb.findAnonymous(deployId)) {
+        const isMutation = c.req.method === "POST" && c.req.path.startsWith("/api/mutation/")
+        const day = new Date().toISOString().slice(0, 10)
+        const verdict = controlDb.consumeDailyUsage(deployId, day, isMutation, anonRequestsPerDay, anonMutationsPerDay)
+        if (!verdict.ok) {
+          const now = Date.now()
+          const nextUtcDay = Date.UTC(
+            new Date(now).getUTCFullYear(),
+            new Date(now).getUTCMonth(),
+            new Date(now).getUTCDate() + 1,
+          )
+          const retryAfter = Math.max(1, Math.ceil((nextUtcDay - now) / 1000))
+          return new Response(
+            JSON.stringify({
+              error: `Anonymous daily ${verdict.kind} limit reached — claim the deploy or retry tomorrow`,
+            }),
+            { status: 429, headers: { "content-type": "application/json", "retry-after": String(retryAfter) } },
+          )
+        }
+      }
       const entry = runningChildren.get(deployId) ?? (await ensureBooted(deployId))
       if (!entry) return c.json({ error: "Unknown deploy" }, 404)
       const url = new URL(c.req.url)
@@ -3482,6 +3543,11 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
       )
     } else {
       console.log("  anonymous deploys: disabled\n")
+    }
+    if (anonRequestsPerDay > 0 || anonMutationsPerDay > 0) {
+      console.log(
+        `  anonymous daily quota: ${anonRequestsPerDay || "∞"} requests / ${anonMutationsPerDay || "∞"} mutations per deploy (429 over; lifted on claim)`,
+      )
     }
     if (maxActiveCapsules > 0) {
       console.log(`  capacity: max ${maxActiveCapsules} concurrent capsules (new deploys past this get HTTP 503)`)

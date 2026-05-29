@@ -122,6 +122,21 @@ export interface ControlDb {
   rateAllow(scope: string, key: string, windowMs: number, limit: number): boolean
   /** Removes rate-limit entries older than `olderThanMs` from now (across all scopes). */
   pruneRateLimits(olderThanMs: number): number
+  /**
+   * Records one request (and, when `isMutation`, one mutation) against a
+   * deploy's rolling daily quota. Returns ok=false WITHOUT incrementing when the
+   * relevant limit is already reached, so a denied request doesn't consume
+   * quota. `day` is a UTC date key (YYYY-MM-DD). A limit <= 0 disables that axis.
+   */
+  consumeDailyUsage(
+    deployId: string,
+    day: string,
+    isMutation: boolean,
+    reqLimit: number,
+    mutLimit: number,
+  ): { ok: boolean; kind?: "request" | "mutation" }
+  /** Removes daily-usage rows for days strictly before `beforeDay` (YYYY-MM-DD). */
+  pruneDailyUsage(beforeDay: string): number
   close(): void
 }
 
@@ -195,6 +210,14 @@ export function openControlDb(dataDir: string): ControlDb {
     );
     CREATE INDEX IF NOT EXISTS idx_rate_limits_scope_key_ts ON rate_limits(scope, key, ts);
     CREATE INDEX IF NOT EXISTS idx_rate_limits_ts ON rate_limits(ts);
+    CREATE TABLE IF NOT EXISTS deploy_usage (
+      deployId TEXT NOT NULL,
+      day TEXT NOT NULL,
+      requests INTEGER NOT NULL DEFAULT 0,
+      mutations INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (deployId, day)
+    );
+    CREATE INDEX IF NOT EXISTS idx_deploy_usage_day ON deploy_usage(day);
   `)
 
   // Lightweight migration for pre-Phase-5 DBs that only had (createdAt, expiresAt).
@@ -304,6 +327,24 @@ export function openControlDb(dataDir: string): ControlDb {
     insertRate.run(scope, key, now)
     return true
   })
+
+  const getUsage = db.prepare("SELECT requests, mutations FROM deploy_usage WHERE deployId = ? AND day = ?")
+  const bumpUsage = db.prepare(
+    "INSERT INTO deploy_usage (deployId, day, requests, mutations) VALUES (?, ?, 1, ?) " +
+      "ON CONFLICT(deployId, day) DO UPDATE SET requests = requests + 1, mutations = mutations + excluded.mutations",
+  )
+  const pruneUsageStmt = db.prepare("DELETE FROM deploy_usage WHERE day < ?")
+  const consumeDailyUsageTxn = db.transaction(
+    (deployId: string, day: string, isMutation: boolean, reqLimit: number, mutLimit: number) => {
+      const row = getUsage.get(deployId, day) as { requests: number; mutations: number } | undefined
+      const requests = row?.requests ?? 0
+      const mutations = row?.mutations ?? 0
+      if (reqLimit > 0 && requests >= reqLimit) return { ok: false, kind: "request" as const }
+      if (isMutation && mutLimit > 0 && mutations >= mutLimit) return { ok: false, kind: "mutation" as const }
+      bumpUsage.run(deployId, day, isMutation ? 1 : 0)
+      return { ok: true }
+    },
+  )
 
   const insertAudit = db.prepare(
     "INSERT INTO audit_log (actor, action, targetDeployId, targetUserId, metadata) VALUES (?, ?, ?, ?, ?)",
@@ -500,6 +541,15 @@ export function openControlDb(dataDir: string): ControlDb {
       const cutoff = Date.now() - olderThanMs
       const info = pruneRateAll.run(cutoff)
       return info.changes
+    },
+    consumeDailyUsage(deployId, day, isMutation, reqLimit, mutLimit) {
+      return consumeDailyUsageTxn(deployId, day, isMutation, reqLimit, mutLimit) as {
+        ok: boolean
+        kind?: "request" | "mutation"
+      }
+    },
+    pruneDailyUsage(beforeDay) {
+      return pruneUsageStmt.run(beforeDay).changes
     },
     listAudit(opts) {
       const limit = Math.min(Math.max(opts?.limit ?? 100, 1), 1000)
