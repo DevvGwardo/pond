@@ -29,10 +29,58 @@ These are in the code and covered by the test suite:
   runtime's own better-sqlite3 binding is warmed first, so legitimate `ctx.db` use
   is unaffected. Realm escapes are denied separately: the worker runs without
   `--allow-worker` / `--allow-child-process`.
+- better-sqlite3 file primitives (`ATTACH`, `VACUUM INTO`, `backup`, and opening
+  an arbitrary file as the main db) are guarded at the **native prototype +
+  constructor** layer, not only the JS `exec`/`prepare` wrappers. This closes the
+  bypass where a capsule reaches the raw native handle (`db[cppdb]`) or the native
+  constructor (`handle.constructor` / the cached addon) to skip the wrapper guard
+  — e.g. `new handle.constructor('/data/control.db', …)` then a plain `SELECT`,
+  which carries no `ATTACH` keyword for a SQL-text guard to catch. Every open is
+  path-confined to the deploy dir. Still a JS speed bump (see §7), not a kernel
+  boundary.
 - Runtime disk watchdog stops a capsule that exceeds its disk quota; the
   `/__pond/db/restore` upload is bounded by the deploy's disk quota.
 - Per-IP anonymous rate limiting prefers `CF-Connecting-IP` (unspoofable behind
   Cloudflare) over the client-settable `X-Forwarded-For`.
+
+---
+
+## 1b. Privilege-less hosts (Railway / managed PaaS): OS hardening is unavailable
+
+§2–§6 below (cgroups, the nft egress firewall, the non-root-with-delegation
+container, `bwrap`) all require **host-level privilege**: a delegated cgroup v2
+subtree, the ability to load nftables rules, and unprivileged user namespaces.
+A managed PaaS like **Railway** grants none of these — the container runs
+without `CAP_NET_ADMIN`, `/sys/fs/cgroup` is not delegated, and `nft -f` /
+`bwrap` cannot take effect. On such a host the entire OS-enforcement layer is
+**off**, and the startup banner says so (`capsule isolation: cgroup limits OFF`,
+the `⚠ … match NOTHING` egress warning, `capsule fs isolation: OFF`).
+
+What still holds on a privilege-less host:
+
+- **Phase 1 — resource & abuse caps (active, verified live).** The control-plane
+  fixes in §1, the concurrency ceiling (`POND_MAX_ACTIVE_CAPSULES`), and the
+  per-deploy daily request/mutation quotas (`POND_ANON_REQUESTS_PER_DAY` /
+  `POND_ANON_MUTATIONS_PER_DAY`) are pure userspace and run anywhere. They bound
+  blast radius (memory/OOM, CPU monopolization, request floods) without needing
+  host privileges.
+- **The Node `--permission` sandbox** is the _only_ tenant-isolation boundary in
+  this mode — the same speed-bump described in §7, now load-bearing rather than
+  defense-in-depth. A missed native-load surface or `--permission` being off
+  (Node < 22) means a capsule could reach `control.db` and sibling secrets. The
+  directly-reachable native escapes (better-sqlite3 native handle/constructor;
+  UDP via `node:dgram`) are now sealed (§1), but egress is still restricted only
+  at the JS layer — `fetch`/`net`/`dns`/`dgram` are shimmed, yet native code (or a
+  Node internal that bypasses these JS entry points) can still reach the network.
+
+**Phase 2 — isolate runtime (the structural fix for privilege-less hosts).**
+Because the kernel boundaries can't be enabled on Railway, the path to running
+_anonymous_ (untrusted) capsules safely there is to stop relying on the OS layer
+and execute capsule code in an in-process isolate boundary instead. Until that
+lands, treat anonymous capsules on a privilege-less host as protected by the JS
+`--permission` layer only — appropriate for the current trust posture (resource
+caps + permission sandbox), not for adversarial multi-tenant workloads that
+assume a kernel boundary.
 
 ---
 
@@ -226,15 +274,24 @@ the real runtime):
 
 ## 7. Known residual gaps
 
-- **DNS / native-addon exfil** is closed only at the OS layer (nft drops 53 and
-  all non-proxy egress). The JS sandbox is defense-in-depth, not the boundary.
+- **DNS / UDP / native-addon exfil.** The JS shim blocks `fetch`,
+  `net.Socket.connect`, `node:dns` (lookup/resolve/Resolver), and `node:dgram`
+  (UDP `send`/`connect`) — closing the no-native-code exfil paths (Node's
+  `--permission` model does **not** gate the network, so UDP was otherwise wide
+  open). It remains defense-in-depth, not the boundary: native code, or a
+  Node-internal that bypasses these JS entry points (e.g. a low-level
+  `process.binding` socket), can still reach the network. Off-box exfil is closed
+  _for real_ only at the OS layer (nft drops 53 and all non-proxy egress).
 - **Filesystem isolation between tenants** rests on the Node `--permission` model
   plus the native-code lockdown (§1) **when `--capsule-fs-isolation=off`** (the
   default). In that mode every capsule and the control plane share one uid in one
   container with **no OS-level filesystem boundary behind `--permission`** — if a
   future native-load surface is missed, or `--permission` is off (Node < 22, or
   `sandboxAvailable` false), a capsule can read the control DB and sibling
-  deploys' secrets. The kernel-enforced fix now exists as an opt-in: set
+  deploys' secrets. The directly-reachable native better-sqlite3 escapes (raw
+  handle + constructor) are sealed (§1); this gap is now about _unknown/future_
+  native surfaces, not a known-open one. The kernel-enforced fix exists as an
+  opt-in: set
   `--capsule-fs-isolation=bwrap` on a Linux host (§6). Treat the lockdown as the
   speed bump and bwrap as the real boundary, exactly as the JS network shim
   relates to the nft firewall. The bwrap mechanism (allowlist + IPC) is verified
