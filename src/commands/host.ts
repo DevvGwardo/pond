@@ -496,6 +496,16 @@ export const hostCommand = defineCommand({
       description: "Max anonymous POST /api/deploys per IP per rolling hour",
       default: "5",
     },
+    "max-active-capsules": {
+      type: "string",
+      description:
+        "Hard ceiling on concurrently-running capsules. A NEW POST /api/deploys is refused with HTTP 503 once the " +
+        "box already holds this many live capsules; existing capsules keep serving, claiming, and redeploying. " +
+        "This is the admission-control backstop that stops a deploy flood from forking past the container mem_limit " +
+        "into an OOM cascade. 0 = unlimited (prior behavior). Size it to your mem_limit — see deploy/.env.example. " +
+        "Also POND_MAX_ACTIVE_CAPSULES.",
+      default: "0",
+    },
     "turnstile-secret": {
       type: "string",
       description:
@@ -593,6 +603,14 @@ export const hostCommand = defineCommand({
       typeof args["anonymous-rate-per-hour"] === "string" ? args["anonymous-rate-per-hour"] : "5",
       10,
     )
+    const maxActiveCapsules = Math.max(
+      0,
+      parseInt(
+        process.env.POND_MAX_ACTIVE_CAPSULES ??
+          (typeof args["max-active-capsules"] === "string" ? args["max-active-capsules"] : "0"),
+        10,
+      ) || 0,
+    )
     const turnstileSecret =
       process.env.POND_TURNSTILE_SECRET ??
       (typeof args["turnstile-secret"] === "string" ? args["turnstile-secret"] : "")
@@ -670,6 +688,19 @@ export const hostCommand = defineCommand({
     const ANON_DEPLOY_RATE_WINDOW_MS = 60 * 60 * 1000
     function rateAllow(ip: string): boolean {
       return controlDb.rateAllow(ANON_DEPLOY_RATE_SCOPE, ip, ANON_DEPLOY_RATE_WINDOW_MS, anonymousRateLimit)
+    }
+
+    // Global admission control. Each live deploy is a resident child process, so
+    // total memory scales with the number of concurrent capsules; past the
+    // container mem_limit the kernel OOM killer can take the control plane down
+    // with it. atCapacity() sheds NEW capsule creation with a 503 before that
+    // happens — existing capsules (serve/claim/redeploy/crash-respawn) are never
+    // blocked. `pendingBoots` reserves a slot SYNCHRONOUSLY at admission so a
+    // burst of concurrent POST /api/deploys can't all pass the check during each
+    // other's `await build` and collectively overshoot the ceiling. 0 = off.
+    let pendingBoots = 0
+    function atCapacity(): boolean {
+      return maxActiveCapsules > 0 && runningChildren.size + pendingBoots >= maxActiveCapsules
     }
 
     let hostToken = process.env.POND_HOST_TOKEN ?? ""
@@ -1378,134 +1409,151 @@ export const hostCommand = defineCommand({
             })
           }
         }
-        const quotaTemplate = isAnonymous ? ANONYMOUS_QUOTA : DEFAULT_QUOTA
-
-        const body = (await c.req.json().catch(() => null)) as {
-          sourceFiles?: unknown
-          publicInspect?: unknown
-          turnstileToken?: unknown
-        } | null
-        if (!body) return c.json({ error: "Invalid JSON body" }, 400)
-        // Human/bot challenge for anonymous deploys. No-op unless the operator
-        // configured a Turnstile secret; authenticated deploys are never
-        // challenged. Token may ride in a header or the JSON body.
-        if (isAnonymous && turnstileSecret) {
-          const headerToken = c.req.header("x-pond-turnstile-token") ?? ""
-          const bodyToken = typeof body.turnstileToken === "string" ? body.turnstileToken : ""
-          const token = headerToken || bodyToken
-          const verdict = await verifyTurnstile(turnstileSecret, token, clientIp(c))
-          if (!verdict.ok) {
-            return c.json({ error: "Turnstile verification failed", errorCodes: verdict.errorCodes }, 403)
-          }
+        // Global capacity gate (applies to anonymous AND authenticated creates):
+        // shed load with a clean 503 instead of forking past mem_limit. Only the
+        // creation of a NET-NEW capsule is gated — redeploy/claim/update of an
+        // existing deploy reuses its slot and is unaffected.
+        if (atCapacity()) {
+          return new Response(JSON.stringify({ error: "Host at capacity — try again shortly" }), {
+            status: 503,
+            headers: { "content-type": "application/json", "retry-after": "30" },
+          })
         }
-        const validated = validateSourceFiles(body.sourceFiles)
-        if (!validated.ok) return c.json({ error: validated.error }, 400)
-        const deployId = randomBytes(8).toString("hex")
-        const claimToken = randomBytes(32).toString("hex")
-        const dir = deployDirFor(deployId)
-        fs.mkdirSync(dir, { recursive: true })
-        writeSourceTree(dir, validated.files)
-        const createStart = Date.now()
-        let buildResult: {
-          bundleBytes: number
-          bundleHash: string
-          meta: { isPublic: boolean; title?: string; description?: string }
-        }
+        pendingBoots++
         try {
-          buildResult = await buildDeployFromSource(dir)
-        } catch (err: any) {
-          fs.rmSync(dir, { recursive: true, force: true })
-          return c.json({ error: `Build failed: ${err?.message ?? err}` }, 400)
-        }
-        if (buildResult.bundleBytes > quotaTemplate.maxBundleBytes) {
-          fs.rmSync(dir, { recursive: true, force: true })
+          const quotaTemplate = isAnonymous ? ANONYMOUS_QUOTA : DEFAULT_QUOTA
+
+          const body = (await c.req.json().catch(() => null)) as {
+            sourceFiles?: unknown
+            publicInspect?: unknown
+            turnstileToken?: unknown
+          } | null
+          if (!body) return c.json({ error: "Invalid JSON body" }, 400)
+          // Human/bot challenge for anonymous deploys. No-op unless the operator
+          // configured a Turnstile secret; authenticated deploys are never
+          // challenged. Token may ride in a header or the JSON body.
+          if (isAnonymous && turnstileSecret) {
+            const headerToken = c.req.header("x-pond-turnstile-token") ?? ""
+            const bodyToken = typeof body.turnstileToken === "string" ? body.turnstileToken : ""
+            const token = headerToken || bodyToken
+            const verdict = await verifyTurnstile(turnstileSecret, token, clientIp(c))
+            if (!verdict.ok) {
+              return c.json({ error: "Turnstile verification failed", errorCodes: verdict.errorCodes }, 403)
+            }
+          }
+          const validated = validateSourceFiles(body.sourceFiles)
+          if (!validated.ok) return c.json({ error: validated.error }, 400)
+          const deployId = randomBytes(8).toString("hex")
+          const claimToken = randomBytes(32).toString("hex")
+          const dir = deployDirFor(deployId)
+          fs.mkdirSync(dir, { recursive: true })
+          writeSourceTree(dir, validated.files)
+          const createStart = Date.now()
+          let buildResult: {
+            bundleBytes: number
+            bundleHash: string
+            meta: { isPublic: boolean; title?: string; description?: string }
+          }
+          try {
+            buildResult = await buildDeployFromSource(dir)
+          } catch (err: any) {
+            fs.rmSync(dir, { recursive: true, force: true })
+            return c.json({ error: `Build failed: ${err?.message ?? err}` }, 400)
+          }
+          if (buildResult.bundleBytes > quotaTemplate.maxBundleBytes) {
+            fs.rmSync(dir, { recursive: true, force: true })
+            return c.json(
+              {
+                error: `Bundle exceeds ${isAnonymous ? "anonymous" : "default"} per-deploy quota (${quotaTemplate.maxBundleBytes} bytes)`,
+              },
+              413,
+            )
+          }
+          const sizeAfter = dirSize(dir)
+          if (sizeAfter > quotaTemplate.maxDiskBytes) {
+            fs.rmSync(dir, { recursive: true, force: true })
+            return c.json({ error: `Disk usage ${sizeAfter} exceeds quota ${quotaTemplate.maxDiskBytes}` }, 413)
+          }
+          const nowIso = new Date().toISOString()
+          const record: HostedDeployRecord = {
+            deployId,
+            // Persist only the hash. Plaintext `claimToken` returned to the
+            // client below as a one-time disclosure.
+            claimTokenHash: sha256Hex(claimToken),
+            appPort: 0,
+            url: urlFor(deployId),
+            apiUrl,
+            publicInspect: Boolean(body.publicInspect),
+            createdAt: nowIso,
+            updatedAt: nowIso,
+            isPublic: buildResult.meta.isPublic,
+            title: buildResult.meta.title,
+            description: buildResult.meta.description,
+            bundleBytes: buildResult.bundleBytes,
+            bundleHash: buildResult.bundleHash,
+            lastBuiltAt: nowIso,
+            lastBuildDurationMs: Date.now() - createStart,
+          }
+          writeRecord(record)
+          let extra: { terminatesAt?: string; expiresAt?: string } = {}
+          if (isAnonymous) {
+            controlDb.setQuota(deployId, ANONYMOUS_QUOTA)
+            const { terminatesAt, expiresAt } = controlDb.createAnonymous(
+              deployId,
+              claimToken,
+              anonymousGraceMs,
+              anonymousRetentionMs,
+            )
+            extra = { terminatesAt, expiresAt }
+          } else {
+            controlDb.setDeployOwner(deployId, user!.id)
+          }
+          try {
+            // forkDeploy derives the uniform isolation policy itself (the anon
+            // row, if any, was just written above).
+            await forkDeploy(record)
+          } catch (err: any) {
+            try {
+              fs.rmSync(dir, { recursive: true, force: true })
+            } catch {}
+            if (isAnonymous) {
+              controlDb.deleteAnonymous(deployId)
+            } else {
+              controlDb.deleteDeployOwner(deployId)
+            }
+            controlDb.deleteQuota(deployId)
+            audit(actorFor(user, false, isAnonymous), "deploy.create_failed", {
+              targetDeployId: deployId,
+              metadata: {
+                anonymous: isAnonymous,
+                bundleBytes: buildResult.bundleBytes,
+                error: String(err?.message ?? err),
+              },
+            })
+            return c.json({ error: `Boot failed: ${err?.message ?? err}`, deployId }, 500)
+          }
+          audit(actorFor(user, false, isAnonymous), "deploy.create", {
+            targetDeployId: deployId,
+            targetUserId: user?.id,
+            metadata: { anonymous: isAnonymous, bundleBytes: buildResult.bundleBytes },
+          })
           return c.json(
             {
-              error: `Bundle exceeds ${isAnonymous ? "anonymous" : "default"} per-deploy quota (${quotaTemplate.maxBundleBytes} bytes)`,
-            },
-            413,
-          )
-        }
-        const sizeAfter = dirSize(dir)
-        if (sizeAfter > quotaTemplate.maxDiskBytes) {
-          fs.rmSync(dir, { recursive: true, force: true })
-          return c.json({ error: `Disk usage ${sizeAfter} exceeds quota ${quotaTemplate.maxDiskBytes}` }, 413)
-        }
-        const nowIso = new Date().toISOString()
-        const record: HostedDeployRecord = {
-          deployId,
-          // Persist only the hash. Plaintext `claimToken` returned to the
-          // client below as a one-time disclosure.
-          claimTokenHash: sha256Hex(claimToken),
-          appPort: 0,
-          url: urlFor(deployId),
-          apiUrl,
-          publicInspect: Boolean(body.publicInspect),
-          createdAt: nowIso,
-          updatedAt: nowIso,
-          isPublic: buildResult.meta.isPublic,
-          title: buildResult.meta.title,
-          description: buildResult.meta.description,
-          bundleBytes: buildResult.bundleBytes,
-          bundleHash: buildResult.bundleHash,
-          lastBuiltAt: nowIso,
-          lastBuildDurationMs: Date.now() - createStart,
-        }
-        writeRecord(record)
-        let extra: { terminatesAt?: string; expiresAt?: string } = {}
-        if (isAnonymous) {
-          controlDb.setQuota(deployId, ANONYMOUS_QUOTA)
-          const { terminatesAt, expiresAt } = controlDb.createAnonymous(
-            deployId,
-            claimToken,
-            anonymousGraceMs,
-            anonymousRetentionMs,
-          )
-          extra = { terminatesAt, expiresAt }
-        } else {
-          controlDb.setDeployOwner(deployId, user!.id)
-        }
-        try {
-          // forkDeploy derives the uniform isolation policy itself (the anon
-          // row, if any, was just written above).
-          await forkDeploy(record)
-        } catch (err: any) {
-          try {
-            fs.rmSync(dir, { recursive: true, force: true })
-          } catch {}
-          if (isAnonymous) {
-            controlDb.deleteAnonymous(deployId)
-          } else {
-            controlDb.deleteDeployOwner(deployId)
-          }
-          controlDb.deleteQuota(deployId)
-          audit(actorFor(user, false, isAnonymous), "deploy.create_failed", {
-            targetDeployId: deployId,
-            metadata: {
-              anonymous: isAnonymous,
+              ...record,
+              // One-time disclosure of the plaintext claim token. Subsequent
+              // reads of the record only see the hash.
+              claimToken,
+              ...extra,
+              bundleHash: buildResult.bundleHash,
               bundleBytes: buildResult.bundleBytes,
-              error: String(err?.message ?? err),
             },
-          })
-          return c.json({ error: `Boot failed: ${err?.message ?? err}`, deployId }, 500)
+            201,
+          )
+        } finally {
+          // Release the reserved slot. On success the capsule is now counted in
+          // runningChildren; on any failure path above it never became resident.
+          pendingBoots--
         }
-        audit(actorFor(user, false, isAnonymous), "deploy.create", {
-          targetDeployId: deployId,
-          targetUserId: user?.id,
-          metadata: { anonymous: isAnonymous, bundleBytes: buildResult.bundleBytes },
-        })
-        return c.json(
-          {
-            ...record,
-            // One-time disclosure of the plaintext claim token. Subsequent
-            // reads of the record only see the hash.
-            claimToken,
-            ...extra,
-            bundleHash: buildResult.bundleHash,
-            bundleBytes: buildResult.bundleBytes,
-          },
-          201,
-        )
       },
     )
 
@@ -3434,6 +3482,14 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
       )
     } else {
       console.log("  anonymous deploys: disabled\n")
+    }
+    if (maxActiveCapsules > 0) {
+      console.log(`  capacity: max ${maxActiveCapsules} concurrent capsules (new deploys past this get HTTP 503)`)
+    } else {
+      console.log(
+        "  ⚠ capacity: UNLIMITED concurrent capsules — a deploy flood can exceed the container mem_limit and " +
+          "trigger the OOM killer. Set --max-active-capsules / POND_MAX_ACTIVE_CAPSULES (see deploy/.env.example).",
+      )
     }
     if (anonymousEnabled) {
       console.log(
