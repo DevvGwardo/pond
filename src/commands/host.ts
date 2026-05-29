@@ -252,22 +252,58 @@ export function stripJsStringsAndComments(src: string): string {
   return out
 }
 
+// Locate the object literal passed to the FIRST `capsule(` call and return its
+// [start, end) byte range (the span between the outer `{` and its matching `}`,
+// inclusive). Operates on string/comment-stripped source so the brace match
+// only sees real code braces. Because stripJsStringsAndComments preserves
+// character offsets 1:1, the same range can be sliced out of the RAW source.
+// Returns null when there's no `capsule({ … })` call.
+function capsuleArgRange(scanSrc: string): { start: number; end: number } | null {
+  const call = scanSrc.match(/\bcapsule\s*\(/)
+  if (!call || call.index === undefined) return null
+  let i = call.index + call[0].length
+  while (i < scanSrc.length && scanSrc[i] !== "{") {
+    // Only whitespace may sit between `capsule(` and its object arg; anything
+    // else means this isn't the `capsule({ … })` form we statically parse.
+    if (!/\s/.test(scanSrc[i])) return null
+    i++
+  }
+  if (scanSrc[i] !== "{") return null
+  const start = i
+  let depth = 0
+  for (; i < scanSrc.length; i++) {
+    const ch = scanSrc[i]
+    if (ch === "{") depth++
+    else if (ch === "}") {
+      depth--
+      if (depth === 0) return { start, end: i + 1 }
+    }
+  }
+  return null
+}
+
 // Best-effort static parse of the capsule({ public, title, description }) call.
 // We deliberately don't import the bundle to read these — that would execute
-// arbitrary code on the host. Strings and comments are stripped first so a
-// stray `public: true` in a comment or doc string can't unintentionally
-// expose source via /gallery and /api/public-deploys/:id/source.
+// arbitrary code on the host. The scan is confined to the `capsule({ … })`
+// argument object (see capsuleArgRange) so an unrelated `public: true` /
+// `title:` elsewhere in the file — a config object, a helper, a fixture —
+// can't unintentionally flip the deploy public and expose its source via
+// /gallery and /api/public-deploys/:id/source. Strings/comments are stripped
+// before the brace scan so a `}` inside a string can't end the range early.
 function extractCapsuleMeta(serverFile: string): { isPublic: boolean; title?: string; description?: string } {
   if (!fs.existsSync(serverFile)) return { isPublic: false }
   const rawSrc = fs.readFileSync(serverFile, "utf-8")
   const scanSrc = stripJsStringsAndComments(rawSrc)
-  const isPublic = /\bpublic\s*:\s*true\b/.test(scanSrc)
-  // Title and description are deliberately matched on the ORIGINAL source —
-  // their values live inside string literals (which the stripper blanks out),
-  // so we still need raw text. The risk of a stray comment/string mention of
-  // `title: "Foo"` is just cosmetic gallery display, not a privacy issue.
-  const titleMatch = rawSrc.match(/\btitle\s*:\s*(["'`])([^"'`]{1,200})\1/)
-  const descMatch = rawSrc.match(/\bdescription\s*:\s*(["'`])([^"'`]{1,500})\1/)
+  const range = capsuleArgRange(scanSrc)
+  if (!range) return { isPublic: false }
+  const scanArg = scanSrc.slice(range.start, range.end)
+  const isPublic = /\bpublic\s*:\s*true\b/.test(scanArg)
+  // Title and description are matched on the ORIGINAL source (their values live
+  // inside string literals, which the stripper blanks out) — but only within
+  // the SAME capsule-arg range, so a stray `title:` outside the call is ignored.
+  const rawArg = rawSrc.slice(range.start, range.end)
+  const titleMatch = rawArg.match(/\btitle\s*:\s*(["'`])([^"'`]{1,200})\1/)
+  const descMatch = rawArg.match(/\bdescription\s*:\s*(["'`])([^"'`]{1,500})\1/)
   return {
     isPublic,
     title: titleMatch?.[2],

@@ -399,6 +399,65 @@ export default capsule({
   assert.equal(src.status, 404, "source endpoint must 404 for non-public deploys")
 })
 
+test("isPublic detection ignores `public: true` in real code outside the capsule() call", async () => {
+  // The scan is confined to the capsule({ … }) argument object. A genuine
+  // `public: true` elsewhere (an unrelated config object, here) is real code —
+  // string/comment stripping would NOT blank it — so only arg-scoping prevents
+  // it from silently flipping the deploy public and exposing its source.
+  const innocuous = `import { capsule, mutation, query, string, table } from "pond/server"
+const featureFlags = { public: true, beta: false }
+export const flags = featureFlags
+export default capsule({
+  title: "Private Box",
+  description: "Owner-only",
+  schema: { items: table({ name: string() }) },
+  queries: { items: query((ctx) => ctx.db.items.all()) },
+  mutations: { add: mutation((ctx, name) => ctx.db.items.insert({ name })) },
+})
+`
+  const create = await fetch(`${apiUrl}/api/deploys`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ sourceFiles: tinySourceFiles(innocuous) }),
+  })
+  assert.equal(create.status, 201)
+  const cb = await create.json()
+
+  const list = await fetch(`${apiUrl}/api/public-deploys`)
+  const lb = await list.json()
+  const found = lb.deploys.find((d) => d.deployId === cb.deployId)
+  assert.equal(found, undefined, "deploy with `public: true` only outside the capsule() call must NOT be public")
+
+  const src = await fetch(`${apiUrl}/api/public-deploys/${cb.deployId}/source`)
+  assert.equal(src.status, 404, "source endpoint must 404 when public: true is outside capsule()")
+})
+
+test("isPublic detection still flags `public: true` inside the capsule() call", async () => {
+  const realPublic = `import { capsule, mutation, query, string, table } from "pond/server"
+export default capsule({
+  public: true,
+  title: "Shared Box",
+  description: "Public",
+  schema: { items: table({ name: string() }) },
+  queries: { items: query((ctx) => ctx.db.items.all()) },
+  mutations: { add: mutation((ctx, name) => ctx.db.items.insert({ name })) },
+})
+`
+  const create = await fetch(`${apiUrl}/api/deploys`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ sourceFiles: tinySourceFiles(realPublic) }),
+  })
+  assert.equal(create.status, 201)
+  const cb = await create.json()
+
+  const list = await fetch(`${apiUrl}/api/public-deploys`)
+  const lb = await list.json()
+  const found = lb.deploys.find((d) => d.deployId === cb.deployId)
+  assert.ok(found, "deploy with `public: true` inside capsule() must be public")
+  assert.equal(found.title, "Shared Box")
+})
+
 test("re-claim of an already-owned deploy by a different user with a stolen claim token is REJECTED", async () => {
   // Regression for the 0.3.8 takeover bug: anyone who possessed a deploy's
   // claim token (which is stored plaintext on disk and was previously in the
