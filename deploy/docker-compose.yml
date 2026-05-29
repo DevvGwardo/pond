@@ -16,14 +16,16 @@ services:
       - .env
     # Bound the whole control-plane container so a runaway capsule (or a bug in
     # the host process) can't exhaust the box and take every deploy down with
-    # it. TUNE these to your host's size — the values below assume a small VM.
-    # Per-capsule cpu/memory/pids caps are layered on top via the cgroup
-    # isolation setup (deploy/setup-capsule-isolation.sh + README).
-    mem_limit: 4g
-    cpus: "2.0"
+    # it. TUNE these to your host's size — the values below fit the primary
+    # Oracle A1 box (4 OCPU / 24 GB), leaving headroom for cloudflared + the OS.
+    # On the Hetzner CAX11 fallback (2 vCPU / 4 GB) drop these back to ~3g/1.5
+    # and POND_MAX_ACTIVE_CAPSULES to ~16. Per-capsule cpu/memory/pids caps are
+    # layered on top via the cgroup isolation setup (setup-capsule-isolation.sh).
+    mem_limit: 20g
+    cpus: "3.5"
     # Container-wide process ceiling. Must comfortably exceed the sum of active
     # capsules (each is itself capped at 256 pids by its own cgroup).
-    pids_limit: 4096
+    pids_limit: 16384
     # Defense-in-depth: a sandbox-escaping capsule shouldn't be able to gain
     # privileges or use ambient capabilities. The control plane needs none of
     # the default caps (cgroup management goes through v2 delegation, not caps).
