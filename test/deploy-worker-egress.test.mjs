@@ -10,16 +10,20 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import { execFileSync } from "node:child_process"
+import { pathToFileURL } from "node:url"
 import * as path from "node:path"
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "..")
 const WORKER = path.join(REPO_ROOT, "src", "host", "deploy-worker.js")
+// ESM import in the embedded probe must be a file:// URL, not a bare absolute
+// path — on Windows a `C:\…` / `D:\…` specifier is rejected (ERR_UNSUPPORTED_ESM_URL_SCHEME).
+const WORKER_URL = pathToFileURL(WORKER).href
 
 // Run a small module in a child that installs the restriction then probes a
 // behaviour, printing OK/FAIL lines we assert on.
 function runProbe(body) {
   const src = `
-import { installNetworkRestriction } from ${JSON.stringify(WORKER)}
+import { installNetworkRestriction } from ${JSON.stringify(WORKER_URL)}
 await installNetworkRestriction()
 ${body}
 `

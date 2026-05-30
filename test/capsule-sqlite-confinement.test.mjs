@@ -22,12 +22,16 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 import { execFileSync } from "node:child_process"
 import { createRequire } from "node:module"
+import { pathToFileURL } from "node:url"
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
 
 const REPO_ROOT = fs.realpathSync(path.resolve(import.meta.dirname, ".."))
 const WORKER = path.join(REPO_ROOT, "src", "host", "deploy-worker.js")
+// ESM import in the embedded probe must be a file:// URL, not a bare absolute
+// path — on Windows a `C:\…` / `D:\…` specifier is rejected (ERR_UNSUPPORTED_ESM_URL_SCHEME).
+const WORKER_URL = pathToFileURL(WORKER).href
 const SECRET = "SIBLING-TENANT-SECRET-d2f1"
 
 function runProbe() {
@@ -48,7 +52,7 @@ function runProbe() {
   seed.close()
 
   const src = `
-import { installSandboxHardening } from ${JSON.stringify(WORKER)}
+import { installSandboxHardening } from ${JSON.stringify(WORKER_URL)}
 import { createRequire } from "node:module"
 import { resolve } from "node:path"
 const repoRequire = createRequire(${JSON.stringify(path.join(REPO_ROOT, "package.json"))})

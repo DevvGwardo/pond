@@ -13,12 +13,16 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import { execFileSync } from "node:child_process"
+import { pathToFileURL } from "node:url"
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "..")
 const WORKER = path.join(REPO_ROOT, "src", "host", "deploy-worker.js")
+// ESM import in the embedded probe must be a file:// URL, not a bare absolute
+// path — on Windows a `C:\…` / `D:\…` specifier is rejected (ERR_UNSUPPORTED_ESM_URL_SCHEME).
+const WORKER_URL = pathToFileURL(WORKER).href
 
 function runHardenedProbe() {
   // realpath so cwd / process.cwd() / the db path all agree (macOS /var ->
@@ -26,7 +30,7 @@ function runHardenedProbe() {
   const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pond-sandbox-")))
   const dbPath = path.join(tmp, "data.db")
   const src = `
-import { installSandboxHardening } from ${JSON.stringify(WORKER)}
+import { installSandboxHardening } from ${JSON.stringify(WORKER_URL)}
 import { createRequire } from "node:module"
 // Anchor module resolution at the repo (not cwd/import.meta.url): the worker
 // runs from the deploy dir, which has no node_modules of its own.
