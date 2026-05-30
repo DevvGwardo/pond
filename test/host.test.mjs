@@ -1958,11 +1958,13 @@ export default capsule({
 
   // Wait until the deploy worker is actually accepting on the API route
   const deployUrl = `http://${wsDeployId}.${publicHost}:${port}`
-  // Connect to the proxy via the host header — the ws library passes Host
-  // through the Origin header, but the upgrade request still carries Host
-  // set by the URL's host. We force the URL itself to point at the proxy.
+  // Connect to the proxy by IP and route via the Host header. Using
+  // `<deployId>.localhost` in the URL would force a DNS lookup that only the
+  // *.localhost TLD shim on Linux/macOS resolves — Windows ENOTFOUNDs it.
   const { WebSocket } = await import("ws")
-  const wsClient = new WebSocket(`ws://${wsDeployId}.${publicHost}:${port}/api/socket/echo`)
+  const wsClient = new WebSocket(`ws://127.0.0.1:${port}/api/socket/echo`, {
+    headers: { host: `${wsDeployId}.${publicHost}:${port}` },
+  })
   const opened = new Promise((resolve, reject) => {
     wsClient.once("open", resolve)
     wsClient.once("error", reject)
@@ -2136,7 +2138,7 @@ test("pond login (no --token) reuses a saved credential and validates against /a
   )
 
   const { stdout, stderr } = await execFileP(process.execPath, [CLI_PATH, "login", "--api", apiUrl], {
-    env: { ...process.env, HOME: sandboxHome },
+    env: { ...process.env, HOME: sandboxHome, USERPROFILE: sandboxHome },
     timeout: 10000,
   })
   const out = stdout + stderr
@@ -2177,7 +2179,7 @@ test("pond login surfaces saved credential offline (transient network failure do
   )
 
   const { stdout, stderr } = await execFileP(process.execPath, [CLI_PATH, "login", "--api", unreachable], {
-    env: { ...process.env, HOME: sandboxHome },
+    env: { ...process.env, HOME: sandboxHome, USERPROFILE: sandboxHome },
     timeout: 10000,
   })
   const out = stdout + stderr
@@ -2217,7 +2219,7 @@ test("pond login rejects a saved credential the server actively returned 401 for
   await assert.rejects(
     () =>
       execFileP(process.execPath, [CLI_PATH, "login", "--api", apiUrl], {
-        env: { ...process.env, HOME: sandboxHome },
+        env: { ...process.env, HOME: sandboxHome, USERPROFILE: sandboxHome },
         timeout: 10000,
       }),
     (err) => {
