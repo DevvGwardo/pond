@@ -496,3 +496,19 @@ process.on("message", async (msg: ParentMessage) => {
 process.on("disconnect", () => {
   process.exit(0)
 })
+
+// Orphan guard. The host normally stops a worker via the "shutdown" message, and
+// Node fires "disconnect" when the IPC channel closes. But on Windows that event
+// is unreliable when the host is force-terminated (kill("SIGINT") there is a hard
+// terminate, not a catchable signal), leaving the worker alive and holding its
+// data.db — which blocks the host's deploy-dir cleanup with EBUSY. Poll the
+// parent's liveness and exit if it has gone, on every platform. unref()'d so it
+// never keeps the worker alive on its own; a no-op while the host is running.
+const PARENT_PID = process.ppid
+setInterval(() => {
+  try {
+    process.kill(PARENT_PID, 0)
+  } catch {
+    process.exit(0)
+  }
+}, 1000).unref()
