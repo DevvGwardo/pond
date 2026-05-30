@@ -1,22 +1,87 @@
 # Pond deployment kit
 
-Two supported paths, both budget-friendly:
+Three supported paths:
 
-| Path                            | Compute                   | Ingress                  | TLS                             | Cost        | When                        |
-| ------------------------------- | ------------------------- | ------------------------ | ------------------------------- | ----------- | --------------------------- |
-| **Docker + Cloudflare Tunnel**  | Any host that runs Docker | Cloudflare Tunnel (free) | Cloudflare Universal SSL (free) | Domain only | Fastest. Recommended.       |
-| **Systemd + Cloudflare Tunnel** | Bare VM                   | Cloudflare Tunnel (free) | Cloudflare Universal SSL (free) | Domain only | When you don't want Docker. |
+| Path                            | Compute                   | Ingress                  | TLS                             | Cost          | When                                                 |
+| ------------------------------- | ------------------------- | ------------------------ | ------------------------------- | ------------- | ---------------------------------------------------- |
+| **Railway (managed PaaS)**      | Railway container         | Railway custom domain    | Railway-managed (incl wildcard) | Plan + domain | No host to run. Trade-off: OS hardening unavailable. |
+| **Docker + Cloudflare Tunnel**  | Any host that runs Docker | Cloudflare Tunnel (free) | Cloudflare Universal SSL (free) | Domain only   | Full OS hardening (cgroups/nft/bwrap) available.     |
+| **Systemd + Cloudflare Tunnel** | Bare VM                   | Cloudflare Tunnel (free) | Cloudflare Universal SSL (free) | Domain only   | When you don't want Docker.                          |
+
+> **Railway caveat — OS hardening is off.** Railway grants no host privileges, so
+> per-capsule cgroups, the nftables egress firewall, and `bwrap` filesystem
+> isolation **cannot run** there. Anonymous capsules fall back to the Node
+> `--permission` sandbox plus the userspace resource caps (concurrency ceiling +
+> daily quotas). See [`HARDENING.md` §1b](HARDENING.md) for the full trust posture
+> and the Phase 2 (isolate runtime) plan. The Docker/systemd paths are the ones
+> where the kernel-enforced boundaries can be turned on.
 
 The full operational walkthrough lives in [`docs/operations.md`](../docs/operations.md). This directory has the files referenced there.
 
 ## Files
 
-- `Dockerfile` — production image for the control plane. Multi-arch (works on Oracle ARM, x86 VPS, Apple Silicon).
+- `Dockerfile` — production image for the control plane. Multi-arch (works on Oracle ARM, x86 VPS, Apple Silicon). Multi-stage: compiles TS from source so the image doesn't need committed `.js`. Used by both the Docker path and Railway.
+- `pond-entrypoint.sh` — root entrypoint that chowns the (root-owned) volume mount, then drops to the unprivileged `node` user via `gosu`. Fixes Railway Volume / compose named-volume perms automatically.
+- `../railway.json` (repo root) — Railway build (`deploy/Dockerfile`) + `/api/health` healthcheck config for the Railway path.
 - `docker-compose.yml` — runs `pond-host` + `cloudflared` on the same machine.
 - `.env.example` — copy to `.env`, fill in your domain + host token + abuse contact.
 - `cloudflared/config.example.yml` — Cloudflare Tunnel ingress config. Maps `*.pond.example.com` and the bare `pond.example.com` to the host on port 8787.
 - `pond-host.service` — systemd unit for the no-Docker path.
 - `upgrade.sh` — one-shot upgrade: `git pull --ff-only`, rebuild the pond-host image, restart in place. Run from the pond repo root on the host.
+
+## Quickstart (Railway path)
+
+Railway builds the image from source (`railway.json` → `deploy/Dockerfile`, a
+multi-stage build that compiles the TS so the image doesn't depend on
+gitignored `.js`). The host reads `PORT` and the `POND_*` vars from the Railway
+environment — no shell-expanded start command needed.
+
+```bash
+# 1. Link the repo to a Railway service (once), then deploy.
+railway up
+
+# 2. Set config as Railway environment variables (Railway dashboard or CLI):
+#    POND_PUBLIC_HOST, POND_PUBLIC_BASE_URL, POND_ABUSE_EMAIL,
+#    POND_HOST_TOKEN, POND_TRUST_PROXY_HEADERS=1, POND_MAX_ACTIVE_CAPSULES, …
+```
+
+**Per-deploy serving needs a wildcard domain.** A created capsule's URL is
+`<id>.<your-domain>`, so the host must sit behind a domain whose **wildcard
+resolves**. Railway's generated `*.up.railway.app` does **not** resolve as a
+wildcard, so the control plane works but individual deploys are unreachable on
+the generated URL. Attach a custom domain + wildcard and point DNS at Railway:
+
+```bash
+railway domain pond.run       # bare domain (landing / control plane)
+railway domain '*.pond.run'   # wildcard (per-deploy subdomains)
+```
+
+Each command prints the CNAME target to add at your DNS provider. For
+`pond.run` (already attached to the `pond-host` service), the records are:
+
+| Record (zone `pond.run`)   | Type  | Value                               | Purpose                         |
+| -------------------------- | ----- | ----------------------------------- | ------------------------------- |
+| `pond.run` (root)          | CNAME | `wy20ddwo.up.railway.app`           | bare-domain traffic             |
+| `*.pond.run`               | CNAME | `3rolp8r7.up.railway.app`           | per-deploy subdomain traffic    |
+| `_acme-challenge.pond.run` | CNAME | `3rolp8r7.authorize.railwaydns.net` | wildcard TLS cert (ACME DNS-01) |
+
+On **Cloudflare** (this zone's provider), set all three records to **DNS only
+(grey cloud)** — proxying them breaks Railway's ownership validation and TLS
+issuance. Wildcard TLS is issued only after the `_acme-challenge` record
+resolves.
+
+Then flip the public host to the custom domain **after DNS is live** (doing it
+before the records resolve breaks bare-domain/landing requests, since the host
+treats requests whose host ≠ `POND_PUBLIC_HOST` as subdomain proxies):
+
+```bash
+railway variables --set POND_PUBLIC_HOST=pond.run \
+  --set POND_PUBLIC_BASE_URL=https://pond.run
+```
+
+> Migrating from the Cloudflare-Tunnel path? `pond.run` currently points at the
+> tunnel; updating these DNS records is the production cutover to Railway. The
+> Tunnel-fronted Docker host can stay up until DNS propagates, then be retired.
 
 ## Quickstart (Docker path)
 
