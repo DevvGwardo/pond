@@ -7,6 +7,8 @@ import * as path from "node:path"
 import * as net from "node:net"
 import { randomBytes } from "node:crypto"
 
+import { stopProc } from "./proc-kill.mjs"
+
 const REPO_ROOT = path.resolve(import.meta.dirname, "..")
 const CLI_PATH = path.join(REPO_ROOT, "src", "cli.js")
 
@@ -94,16 +96,7 @@ async function startHost() {
 }
 
 async function stopHost() {
-  if (hostProc && hostProc.exitCode === null) {
-    const exited = new Promise((resolve) => hostProc.once("exit", resolve))
-    hostProc.kill("SIGINT")
-    const t = setTimeout(() => {
-      if (hostProc.exitCode === null) hostProc.kill("SIGKILL")
-    }, 4000)
-    t.unref()
-    await exited
-    clearTimeout(t)
-  }
+  await stopProc(hostProc)
   hostProc = null
 }
 
@@ -604,16 +597,7 @@ async function startExtraHost({ extraArgs = [], env = {} } = {}) {
 }
 
 async function stopExtraHost(h) {
-  if (h.proc && h.proc.exitCode === null) {
-    const exited = new Promise((resolve) => h.proc.once("exit", resolve))
-    h.proc.kill("SIGINT")
-    const t = setTimeout(() => {
-      if (h.proc.exitCode === null) h.proc.kill("SIGKILL")
-    }, 4000)
-    t.unref()
-    await exited
-    clearTimeout(t)
-  }
+  await stopProc(h.proc)
   if (h.dataDir && existsSync(h.dataDir))
     rmSync(h.dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
 }
@@ -972,16 +956,7 @@ test("anonymous rate limit survives host restart (persisted in control DB)", asy
       },
     )
   }
-  async function killHost(p) {
-    if (p && p.exitCode === null) {
-      const exited = new Promise((r) => p.once("exit", r))
-      p.kill("SIGINT")
-      const t = setTimeout(() => p.kill("SIGKILL"), 4000)
-      t.unref()
-      await exited
-      clearTimeout(t)
-    }
-  }
+  const killHost = (p) => stopProc(p)
   let p1 = spawnHost()
   p1.stdout.on("data", () => {})
   p1.stderr.on("data", () => {})
@@ -1084,12 +1059,7 @@ test("sweeper terminates anonymous deploy after grace (via host bounce)", async 
 
     // Bounce: SIGINT old host, start a new one. Startup runs runSweep() before
     // listening, which marks terminated and skips booting the terminated worker.
-    const exited = new Promise((r) => p1.once("exit", r))
-    p1.kill("SIGINT")
-    const t = setTimeout(() => p1.kill("SIGKILL"), 4000)
-    t.unref()
-    await exited
-    clearTimeout(t)
+    await stopProc(p1)
 
     const p2 = spawnTiny()
     p2.stdout.on("data", () => {})
@@ -1119,14 +1089,7 @@ test("sweeper terminates anonymous deploy after grace (via host bounce)", async 
     })
     assert.equal(probe.status, 404, `expected 404 (terminated), got ${probe.status} body=${probe.body}`)
   } finally {
-    if (p1 && p1.exitCode === null) {
-      const exited = new Promise((r) => p1.once("exit", r))
-      p1.kill("SIGINT")
-      const t = setTimeout(() => p1.kill("SIGKILL"), 4000)
-      t.unref()
-      await exited
-      clearTimeout(t)
-    }
+    await stopProc(p1)
     if (existsSync(tinyData)) rmSync(tinyData, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })

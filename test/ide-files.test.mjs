@@ -7,6 +7,8 @@ import * as path from "node:path"
 import * as net from "node:net"
 import { randomBytes } from "node:crypto"
 
+import { stopProc } from "./proc-kill.mjs"
+
 const REPO_ROOT = path.resolve(import.meta.dirname, "..")
 const CLI_PATH = path.join(REPO_ROOT, "src", "cli.js")
 
@@ -91,16 +93,7 @@ async function startHost() {
 }
 
 async function stopHost() {
-  if (hostProc && hostProc.exitCode === null) {
-    const exited = new Promise((resolve) => hostProc.once("exit", resolve))
-    hostProc.kill("SIGINT")
-    const t = setTimeout(() => {
-      if (hostProc.exitCode === null) hostProc.kill("SIGKILL")
-    }, 4000)
-    t.unref()
-    await exited
-    clearTimeout(t)
-  }
+  await stopProc(hostProc)
   hostProc = null
 }
 

@@ -20,6 +20,8 @@ import * as path from "node:path"
 import * as net from "node:net"
 import { randomBytes } from "node:crypto"
 
+import { stopProc } from "./proc-kill.mjs"
+
 const REPO_ROOT = path.resolve(import.meta.dirname, "..")
 const CLI_PATH = path.join(REPO_ROOT, "src", "cli.js")
 
@@ -28,14 +30,7 @@ const cleanupProcs = []
 
 after(async () => {
   for (const p of cleanupProcs) {
-    if (p && p.exitCode === null) {
-      const exited = new Promise((r) => p.once("exit", r))
-      p.kill("SIGINT")
-      const t = setTimeout(() => p.kill("SIGKILL"), 3000)
-      t.unref()
-      await exited
-      clearTimeout(t)
-    }
+    await stopProc(p, 3000)
   }
   for (const d of cleanupDirs) {
     // maxRetries/retryDelay: Windows can briefly lock a worker's SQLite handle
