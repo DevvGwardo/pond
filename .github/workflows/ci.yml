@@ -8,6 +8,11 @@ on:
 jobs:
   test:
     runs-on: ${{ matrix.os }}
+    # The Windows leg is newly added and not yet confirmed green end-to-end
+    # (some host integration tests assert POSIX-only behavior). Keep it
+    # non-blocking so it surfaces real signal without gating merges; flip this
+    # to drop the Windows exception once the suite is verified green on Windows.
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     strategy:
       fail-fast: false
       matrix:
