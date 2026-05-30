@@ -449,6 +449,15 @@ function serializeEnv(entries: Record<string, string>): string {
   )
 }
 
+// Remove a deploy directory, tolerating Windows file locks. A worker that was
+// just killed (e.g. a failed boot) can still hold its bundle/SQLite handle for
+// a few ms, so a bare fs.rmSync throws EBUSY/EPERM and the dir leaks. The
+// built-in retry options wait for the OS to release the handle. On POSIX this
+// is a no-op (open files unlink cleanly), so behavior there is unchanged.
+function removeDeployDir(dir: string): void {
+  fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+}
+
 function parseDuration(s: string): number {
   const m = /^(\d+)(ms|s|m|h|d)$/.exec(s.trim())
   if (!m) throw new Error(`invalid duration: ${s}`)
@@ -1193,7 +1202,7 @@ export const hostCommand = defineCommand({
           stopDeploy(id)
           restartState.delete(id)
           if (capsuleCgroupRoot) removeCapsuleCgroup(capsuleCgroupRoot, id)
-          fs.rmSync(deployDirFor(id), { recursive: true, force: true })
+          removeDeployDir(deployDirFor(id))
           controlDb.deleteAnonymous(id)
           controlDb.deleteQuota(id)
           console.log(`[pond host] anonymous deploy ${id} deleted (retention passed)`)
@@ -1588,11 +1597,11 @@ export const hostCommand = defineCommand({
           try {
             buildResult = await buildDeployFromSource(dir)
           } catch (err: any) {
-            fs.rmSync(dir, { recursive: true, force: true })
+            removeDeployDir(dir)
             return c.json({ error: `Build failed: ${err?.message ?? err}` }, 400)
           }
           if (buildResult.bundleBytes > quotaTemplate.maxBundleBytes) {
-            fs.rmSync(dir, { recursive: true, force: true })
+            removeDeployDir(dir)
             return c.json(
               {
                 error: `Bundle exceeds ${isAnonymous ? "anonymous" : "default"} per-deploy quota (${quotaTemplate.maxBundleBytes} bytes)`,
@@ -1602,7 +1611,7 @@ export const hostCommand = defineCommand({
           }
           const sizeAfter = dirSize(dir)
           if (sizeAfter > quotaTemplate.maxDiskBytes) {
-            fs.rmSync(dir, { recursive: true, force: true })
+            removeDeployDir(dir)
             return c.json({ error: `Disk usage ${sizeAfter} exceeds quota ${quotaTemplate.maxDiskBytes}` }, 413)
           }
           const nowIso = new Date().toISOString()
@@ -1645,7 +1654,7 @@ export const hostCommand = defineCommand({
             await forkDeploy(record)
           } catch (err: any) {
             try {
-              fs.rmSync(dir, { recursive: true, force: true })
+              removeDeployDir(dir)
             } catch {}
             if (isAnonymous) {
               controlDb.deleteAnonymous(deployId)
@@ -1923,7 +1932,7 @@ export const hostCommand = defineCommand({
       await stopDeploy(deployId)
       restartState.delete(deployId)
       if (capsuleCgroupRoot) removeCapsuleCgroup(capsuleCgroupRoot, deployId)
-      fs.rmSync(deployDirFor(deployId), { recursive: true, force: true })
+      removeDeployDir(deployDirFor(deployId))
       controlDb.deleteDeployOwner(deployId)
       controlDb.deleteAnonymous(deployId)
       controlDb.deleteQuota(deployId)

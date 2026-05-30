@@ -35,7 +35,9 @@ after(async () => {
     }
   }
   for (const d of cleanupDirs) {
-    if (existsSync(d)) rmSync(d, { recursive: true, force: true })
+    // maxRetries/retryDelay: Windows can briefly lock a worker's SQLite handle
+    // after the host exits, so a bare rmSync races with EBUSY.
+    if (existsSync(d)) rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })
 

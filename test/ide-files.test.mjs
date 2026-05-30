@@ -140,7 +140,10 @@ after(async () => {
   try {
     await stopHost()
   } finally {
-    if (dataDir && existsSync(dataDir)) rmSync(dataDir, { recursive: true, force: true })
+    // maxRetries/retryDelay: Windows can briefly lock a worker's SQLite handle
+    // after the host exits, so a bare rmSync races with EBUSY.
+    if (dataDir && existsSync(dataDir))
+      rmSync(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })
 
