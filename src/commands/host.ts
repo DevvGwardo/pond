@@ -23,6 +23,7 @@ import {
 } from "../host/capsule-fs-sandbox.js"
 import { findPackageJsonLifecycleScripts } from "../host/package-json-validation.js"
 import { verifyTurnstile } from "../host/turnstile.js"
+import { selectIdleDeploys } from "../host/idle.js"
 import { createHash } from "node:crypto"
 import { buildForDeploy } from "../runtime.js"
 import { buildClient } from "../bundler.js"
@@ -601,6 +602,15 @@ export const hostCommand = defineCommand({
         "unconfined. Also POND_CAPSULE_FS_ISOLATION.",
       default: "off",
     },
+    "capsule-idle-timeout": {
+      type: "string",
+      description:
+        "Scale-to-zero: stop a capsule's worker after this much inactivity (e.g. 15m, 30m; 0 = never sleep). The " +
+        "next request re-boots it on demand, so idle deploys hold no memory and host cost tracks active usage " +
+        "instead of total deploy count. When set > 0, deploys also boot lazily on first request rather than all " +
+        "at startup. Also POND_CAPSULE_IDLE_TIMEOUT.",
+      default: "0",
+    },
   },
   async run({ args }) {
     // Honor the platform-provided PORT env (Railway, Heroku-style PaaS) first so
@@ -635,6 +645,12 @@ export const hostCommand = defineCommand({
     // resets on any user-initiated (re)deploy — see forkDeploy's `auto` flag.
     const restartState = new Map<string, { windowStart: number; count: number }>()
     const inFlightBoots = new Map<string, Promise<{ child: ChildProcess; port: number } | null>>()
+    // Scale-to-zero bookkeeping. lastActivityAt: last proxied request (or boot)
+    // per resident deploy. liveSockets: open WebSocket connections per deploy, so
+    // the idle reaper never sleeps a capsule mid-stream. Both are advisory — a
+    // lost entry at worst sleeps a capsule early, and the next request re-wakes it.
+    const lastActivityAt = new Map<string, number>()
+    const liveSockets = new Map<string, number>()
     let shuttingDown = false
     const RESTART_MAX = 5
     const RESTART_WINDOW_MS = 60_000
@@ -665,6 +681,12 @@ export const hostCommand = defineCommand({
         10,
       ) || 0,
     )
+    // Scale-to-zero idle timeout. "0"/"" disables (parseDuration requires a unit,
+    // so the bare-zero case is handled here). > 0 enables idle eviction + lazy boot.
+    const idleTimeoutRaw =
+      process.env.POND_CAPSULE_IDLE_TIMEOUT ??
+      (typeof args["capsule-idle-timeout"] === "string" ? args["capsule-idle-timeout"] : "0")
+    const capsuleIdleTimeoutMs = idleTimeoutRaw === "0" || idleTimeoutRaw === "" ? 0 : parseDuration(idleTimeoutRaw)
     const anonRequestsPerDay = Math.max(
       0,
       parseInt(
@@ -892,6 +914,7 @@ export const hostCommand = defineCommand({
       if (!entry) return
       const { child } = entry
       runningChildren.delete(deployId)
+      lastActivityAt.delete(deployId)
       if (child.exitCode !== null || child.signalCode !== null) return
       const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()))
       try {
@@ -1044,6 +1067,8 @@ export const hostCommand = defineCommand({
           })
         })
         runningChildren.set(deployId, { child, port: bootedPort })
+        // Give a freshly-booted capsule a full idle window before it can be slept.
+        lastActivityAt.set(deployId, Date.now())
         record.appPort = bootedPort
         record.url = urlFor(deployId)
         if (record.bootError) {
@@ -1134,7 +1159,11 @@ export const hostCommand = defineCommand({
       }
     }
 
-    for (const entry of fs.readdirSync(deploysDir, { withFileTypes: true })) {
+    // With scale-to-zero enabled, boot lazily: skip the eager boot-everything pass
+    // and let the first request wake each deploy via ensureBooted, so a restart
+    // doesn't pay for hundreds of idle workers. Otherwise boot all up front (the
+    // historical behavior) so capsules are warm and boot errors surface at start.
+    for (const entry of capsuleIdleTimeoutMs > 0 ? [] : fs.readdirSync(deploysDir, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue
       const record = readRecord(entry.name)
       if (!record) continue
@@ -1195,6 +1224,31 @@ export const hostCommand = defineCommand({
           }
         } catch (e) {
           console.error(`sweep disk-watchdog ${id}:`, e)
+        }
+      }
+      // Scale-to-zero: sleep capsules idle past the timeout. stopDeploy removes
+      // the child from runningChildren before its exit handler runs, so the clean
+      // exit is NOT treated as a crash and no respawn is scheduled; the next
+      // request re-boots the deploy via ensureBooted. Capsules with an open
+      // socket or a boot in flight are skipped (see selectIdleDeploys).
+      if (capsuleIdleTimeoutMs > 0) {
+        const idleIds = selectIdleDeploys({
+          now: Date.now(),
+          idleTimeoutMs: capsuleIdleTimeoutMs,
+          running: runningChildren.keys(),
+          lastActivityAt,
+          liveSockets,
+          booting: inFlightBoots,
+        })
+        for (const id of idleIds) {
+          try {
+            void stopDeploy(id)
+            console.log(
+              `[pond host] capsule ${id} slept after ${formatHumanDuration(capsuleIdleTimeoutMs)} idle (wakes on next request)`,
+            )
+          } catch (e) {
+            console.error(`sweep idle-evict ${id}:`, e)
+          }
         }
       }
       try {
@@ -3460,6 +3514,8 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
       }
       const entry = runningChildren.get(deployId) ?? (await ensureBooted(deployId))
       if (!entry) return c.json({ error: "Unknown deploy" }, 404)
+      // Mark the capsule active so the idle reaper keeps it resident.
+      lastActivityAt.set(deployId, Date.now())
       const url = new URL(c.req.url)
       const target = `http://127.0.0.1:${entry.port}${url.pathname}${url.search}`
       const headers = new Headers()
@@ -3501,48 +3557,71 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
         clientSocket.destroy()
         return
       }
-      const entry = runningChildren.get(deployId)
-      if (!entry) {
-        clientSocket.write("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
-        clientSocket.destroy()
-        return
-      }
-      // Open a TCP connection to the deploy worker, re-serialize the original
-      // upgrade request (parsed headers + any head bytes already buffered),
-      // then full-duplex pipe both directions until either end closes.
-      const upstream = net.connect({ host: "127.0.0.1", port: entry.port })
-      upstream.once("connect", () => {
-        const lines: string[] = [`${req.method} ${req.url} HTTP/${req.httpVersion}`]
-        for (const [name, value] of Object.entries(req.headers)) {
-          if (value == null) continue
-          if (Array.isArray(value)) {
-            for (const v of value) lines.push(`${name}: ${v}`)
-          } else {
-            lines.push(`${name}: ${value}`)
+      void (async () => {
+        // Wake a slept capsule on demand (parity with the HTTP path) so a
+        // WebSocket-first client still reaches a scaled-to-zero deploy.
+        const entry = runningChildren.get(deployId) ?? (await ensureBooted(deployId))
+        if (!entry) {
+          clientSocket.write("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
+          clientSocket.destroy()
+          return
+        }
+        // Count this connection so the idle reaper won't sleep the capsule while a
+        // socket is open; stamp activity on open and again on close.
+        lastActivityAt.set(deployId, Date.now())
+        liveSockets.set(deployId, (liveSockets.get(deployId) ?? 0) + 1)
+        let released = false
+        const releaseSocket = () => {
+          if (released) return
+          released = true
+          const remaining = (liveSockets.get(deployId) ?? 1) - 1
+          if (remaining <= 0) liveSockets.delete(deployId)
+          else liveSockets.set(deployId, remaining)
+          lastActivityAt.set(deployId, Date.now())
+        }
+        // Open a TCP connection to the deploy worker, re-serialize the original
+        // upgrade request (parsed headers + any head bytes already buffered),
+        // then full-duplex pipe both directions until either end closes.
+        const upstream = net.connect({ host: "127.0.0.1", port: entry.port })
+        upstream.once("connect", () => {
+          const lines: string[] = [`${req.method} ${req.url} HTTP/${req.httpVersion}`]
+          for (const [name, value] of Object.entries(req.headers)) {
+            if (value == null) continue
+            if (Array.isArray(value)) {
+              for (const v of value) lines.push(`${name}: ${v}`)
+            } else {
+              lines.push(`${name}: ${value}`)
+            }
+          }
+          lines.push("", "")
+          upstream.write(lines.join("\r\n"))
+          if (head && head.length > 0) upstream.write(head)
+          upstream.pipe(clientSocket)
+          clientSocket.pipe(upstream)
+        })
+        const destroyBoth = () => {
+          try {
+            upstream.destroy()
+          } catch {
+            // best effort
+          }
+          try {
+            clientSocket.destroy()
+          } catch {
+            // best effort
           }
         }
-        lines.push("", "")
-        upstream.write(lines.join("\r\n"))
-        if (head && head.length > 0) upstream.write(head)
-        upstream.pipe(clientSocket)
-        clientSocket.pipe(upstream)
-      })
-      const destroyBoth = () => {
-        try {
+        upstream.on("error", destroyBoth)
+        clientSocket.on("error", destroyBoth)
+        clientSocket.on("close", () => {
+          releaseSocket()
           upstream.destroy()
-        } catch {
-          // best effort
-        }
-        try {
+        })
+        upstream.on("close", () => {
+          releaseSocket()
           clientSocket.destroy()
-        } catch {
-          // best effort
-        }
-      }
-      upstream.on("error", destroyBoth)
-      clientSocket.on("error", destroyBoth)
-      clientSocket.on("close", () => upstream.destroy())
-      upstream.on("close", () => clientSocket.destroy())
+        })
+      })()
     })
 
     const shutdown = async () => {
@@ -3595,6 +3674,15 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
       console.log(
         "  ⚠ capacity: UNLIMITED concurrent capsules — a deploy flood can exceed the container mem_limit and " +
           "trigger the OOM killer. Set --max-active-capsules / POND_MAX_ACTIVE_CAPSULES (see deploy/.env.example).",
+      )
+    }
+    if (capsuleIdleTimeoutMs > 0) {
+      console.log(
+        `  scale-to-zero: capsules sleep after ${formatHumanDuration(capsuleIdleTimeoutMs)} idle and wake on demand (lazy boot on restart)`,
+      )
+    } else {
+      console.log(
+        "  scale-to-zero: off — every deploy stays resident (set --capsule-idle-timeout / POND_CAPSULE_IDLE_TIMEOUT to sleep idle capsules)",
       )
     }
     if (anonymousEnabled) {

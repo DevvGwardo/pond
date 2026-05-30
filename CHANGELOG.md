@@ -5,6 +5,14 @@ Versioning: [Semver](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Scale-to-zero for hosted capsules (`--capsule-idle-timeout` / `POND_CAPSULE_IDLE_TIMEOUT`).** Until now every deploy stayed resident for the host's lifetime — the host eager-booted all deploys on startup and never stopped an idle one — so memory (and on a usage-billed PaaS, cost) scaled with the _total number_ of deploys rather than with active traffic. The host now sleeps a capsule whose worker has seen no request for the configured idle window and re-boots it on the next request via the existing on-demand `ensureBooted` path, so idle deploys hold no memory and `POND_MAX_ACTIVE_CAPSULES` becomes a ceiling on concurrently-_awake_ capsules instead of on total deploys. Default `0` preserves the historical always-resident behavior, so existing operators are unaffected.
+  - `src/commands/host.ts` — the new flag; per-deploy last-activity stamping on every proxied HTTP request and WebSocket connection; a live-socket counter so the reaper never sleeps a capsule mid-stream; idle eviction folded into the existing 60s sweep (`stopDeploy` removes the child from `runningChildren` before its exit handler runs, so a clean sleep is not mistaken for a crash and is not respawned); WebSocket upgrades now also wake a slept capsule (parity with the HTTP path); and, when enabled, lazy startup — deploys boot on first request instead of all at once, so a restart no longer pays for every idle worker.
+  - `src/host/idle.ts` (new) — the eviction decision (`selectIdleDeploys`) is a pure, dependency-free function so it unit-tests without booting a host or waiting on the sweep.
+  - `deploy/.env.example` documents the knob, the cost rationale, and the trade-offs (a sub-second cold start on wake; a burst of simultaneous wakes can briefly exceed `POND_MAX_ACTIVE_CAPSULES`, so the per-capsule memory cap and a platform spend limit remain the backstops).
+  - Tests: `test/host-idle-eviction.test.mjs` covers the disabled, at-threshold, recently-active, live-socket, mid-boot, and missing-stamp cases; a manual end-to-end run confirmed a capsule sleeps after its idle window (resident workers → 0), re-wakes on demand, and lazy-starts after a restart. 209/209 tests pass.
+
 ## [0.4.3] - 2026-05-28
 
 ### Fixed
