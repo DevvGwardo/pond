@@ -8,7 +8,15 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto"
 import { pathToFileURL } from "node:url"
 import { Google, GitHub, generateCodeVerifier, generateState } from "arctic"
 import { SignJWT, jwtVerify } from "jose"
-import { CapsuleAi, CapsuleAuth, CapsuleBlob, CapsuleContext, CapsuleDefinition, ColumnType } from "./server/index.js"
+import {
+  CapsuleAi,
+  CapsuleAuth,
+  CapsuleBlob,
+  CapsuleContext,
+  CapsuleDefinition,
+  CapsuleShopify,
+  ColumnType,
+} from "./server/index.js"
 
 interface ServerModule {
   default: CapsuleDefinition
@@ -352,6 +360,50 @@ function createBlob(cwd: string, db: Database.Database): CapsuleBlob {
   }
 }
 
+export function createShopify(env: Record<string, string>): CapsuleShopify {
+  return {
+    async graphql<T = any>(query: string, variables?: Record<string, unknown>): Promise<T> {
+      const shop = env.SHOPIFY_SHOP
+      const token = env.SHOPIFY_TOKEN
+      if (!shop || !token) {
+        throw new Error("Set SHOPIFY_SHOP and SHOPIFY_TOKEN via `pond env set` to use ctx.shopify.graphql()")
+      }
+
+      // Normalize shop domain: accept "my-store" or "my-store.myshopify.com"
+      let domain = shop.trim().toLowerCase()
+      domain = domain.replace(/^https?:\/\//, "").replace(/\/.*$/, "")
+      if (!domain.endsWith(".myshopify.com")) {
+        domain = `${domain}.myshopify.com`
+      }
+
+      const apiVersion = env.SHOPIFY_API_VERSION || "2025-01"
+      const url = `https://${domain}/admin/api/${apiVersion}/graphql.json`
+
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": token,
+        },
+        body: JSON.stringify({ query, variables }),
+      })
+
+      const body = (await res.json()) as { data?: T; errors?: Array<{ message: string }> }
+
+      if (!res.ok) {
+        const errMsg = body.errors?.[0]?.message ?? `HTTP ${res.status}`
+        throw new Error(`Shopify API error: ${errMsg}`)
+      }
+
+      if (body.errors && body.errors.length > 0) {
+        throw new Error(`Shopify GraphQL error: ${body.errors[0].message}`)
+      }
+
+      return body.data as T
+    },
+  }
+}
+
 function createRuntimeFromDefinition(
   def: CapsuleDefinition,
   cwd: string,
@@ -457,6 +509,7 @@ function createRuntimeFromDefinition(
       env,
       ai,
       blob,
+      shopify: createShopify(env),
       log: {
         info: (message: string, data?: any) => log("info", message, data),
         error: (message: string, data?: any) => log("error", message, data),

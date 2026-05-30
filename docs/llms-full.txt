@@ -114,6 +114,9 @@ interface CapsuleContext {
   db: CapsuleDb
   env: Record<string, string>
   log: CapsuleLog
+  ai: CapsuleAi
+  blob: CapsuleBlob
+  shopify: CapsuleShopify
 }
 ```
 
@@ -202,6 +205,48 @@ const all = await ctx.blob.list("avatars/")
 ```
 
 Capsule users can read blobs via `GET /api/blob/<key>` (subject to whatever auth you wrap on top — there is no built-in ACL).
+
+### `ctx.shopify`
+
+Built-in Shopify Admin API helper. Lets your capsule talk to a Shopify store using a Custom App's Admin API access token — no OAuth, no Partner registration required.
+
+```ts
+interface CapsuleShopify {
+  graphql<T = any>(query: string, variables?: Record<string, unknown>): Promise<T>
+}
+```
+
+#### Env vars
+
+All read from `.env.pond.server` (or set via `pond env set` for hosted deploys):
+
+| Var | Required | Default | Description |
+| --- | -------- | ------- | ----------- |
+| `SHOPIFY_SHOP` | yes | — | Your store's `.myshopify.com` domain. Accepts `my-store` (bare name) or `my-store.myshopify.com` or `https://my-store.myshopify.com/`. |
+| `SHOPIFY_TOKEN` | yes | — | The Admin API access token from a Shopify Custom App (Settings → Apps and sales channels → Develop apps). |
+| `SHOPIFY_API_VERSION` | no | `2025-01` | A [stable Shopify Admin API version](https://shopify.dev/docs/api/usage/versioning). |
+
+#### Example
+
+```ts
+const { products } = await ctx.shopify.graphql<{
+  products: { edges: Array<{ node: { id: string; title: string } }> }
+}>(`{ products(first: 10) { edges { node { id title } } } }`)
+```
+
+#### Error handling
+
+- If `SHOPIFY_SHOP` or `SHOPIFY_TOKEN` is missing, throws `"Set SHOPIFY_SHOP and SHOPIFY_TOKEN via \`pond env set\` to use ctx.shopify.graphql()"`.
+- On a non-2xx HTTP response, throws with the Shopify error message (e.g. `"Shopify API error: Invalid API key or access token"`).
+- On a GraphQL `errors` array in a 200 response, throws with the first error message (e.g. `"Shopify GraphQL error: Field 'blah' doesn't exist on type 'QueryRoot'"`).
+
+#### Deploy requirement
+
+Anonymous deploys block outbound `fetch` by design (see the security model in `deploy/HARDENING.md`). A Shopify capsule must be **claimed** (authenticated) before `ctx.shopify.graphql()` can reach the Shopify Admin API. After claiming with `pond claim <deployId>`, set env vars via `pond env set <deployId> SHOPIFY_SHOP=... SHOPIFY_TOKEN=...` and restart the deploy.
+
+#### Scaffolding
+
+`pond new <name> --template shopify` creates a capsule with a `products` query, a Preact product-table UI, and placeholder env vars in `.env.pond.server`. See the generated `server/index.ts` for the full instructions.
 
 ### `ctx.log`
 
