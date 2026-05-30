@@ -1,4 +1,6 @@
 import { defineCommand, runMain } from "citty"
+import { fileURLToPath } from "node:url"
+import * as path from "node:path"
 import { newCommand } from "./commands/new.js"
 import { devCommand } from "./commands/dev.js"
 import { deployCommand } from "./commands/deploy.js"
@@ -52,8 +54,8 @@ const main = defineCommand({
 export { runMain, main }
 
 // Self-run when executed directly
-const scriptPath = process.argv[1]?.replace(/\.(js|ts)$/, "")
-const thisPath = import.meta.url.replace(/^file:\/\//, "").replace(/\.(js|ts)$/, "")
-if (scriptPath && thisPath.endsWith(scriptPath)) {
+const scriptPath = process.argv[1]
+const thisPath = fileURLToPath(import.meta.url)
+if (scriptPath && path.resolve(thisPath) === path.resolve(scriptPath)) {
   runMain(main)
 }
