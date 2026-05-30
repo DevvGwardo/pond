@@ -1085,7 +1085,16 @@ export const hostCommand = defineCommand({
         }
         writeRecord(record)
       } catch (err: any) {
-        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL")
+        // Wait for the killed worker to actually exit before returning, so the
+        // caller's deploy-dir cleanup runs after the OS has released the worker's
+        // file handles (bundle + data.db). On Windows those handles block rmdir
+        // while the process lives; awaiting exit makes cleanup deterministic
+        // rather than racing the kill. Bounded so a wedged process can't hang us.
+        if (child.exitCode === null && child.signalCode === null) {
+          const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()))
+          child.kill("SIGKILL")
+          await Promise.race([exited, new Promise<void>((resolve) => setTimeout(resolve, 3000).unref())])
+        }
         record.bootError = err?.message ?? String(err)
         writeRecord(record)
         throw err

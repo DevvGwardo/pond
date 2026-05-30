@@ -511,4 +511,4 @@ setInterval(() => {
   } catch {
     process.exit(0)
   }
-}, 1000).unref()
+}, 500).unref()

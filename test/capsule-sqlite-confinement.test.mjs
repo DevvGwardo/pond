@@ -200,7 +200,7 @@ console.log(out.join("\\n"))
       { encoding: "utf-8", timeout: 20000, cwd: deployDir },
     )
   } finally {
-    fs.rmSync(workRoot, { recursive: true, force: true })
+    fs.rmSync(workRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 }
 

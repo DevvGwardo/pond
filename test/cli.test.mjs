@@ -26,7 +26,7 @@ after(async () => {
     }
   }
   for (const d of cleanupDirs) {
-    if (existsSync(d)) rmSync(d, { recursive: true, force: true })
+    if (existsSync(d)) rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })
 

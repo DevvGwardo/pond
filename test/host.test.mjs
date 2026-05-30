@@ -115,7 +115,8 @@ after(async () => {
   try {
     await stopHost()
   } finally {
-    if (dataDir && existsSync(dataDir)) rmSync(dataDir, { recursive: true, force: true })
+    if (dataDir && existsSync(dataDir))
+      rmSync(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })
 
@@ -613,7 +614,8 @@ async function stopExtraHost(h) {
     await exited
     clearTimeout(t)
   }
-  if (h.dataDir && existsSync(h.dataDir)) rmSync(h.dataDir, { recursive: true, force: true })
+  if (h.dataDir && existsSync(h.dataDir))
+    rmSync(h.dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
 }
 
 let anonDeployId = ""
@@ -1023,7 +1025,7 @@ test("anonymous rate limit survives host restart (persisted in control DB)", asy
     assert.equal(afterRestart.status, 429, "rate limit must persist across host restart")
   } finally {
     await killHost(p1)
-    if (existsSync(xData)) rmSync(xData, { recursive: true, force: true })
+    if (existsSync(xData)) rmSync(xData, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })
 
@@ -1125,7 +1127,7 @@ test("sweeper terminates anonymous deploy after grace (via host bounce)", async 
       await exited
       clearTimeout(t)
     }
-    if (existsSync(tinyData)) rmSync(tinyData, { recursive: true, force: true })
+    if (existsSync(tinyData)) rmSync(tinyData, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })
 
@@ -1925,7 +1927,7 @@ export default capsule({
         headers: { authorization: `Bearer ${adminToken}` },
       })
     } finally {
-      if (existsSync(projDir)) rmSync(projDir, { recursive: true, force: true })
+      if (existsSync(projDir)) rmSync(projDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
     }
   },
 )
@@ -2105,7 +2107,7 @@ test("`pond fork <url>` scaffolds a local copy from a public deploy", async () =
     assert.match(server, /public:\s*true/)
     assert.ok(existsSync(path.join(dest, ".env.pond.server")), "env file scaffolded")
   } finally {
-    rmSync(parent, { recursive: true, force: true })
+    rmSync(parent, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })
 
@@ -2380,7 +2382,7 @@ function runHostExpectingExit(extraArgs) {
     }, 8000)
     proc.once("exit", (code) => {
       clearTimeout(timer)
-      rmSync(xData, { recursive: true, force: true })
+      rmSync(xData, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
       resolve({ code, output })
     })
   })

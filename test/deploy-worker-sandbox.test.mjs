@@ -82,7 +82,7 @@ console.log(out.join("\\n"))
       { encoding: "utf-8", timeout: 20000, cwd: tmp },
     )
   } finally {
-    fs.rmSync(tmp, { recursive: true, force: true })
+    fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 }
 
