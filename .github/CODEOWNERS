@@ -1,0 +1,10 @@
+# Default owner for everything in the repo.
+* @DevvGwardo
+
+# The host control plane and capsule isolation run untrusted code — changes here
+# warrant extra scrutiny.
+/src/commands/host.ts @DevvGwardo
+/src/host/ @DevvGwardo
+/src/start-server.ts @DevvGwardo
+/src/runtime.ts @DevvGwardo
+/deploy/ @DevvGwardo

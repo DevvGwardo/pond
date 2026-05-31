@@ -1,5 +1,8 @@
 node_modules/
 dist/
+# Generated image/asset output (e.g. output/imagegen). If a file under here is a
+# real brand asset that should be versioned, commit it explicitly with `git add -f`.
+output/
 *.js
 *.d.ts
 *.d.ts.map
@@ -8,6 +11,7 @@ dist/
 !bin/pond.js
 !bin/pondsh.js
 !bin/pond-mcp.js
+!eslint.config.js
 
 # Secrets / local state — never commit. The deploy runbook (deploy/README.md,
 # deploy/upgrade.sh, docs/operations.md) assumes these are ignored.

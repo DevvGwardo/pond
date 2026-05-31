@@ -27,6 +27,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run format:check
+      - run: npm run lint
       - run: npx tsc --noEmit
       # Some tests scaffold a capsule whose template runs `git init && git commit`.
       # Provide a default identity so the commit step doesn't fail in CI even if
