@@ -33,6 +33,13 @@ export const loginCommand = defineCommand({
       process.exit(1)
     }
     const apiUrl = apiRaw.replace(/\/$/, "")
+    try {
+      const u = new URL(apiUrl)
+      if (u.protocol !== "http:" && u.protocol !== "https:") throw new Error("scheme")
+    } catch {
+      console.error(`--api must be a valid http(s) URL, got "${apiUrl}"`)
+      process.exit(1)
+    }
     const username = typeof args.username === "string" ? args.username : ""
     const token = typeof args.token === "string" ? args.token : ""
     const adminToken = typeof args["admin-token"] === "string" ? args["admin-token"] : ""

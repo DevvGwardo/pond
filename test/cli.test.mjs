@@ -339,3 +339,32 @@ test("`pond uninstall --yes` wipes ~/.pond and tells user to run npm uninstall",
   assert.match(stdout, /npm uninstall -g pondsh/)
   assert.ok(!existsSync(path.join(fakeHome, ".pond")), "~/.pond should be gone")
 })
+
+// P3 item 14: arg-validation fails loud (clean exit + message) instead of
+// silently producing a null port or an unhandled-rejection stack on a bad URL.
+test("deploy --port rejects a non-numeric value", async () => {
+  const dir = tmp("pond-port-")
+  let err
+  try {
+    await execFileP(process.execPath, [CLI_PATH, "deploy", "--local", "--port", "abc"], { cwd: dir, timeout: 10000 })
+  } catch (e) {
+    err = e
+  }
+  assert.ok(err, "expected a non-zero exit")
+  assert.match(String(err.stderr ?? ""), /--port must be/)
+})
+
+test("login --api rejects a value that is not a valid URL", async () => {
+  const fakeHome = tmp("pond-login-home-")
+  let err
+  try {
+    await execFileP(process.execPath, [CLI_PATH, "login", "--api", "notaurl", "--username", "x", "--token", "y"], {
+      env: { ...process.env, HOME: fakeHome, USERPROFILE: fakeHome },
+      timeout: 10000,
+    })
+  } catch (e) {
+    err = e
+  }
+  assert.ok(err, "expected a non-zero exit")
+  assert.match(String(err.stderr ?? ""), /valid http\(s\) URL/)
+})

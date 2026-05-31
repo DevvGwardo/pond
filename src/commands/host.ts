@@ -14,7 +14,9 @@ import {
   joinManagerCgroup,
   applyCapsuleCgroup,
   removeCapsuleCgroup,
+  readCapsuleCgroupUsage,
 } from "../host/cgroup.js"
+import { cpuFractionOverInterval, scoreCpuAbuse, type CpuSample } from "../host/abuse.js"
 import {
   resolveFsIsolationMode,
   bwrapAvailable,
@@ -328,6 +330,11 @@ interface HostedDeployRecord {
   updatedAt: string
   claimedAt?: string
   bootError?: string
+  // ISO timestamp set when the worker exhausted its restart budget (crash-loop).
+  // Machine-readable companion to bootError so listings/alerting can detect a
+  // crash-looped capsule without regex-matching free text. Cleared on the next
+  // successful boot; gates the one-alert-per-episode webhook.
+  crashLoopedAt?: string
   // Capsule-declared metadata. Populated from a regex scan of server/index.ts
   // on each successful build — see extractCapsuleMeta(). Absent on records
   // that haven't been rebuilt since this field was introduced.
@@ -591,7 +598,8 @@ export const hostCommand = defineCommand({
         "Outbound network policy for ALL capsules (uniform, regardless of claim status): " +
         "'open' (legacy: only anonymous-unclaimed capsules are network-restricted; claimed capsules have full network), " +
         "'sealed' (no capsule may make outbound connections), or " +
-        "'proxy' (capsules reach only their per-deploy allowlisted hosts via the egress proxy). " +
+        "'proxy' (capsules reach only their per-deploy allowlisted hosts via the egress proxy — NOT YET WIRED end-to-end; " +
+        "the host refuses to start in this mode, use 'sealed' for now). " +
         "'proxy'/'sealed' REQUIRE the OS egress firewall (deploy/capsule-egress.nft) to be the real boundary. Also POND_CAPSULE_EGRESS.",
       default: "open",
     },
@@ -620,6 +628,27 @@ export const hostCommand = defineCommand({
         "at startup. Also POND_CAPSULE_IDLE_TIMEOUT.",
       default: "0",
     },
+    "alert-webhook": {
+      type: "string",
+      description:
+        "URL to POST a JSON alert to when the host takes action against a capsule (crash-loop budget exhausted, " +
+        "disk-quota auto-stop, CPU-abuse auto-stop). Fire-and-forget; alerts also always go to stderr. Also POND_ALERT_WEBHOOK.",
+    },
+    "capsule-cpu-kill-percent": {
+      type: "string",
+      description:
+        "Auto-kill a capsule that sustains at/above this percent of one CPU core (100 = a full core) for " +
+        "--capsule-cpu-kill-sweeps consecutive 60s sweeps. Requires --capsule-cgroup-root (CPU usage is read from " +
+        "the capsule cgroup). 0 = off (default). Also POND_CAPSULE_CPU_KILL_PERCENT.",
+      default: "0",
+    },
+    "capsule-cpu-kill-sweeps": {
+      type: "string",
+      description:
+        "Consecutive 60s sweeps a capsule must stay over --capsule-cpu-kill-percent before it is auto-killed " +
+        "(a single spike never trips it). Default 3. Also POND_CAPSULE_CPU_KILL_SWEEPS.",
+      default: "3",
+    },
   },
   async run({ args }) {
     // Honor the platform-provided PORT env (Railway, Heroku-style PaaS) first so
@@ -643,6 +672,24 @@ export const hostCommand = defineCommand({
     }
     const abuseEmail =
       process.env.POND_ABUSE_EMAIL ?? (typeof args["abuse-email"] === "string" ? args["abuse-email"] : "") ?? ""
+    const alertWebhook =
+      process.env.POND_ALERT_WEBHOOK ?? (typeof args["alert-webhook"] === "string" ? args["alert-webhook"] : "") ?? ""
+    const cpuKillPercent = Math.max(
+      0,
+      parseInt(
+        process.env.POND_CAPSULE_CPU_KILL_PERCENT ??
+          (typeof args["capsule-cpu-kill-percent"] === "string" ? args["capsule-cpu-kill-percent"] : "0"),
+        10,
+      ) || 0,
+    )
+    const cpuKillSweeps = Math.max(
+      1,
+      parseInt(
+        process.env.POND_CAPSULE_CPU_KILL_SWEEPS ??
+          (typeof args["capsule-cpu-kill-sweeps"] === "string" ? args["capsule-cpu-kill-sweeps"] : "3"),
+        10,
+      ) || 3,
+    )
     const dataDir = path.resolve(process.cwd(), typeof args["data-dir"] === "string" ? args["data-dir"] : ".pond-host")
     const deploysDir = path.join(dataDir, "deploys")
     const tokenFile = path.join(dataDir, "host-token")
@@ -660,7 +707,17 @@ export const hostCommand = defineCommand({
     // lost entry at worst sleeps a capsule early, and the next request re-wakes it.
     const lastActivityAt = new Map<string, number>()
     const liveSockets = new Map<string, number>()
+    // Last on-disk size measured per resident deploy by the disk watchdog (every
+    // 60s). Cached so the /metrics endpoint can report per-capsule disk without
+    // re-walking every deploy dir on each scrape.
+    const capsuleDiskBytes = new Map<string, number>()
+    // CPU-abuse watchdog bookkeeping (only used when --capsule-cpu-kill-percent
+    // is set and cgroups are active). prevCpuSample: last cumulative CPU reading
+    // per deploy; abuseCpuStreak: consecutive sweeps over the threshold.
+    const prevCpuSample = new Map<string, CpuSample>()
+    const abuseCpuStreak = new Map<string, number>()
     let shuttingDown = false
+    const SWEEP_INTERVAL_MS = 60_000
     const RESTART_MAX = 5
     const RESTART_WINDOW_MS = 60_000
     const RESTART_BACKOFF_MS = [500, 1000, 2000, 5000, 10000]
@@ -780,6 +837,24 @@ export const hostCommand = defineCommand({
       console.log(
         `[pond host] note: could not move the manager into ${capsuleCgroupRoot}/manager — per-capsule limits may not bind unless this process is cgroup-delegated (see deploy/setup-capsule-isolation.sh).`,
       )
+    }
+
+    // Operator alerting. Host-side events where the control plane takes action
+    // against a capsule (crash-loop budget exhausted, disk-quota auto-stop) are
+    // surfaced to stderr AND, when --alert-webhook is set, POSTed as JSON so an
+    // operator is paged instead of having to tail `docker logs`. Fire-and-forget:
+    // alerting must never block a request path or take the host down with a dead
+    // alert sink.
+    function alertOperator(event: string, detail: Record<string, unknown>): void {
+      console.error(`[pond host] ALERT ${event}: ${JSON.stringify(detail)}`)
+      if (!alertWebhook) return
+      void fetch(alertWebhook, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ event, host: publicHost, ts: new Date().toISOString(), ...detail }),
+      }).catch(() => {
+        // best-effort: a down/slow alert sink must not affect the control plane
+      })
     }
 
     fs.mkdirSync(deploysDir, { recursive: true })
@@ -924,6 +999,9 @@ export const hostCommand = defineCommand({
       const { child } = entry
       runningChildren.delete(deployId)
       lastActivityAt.delete(deployId)
+      capsuleDiskBytes.delete(deployId)
+      prevCpuSample.delete(deployId)
+      abuseCpuStreak.delete(deployId)
       if (child.exitCode !== null || child.signalCode !== null) return
       const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()))
       try {
@@ -1083,6 +1161,10 @@ export const hostCommand = defineCommand({
         if (record.bootError) {
           delete record.bootError
         }
+        // A clean boot ends any crash-loop episode, re-arming the one-shot alert.
+        if (record.crashLoopedAt) {
+          delete record.crashLoopedAt
+        }
         writeRecord(record)
       } catch (err: any) {
         // Wait for the killed worker to actually exit before returning, so the
@@ -1134,9 +1216,23 @@ export const hostCommand = defineCommand({
         restartState.set(deployId, st)
       }
       if (st.count >= RESTART_MAX) {
+        // Alert exactly once per crash-loop episode. crashLoopedAt is the marker:
+        // unset here means this is a fresh episode (it's cleared on the next
+        // successful boot), so a capsule that keeps re-crashing on every on-demand
+        // boot doesn't spam the operator.
+        const firstAlertThisEpisode = !record.crashLoopedAt
         record.bootError = `Worker crashed ${RESTART_MAX}× within ${Math.round(RESTART_WINDOW_MS / 1000)}s — auto-restart paused until next deploy`
+        record.crashLoopedAt = new Date().toISOString()
         writeRecord(record)
         console.error(`[pond host] deploy ${deployId} crash-looping — auto-restart paused`)
+        if (firstAlertThisEpisode) {
+          alertOperator("capsule.crash_loop", {
+            deployId,
+            restarts: RESTART_MAX,
+            windowSeconds: Math.round(RESTART_WINDOW_MS / 1000),
+            reason: record.bootError,
+          })
+        }
         return
       }
       const delay = RESTART_BACKOFF_MS[Math.min(st.count, RESTART_BACKOFF_MS.length - 1)]
@@ -1230,6 +1326,7 @@ export const hostCommand = defineCommand({
           const maxDiskBytes = controlDb.getQuota(id).maxDiskBytes
           if (!Number.isFinite(maxDiskBytes) || maxDiskBytes <= 0) continue
           const used = dirSize(deployDirFor(id))
+          capsuleDiskBytes.set(id, used)
           if (used > maxDiskBytes) {
             void stopDeploy(id)
             restartState.delete(id)
@@ -1239,9 +1336,48 @@ export const hostCommand = defineCommand({
               writeRecord(record)
             }
             console.error(`[pond host] deploy ${id} over disk quota (${used} > ${maxDiskBytes}) — stopped`)
+            alertOperator("capsule.disk_quota_stop", { deployId: id, usedBytes: used, maxDiskBytes })
           }
         } catch (e) {
           console.error(`sweep disk-watchdog ${id}:`, e)
+        }
+      }
+      // Runtime CPU-abuse watchdog (opt-in). A capsule pinned at its CPU cap is a
+      // sustained denial-of-fairness that no other limit catches. Sample each
+      // resident capsule's cgroup CPU, score it, and auto-kill one that holds
+      // above the threshold for cpuKillSweeps consecutive sweeps. Off unless a
+      // kill threshold AND a cgroup root are configured (CPU usage is unreadable
+      // without cgroups).
+      if (cpuKillPercent > 0 && capsuleCgroupRoot) {
+        const sweepSeconds = SWEEP_INTERVAL_MS / 1000
+        for (const id of [...runningChildren.keys()]) {
+          try {
+            const usage = readCapsuleCgroupUsage(capsuleCgroupRoot, id)
+            if (!usage) {
+              prevCpuSample.delete(id)
+              abuseCpuStreak.delete(id)
+              continue
+            }
+            const prev = prevCpuSample.get(id)
+            prevCpuSample.set(id, usage)
+            const fraction = cpuFractionOverInterval(prev, usage, sweepSeconds)
+            const { streak, kill } = scoreCpuAbuse(fraction, abuseCpuStreak.get(id) ?? 0, cpuKillPercent, cpuKillSweeps)
+            abuseCpuStreak.set(id, streak)
+            if (kill) {
+              void stopDeploy(id)
+              restartState.delete(id)
+              const pct = Math.round(fraction * 100)
+              const record = readRecord(id)
+              if (record) {
+                record.bootError = `CPU abuse: sustained ≥${cpuKillPercent}% of a core across ${cpuKillSweeps} sweeps (last ${pct}%) — capsule stopped. Redeploy to resume.`
+                writeRecord(record)
+              }
+              console.error(`[pond host] deploy ${id} CPU-abusing (${pct}% of a core) — stopped`)
+              alertOperator("capsule.cpu_abuse_stop", { deployId: id, cpuPercent: pct, sustainedSweeps: cpuKillSweeps })
+            }
+          } catch (e) {
+            console.error(`sweep cpu-watchdog ${id}:`, e)
+          }
         }
       }
       // Scale-to-zero: sleep capsules idle past the timeout. stopDeploy removes
@@ -1283,7 +1419,7 @@ export const hostCommand = defineCommand({
       }
     }
     runSweep()
-    const sweepTimer = setInterval(runSweep, 60_000)
+    const sweepTimer = setInterval(runSweep, SWEEP_INTERVAL_MS)
     sweepTimer.unref()
 
     const app = new Hono()
@@ -1324,6 +1460,96 @@ export const hostCommand = defineCommand({
     })
 
     app.get("/api/health", (c) => c.json({ ok: true }))
+
+    // Host observability. Prometheus text exposition of per-capsule resource use
+    // and control-plane state. Admin-gated: the sample set leaks the full deploy
+    // inventory of a multi-tenant box, so it must never be world-readable. CPU/mem
+    // come from each capsule's cgroup (only present when --capsule-cgroup-root is a
+    // delegated subtree); disk is the watchdog's last measurement; the rest is
+    // in-process bookkeeping. Samples are grouped per metric family (Prometheus
+    // requires all samples of a family to be contiguous, with HELP/TYPE first).
+    app.get("/metrics", (c) => {
+      const r = requireAdmin(c)
+      if (r instanceof Response) return r
+      const ids = [...runningChildren.keys()]
+      const usage = new Map<string, ReturnType<typeof readCapsuleCgroupUsage>>()
+      if (capsuleCgroupRoot) for (const id of ids) usage.set(id, readCapsuleCgroupUsage(capsuleCgroupRoot, id))
+      const now = Date.now()
+      const lines: string[] = []
+      const family = (name: string, help: string, type: string, valueFor: (id: string) => number | null) => {
+        lines.push(`# HELP ${name} ${help}`, `# TYPE ${name} ${type}`)
+        for (const id of ids) {
+          const v = valueFor(id)
+          if (v !== null) lines.push(`${name}{deploy="${id}"} ${v}`)
+        }
+      }
+      lines.push(
+        "# HELP pond_host_capsules_active Resident capsule workers",
+        "# TYPE pond_host_capsules_active gauge",
+        `pond_host_capsules_active ${runningChildren.size}`,
+        "# HELP pond_host_capsules_max Configured max concurrent capsules (0=unlimited)",
+        "# TYPE pond_host_capsules_max gauge",
+        `pond_host_capsules_max ${maxActiveCapsules}`,
+      )
+      family("pond_capsule_up", "1 while the capsule worker is resident", "gauge", () => 1)
+      family(
+        "pond_capsule_disk_bytes",
+        "Last measured on-disk size of the deploy dir",
+        "gauge",
+        (id) => capsuleDiskBytes.get(id) ?? dirSize(deployDirFor(id)),
+      )
+      family(
+        "pond_capsule_restarts",
+        "Auto-restarts in the current crash-loop window",
+        "gauge",
+        (id) => restartState.get(id)?.count ?? 0,
+      )
+      family("pond_capsule_open_sockets", "Open WebSocket connections", "gauge", (id) => liveSockets.get(id) ?? 0)
+      family("pond_capsule_idle_seconds", "Seconds since the last proxied request", "gauge", (id) => {
+        const last = lastActivityAt.get(id)
+        return typeof last === "number" ? Math.round((now - last) / 1000) : null
+      })
+      family("pond_capsule_cpu_seconds_total", "Cumulative capsule CPU seconds (cgroup)", "counter", (id) => {
+        const u = usage.get(id)
+        return u ? u.cpuUsageSeconds : null
+      })
+      family("pond_capsule_memory_bytes", "Current capsule memory charged by the cgroup", "gauge", (id) => {
+        const u = usage.get(id)
+        return u ? u.memoryBytes : null
+      })
+      return new Response(lines.join("\n") + "\n", {
+        status: 200,
+        headers: { "content-type": "text/plain; version=0.0.4; charset=utf-8" },
+      })
+    })
+
+    // Automated, consistent control-DB backup for an operator cron. VACUUM INTO a
+    // temp snapshot, stream it, delete the temp. Admin-gated — this is the entire
+    // user/ownership/quota/audit database. Restore stays an offline operation
+    // (stop host, validate the snapshot with validateSqliteFile, swap, restart).
+    app.get("/api/admin/control-db/backup", (c) => {
+      const r = requireAdmin(c)
+      if (r instanceof Response) return r
+      const tmp = path.join(dataDir, `control-backup-${Date.now()}-${process.pid}.db`)
+      try {
+        controlDb.backup(tmp)
+        const buf = fs.readFileSync(tmp)
+        audit(actorFor(r.user, r.viaHostToken), "control_db.backup", { metadata: { bytes: buf.length } })
+        return new Response(buf as any, {
+          status: 200,
+          headers: {
+            "content-type": "application/x-sqlite3",
+            "content-disposition": `attachment; filename="pond-control-${new Date().toISOString().slice(0, 10)}.db"`,
+          },
+        })
+      } finally {
+        try {
+          fs.unlinkSync(tmp)
+        } catch {
+          // best effort
+        }
+      }
+    })
 
     function isHostToken(token: string): boolean {
       return safeEqual(token, hostToken)
@@ -2127,7 +2353,7 @@ export const hostCommand = defineCommand({
       const sourceDir = path.join(dir, "source")
 
       type TableInfo = { name: string; rowCount: number; columns: number }
-      let tables: TableInfo[] = []
+      const tables: TableInfo[] = []
       let dbBytes = 0
       let dbOpenError: string | undefined
       if (fs.existsSync(dbPath)) {
@@ -3719,6 +3945,11 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
     if (capsuleCgroupRoot) {
       console.log(`  capsule isolation: cgroup v2 enabled at ${capsuleCgroupRoot} (per-capsule cpu/memory/pids caps)`)
       console.log(`  capsule egress policy: ${egressMode}`)
+      console.log(
+        cpuKillPercent > 0
+          ? `  abuse auto-kill: a capsule sustaining ≥${cpuKillPercent}% of a core for ${cpuKillSweeps} sweeps is stopped`
+          : "  abuse auto-kill: off (set --capsule-cpu-kill-percent to stop sustained CPU hogs)",
+      )
     } else {
       console.log("  capsule isolation: cgroup limits OFF (heap cap only) — set --capsule-cgroup-root to enable")
       // The OS egress firewall (deploy/capsule-egress.nft) matches on capsule
@@ -3745,6 +3976,11 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
           "with bubblewrap for a kernel-enforced per-tenant filesystem boundary. See deploy/HARDENING.md.",
       )
     }
+    console.log(
+      alertWebhook
+        ? "  observability: GET /metrics (admin-gated, Prometheus) · operator alerts → --alert-webhook"
+        : "  observability: GET /metrics (admin-gated, Prometheus) · operator alerts to stderr only (set --alert-webhook / POND_ALERT_WEBHOOK to page on crash-loop / disk-quota stops)",
+    )
     if (hostname === "0.0.0.0" || hostname === "::") {
       console.log(
         "  ⚠ bound to all interfaces — deploying a bundle here gives the caller arbitrary code execution as this user.\n",

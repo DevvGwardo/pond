@@ -325,6 +325,176 @@ export default capsule({
   }
 })
 
+test("runtime rejects a wrongly-typed value for a declared column (TS types are erased)", async () => {
+  // A handler declares `(ctx, name, qty)` where qty maps to a number() column.
+  // Handler param types are stripped in the bundled worker, so without runtime
+  // validation a string "notanumber" would be stored silently. It must be rejected.
+  const parent = tmp("pond-validate-")
+  const serverSrc = `import { capsule, mutation, query, string, number, table } from "pond/server"
+export default capsule({
+  schema: { items: table({ name: string(), qty: number() }) },
+  queries: { items: query((ctx) => ctx.db.items.all()) },
+  mutations: { add: mutation((ctx, name, qty) => ctx.db.items.insert({ name, qty })) },
+})`
+  const dir = await scaffoldCapsule(parent, "cap-validate", serverSrc)
+  const port = await pickFreePort()
+  const proc = spawnDev(dir, port)
+  try {
+    await waitForUrl(`http://127.0.0.1:${port}/api/query/items`)
+
+    // Wrong type: a string into a number() column → rejected, not a silent 200.
+    const bad = await fetch(`http://127.0.0.1:${port}/api/mutation/add`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ args: ["widget", "notanumber"] }),
+    })
+    assert.ok(bad.status >= 400, `wrongly-typed arg should be rejected, got ${bad.status}`)
+
+    // Correct type still works and round-trips.
+    const good = await fetch(`http://127.0.0.1:${port}/api/mutation/add`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ args: ["widget", 5] }),
+    })
+    assert.equal(good.status, 200, "correctly-typed insert should succeed")
+    assert.equal((await good.json()).qty, 5)
+
+    // Only the valid row persisted — the rejected insert never hit the table.
+    const listed = await (await fetch(`http://127.0.0.1:${port}/api/query/items`)).json()
+    assert.equal(listed.length, 1, "the rejected insert must not have persisted")
+    assert.equal(listed[0].qty, 5)
+  } finally {
+    await killProc(proc)
+  }
+})
+
+test("ORM: ctx.transaction rolls back on throw; offset paginates; count aggregates", async () => {
+  const parent = tmp("pond-orm-")
+  const serverSrc = `import { capsule, mutation, query, string, number, table } from "pond/server"
+export default capsule({
+  schema: { items: table({ name: string(), n: number() }) },
+  queries: {
+    items: query((ctx) => ctx.db.items.all()),
+    page: query((ctx, offset) => ctx.db.items.orderBy("n", "asc").limit(2).offset(offset).all()),
+    total: query((ctx) => ctx.db.items.count()),
+  },
+  mutations: {
+    add: mutation((ctx, name, n) => ctx.db.items.insert({ name, n })),
+    addTwoThenFail: mutation((ctx) =>
+      ctx.transaction(() => {
+        ctx.db.items.insert({ name: "tx-a", n: 100 })
+        ctx.db.items.insert({ name: "tx-b", n: 101 })
+        throw new Error("boom")
+      }),
+    ),
+  },
+})`
+  const dir = await scaffoldCapsule(parent, "cap-orm", serverSrc)
+  const port = await pickFreePort()
+  const proc = spawnDev(dir, port)
+  const base = `http://127.0.0.1:${port}`
+  const addItem = (name, n) =>
+    fetch(`${base}/api/mutation/add`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ args: [name, n] }),
+    })
+  const page = async (offset) =>
+    (
+      await fetch(`${base}/api/query/page`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ args: [offset] }),
+      })
+    ).json()
+  try {
+    await waitForUrl(`${base}/api/query/items`)
+    for (let i = 0; i < 5; i++) assert.equal((await addItem(`item-${i}`, i)).status, 200)
+
+    // count() aggregate
+    assert.equal(await (await fetch(`${base}/api/query/total`)).json(), 5)
+
+    // offset pagination (ordered by n asc, page size 2)
+    assert.deepEqual(
+      (await page(0)).map((r) => r.n),
+      [0, 1],
+    )
+    assert.deepEqual(
+      (await page(2)).map((r) => r.n),
+      [2, 3],
+    )
+    assert.deepEqual(
+      (await page(4)).map((r) => r.n),
+      [4],
+    )
+
+    // transaction rollback: the failing mutation must persist neither insert
+    const txRes = await fetch(`${base}/api/mutation/addTwoThenFail`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ args: [] }),
+    })
+    assert.ok(txRes.status >= 400, `failing transaction should error, got ${txRes.status}`)
+    assert.equal(await (await fetch(`${base}/api/query/total`)).json(), 5, "rolled-back inserts must not persist")
+    const all = await (await fetch(`${base}/api/query/items`)).json()
+    assert.ok(!all.some((r) => r.name === "tx-a" || r.name === "tx-b"), "no partial transaction rows")
+  } finally {
+    await killProc(proc)
+  }
+})
+
+test("RBAC helpers: requireUser rejects guests; requireOwner gates by owner column", async () => {
+  const parent = tmp("pond-rbac-")
+  const serverSrc = `import { capsule, mutation, query, string, table, requireUser, requireOwner } from "pond/server"
+export default capsule({
+  schema: { items: table({ owner: string(), body: string() }) },
+  queries: {
+    ready: query(() => "ok"),
+    whoami: query((ctx) => requireUser(ctx)),
+    mine: query((ctx, id) => requireOwner(ctx, "items", id)),
+  },
+  mutations: { seed: mutation((ctx, owner, body) => ctx.db.items.insert({ owner, body })) },
+})`
+  const dir = await scaffoldCapsule(parent, "cap-rbac", serverSrc)
+  const port = await pickFreePort()
+  const proc = spawnDev(dir, port)
+  const base = `http://127.0.0.1:${port}`
+  const seed = (owner, body) =>
+    fetch(`${base}/api/mutation/seed`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ args: [owner, body] }),
+    }).then((r) => r.json())
+  const mine = (id) =>
+    fetch(`${base}/api/query/mine`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ args: [id] }),
+    })
+  try {
+    await waitForUrl(`${base}/api/query/ready`)
+
+    // The dev runtime resolves an unauthenticated caller to the "guest" identity.
+    const ownRow = await seed("guest", "ok") // owned by the guest caller
+    const otherRow = await seed("someone-else", "secret") // owned by a different user
+
+    // requireUser must reject the guest.
+    const who = await fetch(`${base}/api/query/whoami`)
+    assert.ok(who.status >= 400, `requireUser should reject a guest, got ${who.status}`)
+
+    // requireOwner returns the row the caller owns...
+    const ok = await mine(ownRow.id)
+    assert.equal(ok.status, 200, "owner should be allowed")
+    assert.equal((await ok.json()).body, "ok")
+
+    // ...and refuses one owned by someone else (indistinguishable from missing).
+    const denied = await mine(otherRow.id)
+    assert.ok(denied.status >= 400, `non-owner should be denied, got ${denied.status}`)
+  } finally {
+    await killProc(proc)
+  }
+})
+
 test("`pond new --generate` without an agent fails cleanly + leaves AGENTS.md", async () => {
   const parent = tmp("pond-gen-")
   // No agents available — bypass detection by overriding env vars + HOME

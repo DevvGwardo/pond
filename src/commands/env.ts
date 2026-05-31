@@ -17,7 +17,7 @@ function readLocalDeploy(): { deployId: string; apiUrl: string } | null {
   return null
 }
 
-function resolveTarget(args: any): { deployId: string; apiUrl: string } {
+function resolveTarget(args: Record<string, unknown>): { deployId: string; apiUrl: string } {
   const argDeployId = typeof args?.deployId === "string" ? args.deployId : ""
   const argApi = typeof args?.api === "string" ? args.api.replace(/\/$/, "") : ""
   const local = readLocalDeploy()
@@ -74,7 +74,7 @@ export const envCommand = defineCommand({
         api: { type: "string", required: false },
       },
       async run({ args }) {
-        const a = args as any
+        const a = args as { _?: unknown; api?: unknown }
         const positional: string[] = Array.isArray(a._) ? a._ : []
         if (positional.length < 2) {
           console.error("Usage: pond env set <deployId> KEY=value [KEY=value ...]")

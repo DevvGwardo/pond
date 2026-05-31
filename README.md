@@ -473,7 +473,6 @@ Each deploy's `ctx.log.*` entries stream over SSE on `/__pond/logs` and are appe
 - No OS-level isolation between deploys (no containers, no seccomp).
 - No HTTPS, no automatic TLS, no DNS provisioning, no wildcard cert automation (custom subdomains require an external reverse proxy for TLS).
 - No billing, no usage metering beyond hard quota limits.
-- No WebSocket support through the proxy.
 
 ## Public Server API
 

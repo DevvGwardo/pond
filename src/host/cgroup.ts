@@ -83,6 +83,42 @@ export function capsuleCgroupDir(root: string, deployId: string): string {
   return path.join(root, `capsule-${deployId}`)
 }
 
+export interface CapsuleCgroupUsage {
+  // Cumulative CPU time the capsule has consumed since its cgroup was created.
+  cpuUsageSeconds: number
+  // Current memory charged to the capsule's cgroup (RSS + page cache it owns).
+  memoryBytes: number
+  // CFS bandwidth throttling — a capsule pinned at its cpu.max cap shows a
+  // climbing nrThrottled/throttledSeconds, which is the signal that it is
+  // CPU-starved (or abusing its share). Surfaced for observability/abuse scoring.
+  nrThrottled: number
+  throttledSeconds: number
+}
+
+// Read a capsule's live cgroup resource usage. Best-effort and a no-op (null)
+// when cgroup isolation isn't active for this deploy — the same degrade-quietly
+// contract as the rest of this module, so a /metrics caller on macOS dev or an
+// undelegated host simply gets no per-capsule CPU/mem rather than an error.
+export function readCapsuleCgroupUsage(root: string, deployId: string): CapsuleCgroupUsage | null {
+  const dir = capsuleCgroupDir(root, deployId)
+  try {
+    const fields: Record<string, number> = {}
+    for (const line of fs.readFileSync(path.join(dir, "cpu.stat"), "utf-8").trim().split("\n")) {
+      const [k, v] = line.trim().split(/\s+/)
+      if (k && v !== undefined) fields[k] = Number(v)
+    }
+    const memoryBytes = Number(fs.readFileSync(path.join(dir, "memory.current"), "utf-8").trim())
+    return {
+      cpuUsageSeconds: (fields.usage_usec ?? 0) / 1_000_000,
+      memoryBytes: Number.isFinite(memoryBytes) ? memoryBytes : 0,
+      nrThrottled: fields.nr_throttled ?? 0,
+      throttledSeconds: (fields.throttled_usec ?? 0) / 1_000_000,
+    }
+  } catch {
+    return null
+  }
+}
+
 // Move the calling (manager) process into a leaf cgroup under root. Two reasons:
 // (1) cgroup v2's "no internal processes" rule — root can only enable
 // controllers for its children once it holds no processes of its own; and

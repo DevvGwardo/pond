@@ -18,7 +18,12 @@ export function collectSourceFiles(cwd: string): Record<string, string> {
   const walk = (rel: string) => {
     const abs = path.join(cwd, rel)
     if (!fs.existsSync(abs)) return
-    const stat = fs.statSync(abs)
+    // Don't follow symlinks. A symlink under server/ pointing at /etc/passwd (or
+    // anywhere outside the source tree) would otherwise be resolved and its
+    // contents read into the uploaded bundle. lstat reports the link itself; for
+    // a regular file/dir it is equivalent to statSync.
+    const stat = fs.lstatSync(abs)
+    if (stat.isSymbolicLink()) return
     if (stat.isFile()) {
       const text = fs.readFileSync(abs, "utf-8")
       out[rel.split(path.sep).join("/")] = text
@@ -50,7 +55,7 @@ export function collectSourceFiles(cwd: string): Record<string, string> {
   return out
 }
 
-function slugifySubdomain(raw: string): string {
+export function slugifySubdomain(raw: string): string {
   // Server rule (host.ts /api/domains): DNS label — a-z, 0-9, hyphens; max 63; no leading/trailing hyphen.
   // Cap at 40 to leave headroom for a "-NN" collision suffix.
   const slug = raw
@@ -92,7 +97,7 @@ async function tryAliasDomain(opts: {
   return undefined
 }
 
-function formatRelative(targetIso: string | undefined, fromMs: number): string {
+export function formatRelative(targetIso: string | undefined, fromMs: number): string {
   if (!targetIso) return ""
   const diff = new Date(targetIso).getTime() - fromMs
   if (!isFinite(diff)) return ""
@@ -150,6 +155,14 @@ export const deployCommand = defineCommand({
   },
   async run({ args }) {
     const cwd = process.cwd()
+    // Validate --port once. parseInt("abc") is NaN, which serializes to null in
+    // deploy.json; downstream `|| 3000` heals it, but a bad value should fail
+    // loudly here rather than silently become a null in the record.
+    const portNum = Number.parseInt(String(args.port ?? "3000"), 10)
+    if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
+      console.error(`--port must be an integer 1-65535, got "${String(args.port)}"`)
+      process.exit(1)
+    }
     const serverFile = path.join(cwd, "server", "index.ts")
     const clientFile = path.join(cwd, "client", "index.tsx")
     const envFile = path.join(cwd, ".env.pond.server")
@@ -219,7 +232,7 @@ export const deployCommand = defineCommand({
             bundleHash: hash,
             bundlePath: outfile,
             clientPath: clientHtml ? clientPath : undefined,
-            port: parseInt(args.port, 10),
+            port: portNum,
           },
           null,
           2,
@@ -323,7 +336,7 @@ export const deployCommand = defineCommand({
           claimedAt: remote.claimedAt,
           terminatesAt: remote.terminatesAt,
           expiresAt: remote.expiresAt,
-          port: parseInt(args.port, 10),
+          port: portNum,
         },
         null,
         2,

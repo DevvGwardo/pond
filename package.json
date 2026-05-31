@@ -3,6 +3,7 @@
   "version": "0.4.5",
   "description": "Agent-native CLI and runtime for building small full-stack TypeScript apps. Hosted Lakebed-style anonymous deploys included.",
   "license": "MIT",
+  "author": "DevvGwardo (https://github.com/DevvGwardo)",
   "homepage": "https://github.com/DevvGwardo/pond#readme",
   "bugs": {
     "url": "https://github.com/DevvGwardo/pond/issues"
@@ -35,6 +36,7 @@
     "build:llms": "node scripts/build-llms.mjs",
     "dev": "tsc --watch",
     "test": "npm run build && node --test test/*.test.mjs",
+    "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "prepublishOnly": "npm run build",
@@ -69,16 +71,30 @@
     "@types/cross-spawn": "^6.0.6",
     "@types/ws": "^8.18.1",
     "codemirror": "^6.0.2",
+    "eslint": "^9.39.4",
+    "eslint-plugin-react-hooks": "^5.2.0",
     "husky": "^9.1.7",
     "lint-staged": "^17.0.5",
     "prettier": "^3.8.3",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "typescript-eslint": "^8.60.0"
   },
   "keywords": [
     "agents",
+    "agent-native",
     "app-runtime",
+    "runtime",
     "cli",
-    "pond"
+    "pond",
+    "typescript",
+    "full-stack",
+    "capsule",
+    "deploy",
+    "serverless",
+    "multi-tenant",
+    "hono",
+    "sqlite",
+    "preact"
   ],
   "engines": {
     "node": ">=18"

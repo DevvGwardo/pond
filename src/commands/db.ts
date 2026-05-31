@@ -161,6 +161,55 @@ export const dbCommand = defineCommand({
         console.log(json.message)
       },
     }),
+    migrate: defineCommand({
+      meta: {
+        name: "migrate",
+        description:
+          "Apply a destructive schema change the auto-migrator refuses: drop or rename a column on the live database.",
+      },
+      args: {
+        drop: { type: "string", required: false, description: "Column to drop, as <table>.<column>" },
+        rename: {
+          type: "string",
+          required: false,
+          description: "Column to rename, as <table>.<oldColumn> (with --to)",
+        },
+        to: { type: "string", required: false, description: "New column name (used with --rename)" },
+        port: { type: "string", default: "3000" },
+        target: { type: "string", required: false },
+        local: LOCAL_FLAG,
+      },
+      async run({ args }) {
+        const target = typeof args.target === "string" ? args.target : undefined
+        const port = typeof args.port === "string" ? args.port : "3000"
+        const local = Boolean(args.local)
+
+        let payload: { op: string; table: string; column: string; to?: string }
+        if (typeof args.drop === "string" && args.drop) {
+          const [table, column] = args.drop.split(".")
+          if (!table || !column) throw new Error("--drop expects <table>.<column>")
+          payload = { op: "drop", table, column }
+        } else if (typeof args.rename === "string" && args.rename) {
+          const [table, column] = args.rename.split(".")
+          if (!table || !column) throw new Error("--rename expects <table>.<oldColumn> together with --to <newColumn>")
+          if (typeof args.to !== "string" || !args.to) throw new Error("--rename requires --to <newColumn>")
+          payload = { op: "rename", table, column, to: args.to }
+        } else {
+          throw new Error("specify --drop <table>.<column> or --rename <table>.<oldColumn> --to <newColumn>")
+        }
+
+        const res = await rawFetch("/__pond/db/migrate", port, target, local, {
+          method: "POST",
+          body: JSON.stringify(payload),
+          headers: { "content-type": "application/json" },
+        })
+        const json = (await res.json()) as { ok?: boolean; message?: string; error?: string }
+        if (!res.ok || !json.ok) {
+          throw new Error(`migrate failed: ${json.error ?? res.status}`)
+        }
+        console.log(json.message)
+      },
+    }),
     dump: defineCommand({
       meta: {
         name: "dump",

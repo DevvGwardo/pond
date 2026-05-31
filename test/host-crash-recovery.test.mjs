@@ -11,10 +11,11 @@
 import { test, after } from "node:test"
 import assert from "node:assert/strict"
 import { spawn } from "node:child_process"
-import { mkdtempSync, rmSync, existsSync } from "node:fs"
+import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import * as path from "node:path"
 import * as net from "node:net"
+import * as http from "node:http"
 import { randomBytes } from "node:crypto"
 
 import { stopProc } from "./proc-kill.mjs"
@@ -194,4 +195,121 @@ test("a capsule that crashes after boot is brought back up (auto-respawn + lazy 
 
   assert.ok(existsSync(marker), "the worker should have crashed at least once (marker written)")
   assert.ok(recovered, "the capsule should serve again after crashing (self-healed)")
+})
+
+// Capsule that crashes on EVERY boot — it boots far enough to send "booted"
+// (so deploy-create succeeds and it enters the restart loop), then exits 200ms
+// later. With nothing re-arming it, the host exhausts its restart budget.
+const ALWAYS_CRASHING_SERVER_SRC = `import { capsule, query, string, table } from "pond/server"
+setTimeout(() => { process.exit(1) }, 200)
+export default capsule({
+  schema: { items: table({ name: string() }) },
+  queries: { ping: query(() => "pong") },
+  mutations: {},
+})
+`
+
+test("crash-loop budget exhaustion fires exactly one operator alert + sets crashLoopedAt", async () => {
+  // A tiny webhook sink records every alert POST the host sends.
+  const alerts = []
+  const sink = http.createServer((req, res) => {
+    let body = ""
+    req.on("data", (c) => (body += c))
+    req.on("end", () => {
+      try {
+        alerts.push(JSON.parse(body))
+      } catch {
+        // ignore non-JSON
+      }
+      res.writeHead(204).end()
+    })
+  })
+  await new Promise((resolve) => sink.listen(0, "127.0.0.1", resolve))
+  sink.unref()
+  const sinkPort = sink.address().port
+  after(() => sink.close())
+
+  const dataDir = mkdtempSync(path.join(tmpdir(), "pond-crash-loop-"))
+  cleanupDirs.push(dataDir)
+  const publicHost = "localhost"
+  const port = await pickFreePort()
+  const apiUrl = `http://127.0.0.1:${port}`
+  const hostToken = randomBytes(16).toString("hex")
+
+  const proc = spawn(
+    process.execPath,
+    [
+      CLI_PATH,
+      "host",
+      "--port",
+      String(port),
+      "--host",
+      "127.0.0.1",
+      "--public-host",
+      publicHost,
+      "--data-dir",
+      dataDir,
+      "--anonymous-rate-per-hour",
+      "100",
+      "--alert-webhook",
+      `http://127.0.0.1:${sinkPort}/alert`,
+    ],
+    {
+      env: { ...process.env, POND_HOST_TOKEN: hostToken },
+      stdio: ["ignore", "pipe", "pipe"],
+      cwd: REPO_ROOT,
+    },
+  )
+  cleanupProcs.push(proc)
+  proc.stdout.on("data", () => {})
+  proc.stderr.on("data", () => {})
+
+  await waitForHealth(apiUrl)
+
+  const adminRes = await fetch(`${apiUrl}/api/users`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${hostToken}` },
+    body: JSON.stringify({ username: "admin" }),
+  })
+  assert.equal(adminRes.status, 201)
+  const adminToken = (await adminRes.json()).token
+
+  const deployRes = await fetch(`${apiUrl}/api/deploys`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({
+      sourceFiles: {
+        "server/index.ts": ALWAYS_CRASHING_SERVER_SRC,
+        "package.json": '{"name":"loop-cap","private":true,"type":"module"}\n',
+      },
+    }),
+  })
+  const deployBody = await deployRes.json()
+  assert.equal(deployRes.status, 201, `deploy create failed: ${JSON.stringify(deployBody)}`)
+  const deployId = deployBody.deployId
+
+  // Reaching exhaustion takes 6 crashes spaced by the fixed backoff ladder
+  // (0.5+1+2+5+10s ≈ 18.5s) plus boot time — poll generously.
+  const recordPath = path.join(dataDir, "deploys", deployId, "deploy.json")
+  const start = Date.now()
+  while (Date.now() - start < 45000) {
+    await sleep(500)
+    if (alerts.length > 0) break
+  }
+  assert.ok(alerts.length >= 1, "expected a crash-loop alert webhook POST")
+
+  // Settle: confirm the alert is one-shot (no duplicate within a further window).
+  await sleep(3000)
+  assert.equal(alerts.length, 1, `expected exactly one alert, got ${alerts.length}`)
+
+  const alert = alerts[0]
+  assert.equal(alert.event, "capsule.crash_loop")
+  assert.equal(alert.deployId, deployId)
+  assert.equal(alert.restarts, 5)
+  assert.ok(typeof alert.ts === "string" && alert.ts.length > 0)
+
+  // The machine-readable marker is persisted on the record.
+  const record = JSON.parse(readFileSync(recordPath, "utf-8"))
+  assert.ok(record.crashLoopedAt, "deploy record should carry crashLoopedAt after exhaustion")
+  assert.match(record.bootError ?? "", /crash/i)
 })

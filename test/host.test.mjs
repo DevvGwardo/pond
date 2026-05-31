@@ -2312,6 +2312,162 @@ test("publicInspect exposes read-only inspect but NOT backup/restore/logs withou
   assert.equal(backupTok.status, 200, "claim token should authorize backup")
 })
 
+test("GET /metrics is admin-gated and emits Prometheus host metrics", async () => {
+  const noAuth = await fetch(`${apiUrl}/metrics`)
+  assert.equal(noAuth.status, 401, "/metrics must require auth (it leaks the deploy inventory)")
+
+  const res = await fetch(`${apiUrl}/metrics`, { headers: { authorization: `Bearer ${hostToken}` } })
+  assert.equal(res.status, 200)
+  assert.match(res.headers.get("content-type") ?? "", /text\/plain/)
+  const body = await res.text()
+  assert.match(body, /pond_host_capsules_active \d+/)
+  assert.match(body, /# TYPE pond_capsule_disk_bytes gauge/)
+  assert.match(body, /# TYPE pond_capsule_cpu_seconds_total counter/)
+})
+
+test("db restore validates the candidate is a usable SQLite db before staging", async () => {
+  const http = await import("node:http")
+  const proxyReq = (id, method, pathname, headers = {}, bodyBuf) =>
+    new Promise((resolve, reject) => {
+      const req = http.request(
+        {
+          host: "127.0.0.1",
+          port,
+          method,
+          path: pathname,
+          headers: {
+            host: `${id}.${publicHost}:${port}`,
+            ...(bodyBuf ? { "content-length": String(bodyBuf.length) } : {}),
+            ...headers,
+          },
+        },
+        (res) => {
+          const chunks = []
+          res.on("data", (c) => chunks.push(c))
+          res.on("end", () => resolve({ status: res.statusCode, buf: Buffer.concat(chunks) }))
+        },
+      )
+      req.on("error", reject)
+      if (bodyBuf) req.write(bodyBuf)
+      req.end()
+    })
+
+  const create = await fetch(`${apiUrl}/api/deploys`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ sourceFiles: tinySourceFiles() }),
+  })
+  assert.equal(create.status, 201)
+  const cb = await create.json()
+  const manage = { "x-pond-claim-token": cb.claimToken }
+
+  // A body that passes the 16-byte SQLite magic check but is otherwise garbage
+  // is exactly what the old header-only check let through. It must now 400.
+  const corrupt = Buffer.concat([Buffer.from("SQLite format 3\0", "latin1"), Buffer.alloc(512, 0x7f)])
+  const bad = await proxyReq(cb.deployId, "POST", "/__pond/db/restore", manage, corrupt)
+  assert.equal(bad.status, 400, `corrupt restore should 400, got ${bad.status}: ${bad.buf}`)
+  assert.match(bad.buf.toString("utf8"), /not a usable SQLite database/)
+
+  // A real snapshot from /__pond/db/backup round-trips through restore (valid
+  // candidate is accepted and staged).
+  const backup = await proxyReq(cb.deployId, "GET", "/__pond/db/backup", manage)
+  assert.equal(backup.status, 200)
+  assert.ok(backup.buf.length > 16, "backup should return real db bytes")
+  const good = await proxyReq(cb.deployId, "POST", "/__pond/db/restore", manage, backup.buf)
+  assert.equal(good.status, 200, `valid restore should 200, got ${good.status}: ${good.buf}`)
+  assert.match(good.buf.toString("utf8"), /"ok":true/)
+})
+
+test("pond db migrate drops/renames a column on the live database (owner-gated)", async () => {
+  const http = await import("node:http")
+  const jsonReq = (id, method, pathname, headers = {}, bodyObj) =>
+    new Promise((resolve, reject) => {
+      const payload = bodyObj === undefined ? undefined : Buffer.from(JSON.stringify(bodyObj))
+      const req = http.request(
+        {
+          host: "127.0.0.1",
+          port,
+          method,
+          path: pathname,
+          headers: {
+            host: `${id}.${publicHost}:${port}`,
+            ...(payload ? { "content-type": "application/json", "content-length": String(payload.length) } : {}),
+            ...headers,
+          },
+        },
+        (res) => {
+          let data = ""
+          res.on("data", (c) => (data += c))
+          res.on("end", () => resolve({ status: res.statusCode, body: data }))
+        },
+      )
+      req.on("error", reject)
+      if (payload) req.write(payload)
+      req.end()
+    })
+
+  const migrateSrc = `import { capsule, mutation, query, string, table } from "pond/server"
+export default capsule({
+  schema: { notes: table({ body: string(), tag: string() }) },
+  queries: { notes: query((ctx) => ctx.db.notes.all()) },
+  mutations: { add: mutation((ctx, body, tag) => ctx.db.notes.insert({ body, tag })) },
+})`
+  const create = await fetch(`${apiUrl}/api/deploys`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ sourceFiles: tinySourceFiles(migrateSrc) }),
+  })
+  assert.equal(create.status, 201)
+  const cb = await create.json()
+  const manage = { "x-pond-claim-token": cb.claimToken }
+
+  // Seed a row.
+  const add = await jsonReq(cb.deployId, "POST", "/api/mutation/add", {}, { args: ["hello", "x"] })
+  assert.equal(add.status, 200, `seed insert failed: ${add.body}`)
+
+  // Owner gate: no claim token → 403.
+  const noTok = await jsonReq(
+    cb.deployId,
+    "POST",
+    "/__pond/db/migrate",
+    {},
+    { op: "drop", table: "notes", column: "tag" },
+  )
+  assert.equal(noTok.status, 403, "migrate must require the claim token")
+
+  // Reserved columns are protected.
+  const reserved = await jsonReq(cb.deployId, "POST", "/__pond/db/migrate", manage, {
+    op: "drop",
+    table: "notes",
+    column: "id",
+  })
+  assert.equal(reserved.status, 400)
+
+  // Drop the `tag` column; `body` data must survive.
+  const drop = await jsonReq(cb.deployId, "POST", "/__pond/db/migrate", manage, {
+    op: "drop",
+    table: "notes",
+    column: "tag",
+  })
+  assert.equal(drop.status, 200, `drop failed: ${drop.body}`)
+  let rows = JSON.parse((await jsonReq(cb.deployId, "GET", "/__pond/db/dump/notes", manage)).body)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].body, "hello", "row data must survive the drop")
+  assert.ok(!("tag" in rows[0]), "dropped column must be gone")
+
+  // Rename `body` → `content`; data preserved under the new name.
+  const rename = await jsonReq(cb.deployId, "POST", "/__pond/db/migrate", manage, {
+    op: "rename",
+    table: "notes",
+    column: "body",
+    to: "content",
+  })
+  assert.equal(rename.status, 200, `rename failed: ${rename.body}`)
+  rows = JSON.parse((await jsonReq(cb.deployId, "GET", "/__pond/db/dump/notes", manage)).body)
+  assert.equal(rows[0].content, "hello", "renamed column carries the data")
+  assert.ok(!("body" in rows[0]), "old column name must be gone")
+})
+
 // Spawn `pond host` with the given extra args and resolve with {code, output}
 // once it exits. Used to assert startup-validation failures (which never reach
 // a healthy listening state, so startExtraHost's waitForHealth can't be used).
