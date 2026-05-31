@@ -659,7 +659,131 @@ export function App() {
 `,
 }
 
-export const TEMPLATES: Template[] = [TODO, AUTH_APP, BLOG, CHAT, DASHBOARD, WEBHOOK_HANDLER]
+const SHOPIFY: Template = {
+  name: "shopify",
+  description: "Shopify-connected capsule — query your store\'s Admin API with a Custom App token.",
+  keywords: ["shopify", "store", "products", "ecommerce", "commerce", "orders", "inventory"],
+  envExtra: `SHOPIFY_SHOP=
+SHOPIFY_TOKEN=
+# SHOPIFY_API_VERSION=2025-01
+`,
+  serverTs: `import { capsule, query } from "pond/server";
+
+// ── Shopify capsule ──────────────────────────────────────────────
+// Uses ctx.shopify.graphql() to call the Shopify Admin GraphQL API.
+//
+// 1. In your Shopify admin: Settings → Apps and sales channels →
+//    Develop apps → Create an app (or use an existing Custom App).
+// 2. Under "Admin API integration", copy the Admin API access token.
+// 3. Set your env vars:
+//      pond env set <deployId> SHOPIFY_SHOP=my-store.myshopify.com
+//      pond env set <deployId> SHOPIFY_TOKEN=shpat_abc123
+//    Or for local dev, add them to .env.pond.server in this directory.
+// 4. Optionally override the API version:
+//      SHOPIFY_API_VERSION=2025-04
+//    (defaults to 2025-01)
+
+export default capsule({
+  schema: {},
+
+  queries: {
+    products: query(async (ctx) => {
+      const result = await ctx.shopify.graphql<{
+        products: { edges: Array<{ node: { id: string; title: string; status: string; totalInventory: number } }> };
+      }>(\`{
+        products(first: 20) {
+          edges {
+            node {
+              id
+              title
+              status
+              totalInventory
+            }
+          }
+        }
+      }\`);
+      return result.products.edges.map((e) => e.node);
+    }),
+  },
+
+  mutations: {},
+});
+`,
+  clientTsx: `import { useQuery } from "pond/client";
+
+type Product = {
+  id: string;
+  title: string;
+  status: string;
+  totalInventory: number;
+};
+
+export function App() {
+  const { data: products, isLoading, error } = useQuery<Product[]>("products");
+
+  return (
+    <main class="min-h-screen bg-black px-6 py-14 text-white">
+      <section class="mx-auto max-w-4xl">
+        <p class="mb-3 font-mono text-xs uppercase tracking-[0.2em] text-neutral-500">pond / shopify</p>
+        <h1 class="mb-2 text-5xl font-bold tracking-tight">Products.</h1>
+        <p class="mb-10 text-sm text-neutral-500">Loaded from your Shopify store via Admin API.</p>
+
+        {isLoading ? <p class="font-mono text-xs text-neutral-500">loading products\u2026</p> : null}
+
+        {error ? (
+          <div class="border border-red-900 bg-red-950/30 px-4 py-3 font-mono text-xs text-red-400">
+            <p class="mb-1 font-semibold uppercase tracking-widest">Error</p>
+            <p class="break-all">{error instanceof Error ? error.message : String(error)}</p>
+            <p class="mt-2 text-neutral-500">
+              Set SHOPIFY_SHOP and SHOPIFY_TOKEN in .env.pond.server, or run
+              {\` pond env set <deployId> SHOPIFY_SHOP=... SHOPIFY_TOKEN=...\`} for a hosted deploy.
+            </p>
+          </div>
+        ) : null}
+
+        {products && products.length === 0 ? (
+          <p class="font-mono text-xs text-neutral-600">No products found, or the store is empty.</p>
+        ) : null}
+
+        {products && products.length > 0 ? (
+          <table class="w-full border-collapse font-mono text-sm">
+            <thead>
+              <tr class="border-b border-neutral-800 text-left text-xs uppercase tracking-widest text-neutral-500">
+                <th class="pb-2 font-normal">Title</th>
+                <th class="pb-2 font-normal">Status</th>
+                <th class="pb-2 text-right font-normal tabular-nums">Inventory</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-neutral-900">
+              {products.map((p) => (
+                <tr key={p.id} class="hover:bg-neutral-950">
+                  <td class="py-3 pr-4">{p.title}</td>
+                  <td class="py-3 pr-4">
+                    <span
+                      class={"inline-block border px-2 py-0.5 text-[10px] uppercase tracking-widest " +
+                        (p.status === "ACTIVE" ? "border-emerald-800 text-emerald-400" : "border-neutral-700 text-neutral-500")}
+                    >
+                      {p.status}
+                    </span>
+                  </td>
+                  <td class="py-3 text-right tabular-nums text-neutral-300">{p.totalInventory}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : null}
+
+        <p class="mt-10 border-t border-neutral-900 pt-6 font-mono text-[10px] leading-relaxed text-neutral-600">
+          Powered by the Shopify Admin API. Create a Custom App in your Shopify admin to get an access token.
+        </p>
+      </section>
+    </main>
+  );
+}
+`,
+}
+
+export const TEMPLATES: Template[] = [TODO, AUTH_APP, BLOG, CHAT, DASHBOARD, WEBHOOK_HANDLER, SHOPIFY]
 
 export function getTemplate(name: string): Template | null {
   return TEMPLATES.find((t) => t.name === name) ?? null

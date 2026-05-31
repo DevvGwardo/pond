@@ -7,6 +7,30 @@ Versioning: [Semver](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Shopify-connected capsules — `ctx.shopify.graphql()`.** A new first-class context helper that lets a capsule call the Shopify Admin GraphQL API using a Custom App access token. Reads `SHOPIFY_SHOP`, `SHOPIFY_TOKEN`, and `SHOPIFY_API_VERSION` from capsule env (`.env.pond.server` or `pond env set`). Normalizes bare shop names and protocol-prefixed URLs. Throws clear errors on missing env, non-2xx responses, and GraphQL `errors` arrays. Export `createShopify()` from `src/runtime.ts` for testing.
+  - `src/server/index.ts` — new `CapsuleShopify` interface, `shopify` field on `CapsuleContext`.
+  - `src/runtime.ts` — `createShopify()` implementation wired into `buildContext()`.
+  - `test/shopify.test.mjs` — 9 unit tests covering missing env, URL/header/body construction, shop name normalization, HTTP errors, GraphQL errors, and API version override.
+  - Docs: `docs/api-reference.md` — context interface updated, full `ctx.shopify` section with env var table, example, error handling, and authenticated-deploy requirement.
+  - Agent guidance: `src/template.ts` capsule contract mentions `ctx.shopify`.
+
+- **`pond new --template shopify` scaffold.** A new template selectable via `pond new <name> --template shopify`. Scaffolds a capsule with a `products` query (calls `ctx.shopify.graphql()`), a Preact product-table UI, and placeholder env vars in `.env.pond.server`. Includes a comment block in `server/index.ts` explaining how to create a Shopify Custom App and set env vars.
+  - `src/templates.ts` — new `SHOPIFY` template constant added to `TEMPLATES` array.
+  - Template respects the existing Pond house style (bg-black, neutral palette, square corners, wireframe buttons, tabular-nums).
+
+### Security
+
+- **Security headers on all responses.** Added `strict-transport-security`, `x-content-type-options`, `x-frame-options`, `referrer-policy`, and `permissions-policy` headers via the existing middleware. CSP intentionally omitted because the dashboard loads Tailwind from CDN + inline scripts.
+- **Removed `controlUrl` from dashboard bootstrap.** The internal control plane URL (`http://0.0.0.0:8787`) is no longer injected into the dashboard HTML. The dashboard now derives its API endpoint from `window.location` instead.
+- **Generalized abuse page quotas.** Replaced exact service limits on the `/abuse` page with a summary of the quota model without disclosing specific numbers.
+- **Opaque capacity error message.** Changed the 503 "Host at capacity" error to a generic "Service unavailable" to avoid leaking internal state.
+
+### Changed
+
+- **Capacity 503 error message.** The admission-control 503 response now returns `"Service unavailable"` instead of `"Host at capacity — try again shortly"` to avoid exposing real-time capacity state.
+
+- **Authenticated-deploy requirement documented for Shopify capsules.** Anonymous deploys block outbound `fetch` by design. The docs and template both note that Shopify capsules must be claimed before `ctx.shopify.graphql()` can reach the Shopify Admin API. The anonymous sandbox is not weakened.
+
 - **Scale-to-zero for hosted capsules (`--capsule-idle-timeout` / `POND_CAPSULE_IDLE_TIMEOUT`).** Until now every deploy stayed resident for the host's lifetime — the host eager-booted all deploys on startup and never stopped an idle one — so memory (and on a usage-billed PaaS, cost) scaled with the _total number_ of deploys rather than with active traffic. The host now sleeps a capsule whose worker has seen no request for the configured idle window and re-boots it on the next request via the existing on-demand `ensureBooted` path, so idle deploys hold no memory and `POND_MAX_ACTIVE_CAPSULES` becomes a ceiling on concurrently-_awake_ capsules instead of on total deploys. Default `0` preserves the historical always-resident behavior, so existing operators are unaffected.
   - `src/commands/host.ts` — the new flag; per-deploy last-activity stamping on every proxied HTTP request and WebSocket connection; a live-socket counter so the reaper never sleeps a capsule mid-stream; idle eviction folded into the existing 60s sweep (`stopDeploy` removes the child from `runningChildren` before its exit handler runs, so a clean sleep is not mistaken for a crash and is not respawned); WebSocket upgrades now also wake a slept capsule (parity with the HTTP path); and, when enabled, lazy startup — deploys boot on first request instead of all at once, so a restart no longer pays for every idle worker.
   - `src/host/idle.ts` (new) — the eviction decision (`selectIdleDeploys`) is a pure, dependency-free function so it unit-tests without booting a host or waiting on the sweep.

@@ -75,7 +75,7 @@ Every table auto-gets \`id\` (uuid), \`createdAt\`, \`updatedAt\`. Column helper
 
 Queries and mutations both take \`(ctx, ...args)\` — the args after \`ctx\` are the wire payload. Queries re-run reactively on the client whenever a mutation completes.
 
-\`ctx.ai\`, \`ctx.blob\` and per-route \`rateLimit\` are first-class — see https://pond.run/docs/api-reference.md.
+\`ctx.ai\`, \`ctx.blob\`, \`ctx.shopify\` and per-route \`rateLimit\` are first-class — see https://pond.run/docs/api-reference.md.
 
 ### client/index.tsx
 

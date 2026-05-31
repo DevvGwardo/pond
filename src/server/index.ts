@@ -71,6 +71,10 @@ export interface CapsuleAi {
   stream(opts: AiCompleteOptions): AsyncIterable<string>
 }
 
+export interface CapsuleShopify {
+  graphql<T = any>(query: string, variables?: Record<string, unknown>): Promise<T>
+}
+
 export interface CapsuleBlob {
   put(
     key: string,
@@ -89,6 +93,7 @@ export interface CapsuleContext {
   log: CapsuleLog
   ai: CapsuleAi
   blob: CapsuleBlob
+  shopify: CapsuleShopify
 }
 
 // ── Handlers ───────────────────────────────────────────────
