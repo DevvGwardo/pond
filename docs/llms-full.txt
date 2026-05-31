@@ -353,12 +353,17 @@ export default capsule({
     "/api/webhook": { perMinute: 1000, by: "ip" },
   },
   public: true,              // optional — opt into /gallery + pond fork
+  static: true,              // optional — serve as a pure static site (no worker)
   title: "...",              // optional — public listing title
   description: "...",        // optional — public listing description
 })
 ```
 
 By default the capsule's HTTP endpoints reject cross-origin browser requests. List extra origins in `allowedOrigins` to opt them in.
+
+### Static deploys (`static: true`)
+
+Set `static: true` to deploy as a pure static site: the host serves your prebuilt `client/index.tsx` (as `client.html`) straight from disk and **never boots a capsule worker**. There is no SQLite, auth, AI, blob storage, or `queries`/`mutations`/`endpoints` — `/api/*` returns `404`. In return a static deploy costs no running process, doesn't count against the host's max-active-capsules cap, and scales infinitely at rest. Use it for landing pages, docs, and other content-only sites. A `static: true` deploy **requires** a `client/index.tsx`; the `schema`/`queries`/`mutations` fields are still required by the format but may be empty (`{}`).
 
 ### WebSockets
 

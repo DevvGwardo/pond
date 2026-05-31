@@ -167,16 +167,18 @@ function writeSourceTree(deployDir: string, files: Record<string, string>): void
 async function buildDeployFromSource(deployDir: string): Promise<{
   bundleBytes: number
   bundleHash: string
-  meta: { isPublic: boolean; title?: string; description?: string }
+  meta: { isPublic: boolean; isStatic: boolean; title?: string; description?: string }
 }> {
   const sourceDir = path.join(deployDir, "source")
   const serverFile = path.join(sourceDir, "server", "index.ts")
   const clientFile = path.join(sourceDir, "client", "index.tsx")
   const outfile = path.join(deployDir, "deploy-bundle.mjs")
   await buildForDeploy(serverFile, sourceDir, outfile)
+  let clientBuilt = false
   if (fs.existsSync(clientFile)) {
     const html = await buildClient(clientFile)
     fs.writeFileSync(path.join(deployDir, "client.html"), html)
+    clientBuilt = true
   } else {
     const stale = path.join(deployDir, "client.html")
     if (fs.existsSync(stale)) fs.rmSync(stale)
@@ -184,6 +186,12 @@ async function buildDeployFromSource(deployDir: string): Promise<{
   const bundleBuf = fs.readFileSync(outfile)
   const bundleHash = createHash("sha256").update(bundleBuf).digest("hex")
   const meta = extractCapsuleMeta(serverFile)
+  // A static deploy is served as its client.html with no worker, so a client
+  // is mandatory — reject the meaningless "static, no client" combination at
+  // build time rather than shipping a deploy that 404s on every request.
+  if (meta.isStatic && !clientBuilt) {
+    throw new Error("A static capsule (static: true) requires a client/index.tsx")
+  }
   return { bundleBytes: bundleBuf.length, bundleHash, meta }
 }
 
@@ -293,14 +301,20 @@ function capsuleArgRange(scanSrc: string): { start: number; end: number } | null
 // can't unintentionally flip the deploy public and expose its source via
 // /gallery and /api/public-deploys/:id/source. Strings/comments are stripped
 // before the brace scan so a `}` inside a string can't end the range early.
-function extractCapsuleMeta(serverFile: string): { isPublic: boolean; title?: string; description?: string } {
-  if (!fs.existsSync(serverFile)) return { isPublic: false }
+function extractCapsuleMeta(serverFile: string): {
+  isPublic: boolean
+  isStatic: boolean
+  title?: string
+  description?: string
+} {
+  if (!fs.existsSync(serverFile)) return { isPublic: false, isStatic: false }
   const rawSrc = fs.readFileSync(serverFile, "utf-8")
   const scanSrc = stripJsStringsAndComments(rawSrc)
   const range = capsuleArgRange(scanSrc)
-  if (!range) return { isPublic: false }
+  if (!range) return { isPublic: false, isStatic: false }
   const scanArg = scanSrc.slice(range.start, range.end)
   const isPublic = /\bpublic\s*:\s*true\b/.test(scanArg)
+  const isStatic = /\bstatic\s*:\s*true\b/.test(scanArg)
   // Title and description are matched on the ORIGINAL source (their values live
   // inside string literals, which the stripper blanks out) — but only within
   // the SAME capsule-arg range, so a stray `title:` outside the call is ignored.
@@ -309,6 +323,7 @@ function extractCapsuleMeta(serverFile: string): { isPublic: boolean; title?: st
   const descMatch = rawArg.match(/\bdescription\s*:\s*(["'`])([^"'`]{1,500})\1/)
   return {
     isPublic,
+    isStatic,
     title: titleMatch?.[2],
     description: descMatch?.[2],
   }
@@ -339,6 +354,9 @@ interface HostedDeployRecord {
   // on each successful build — see extractCapsuleMeta(). Absent on records
   // that haven't been rebuilt since this field was introduced.
   isPublic?: boolean
+  // When true, the deploy is served as a pure static site (client.html only)
+  // and never boots a capsule worker. Set from extractCapsuleMeta() on build.
+  isStatic?: boolean
   title?: string
   description?: string
   // Build metadata. Persisted on each successful build so the IDE's
@@ -1854,7 +1872,7 @@ export const hostCommand = defineCommand({
           let buildResult: {
             bundleBytes: number
             bundleHash: string
-            meta: { isPublic: boolean; title?: string; description?: string }
+            meta: { isPublic: boolean; isStatic: boolean; title?: string; description?: string }
           }
           try {
             buildResult = await buildDeployFromSource(dir)
@@ -1889,6 +1907,7 @@ export const hostCommand = defineCommand({
             createdAt: nowIso,
             updatedAt: nowIso,
             isPublic: buildResult.meta.isPublic,
+            isStatic: buildResult.meta.isStatic,
             title: buildResult.meta.title,
             description: buildResult.meta.description,
             bundleBytes: buildResult.bundleBytes,
@@ -1911,9 +1930,11 @@ export const hostCommand = defineCommand({
             controlDb.setDeployOwner(deployId, user!.id)
           }
           try {
-            // forkDeploy derives the uniform isolation policy itself (the anon
-            // row, if any, was just written above).
-            await forkDeploy(record)
+            // Static deploys are served straight from disk (client.html) and
+            // never boot a worker — skip the fork entirely so they consume no
+            // capsule slot. forkDeploy derives the uniform isolation policy
+            // itself (the anon row, if any, was just written above).
+            if (!record.isStatic) await forkDeploy(record)
           } catch (err: any) {
             try {
               removeDeployDir(dir)
@@ -1986,7 +2007,7 @@ export const hostCommand = defineCommand({
         let buildResult: {
           bundleBytes: number
           bundleHash: string
-          meta: { isPublic: boolean; title?: string; description?: string }
+          meta: { isPublic: boolean; isStatic: boolean; title?: string; description?: string }
         }
         try {
           buildResult = await buildDeployFromSource(dir)
@@ -2009,6 +2030,7 @@ export const hostCommand = defineCommand({
         record.publicInspect = Boolean(body.publicInspect)
         record.updatedAt = updateNow
         record.isPublic = buildResult.meta.isPublic
+        record.isStatic = buildResult.meta.isStatic
         record.title = buildResult.meta.title
         record.description = buildResult.meta.description
         record.bundleBytes = buildResult.bundleBytes
@@ -2017,7 +2039,14 @@ export const hostCommand = defineCommand({
         record.lastBuildDurationMs = Date.now() - updateStart
         writeRecord(record)
         try {
-          await forkDeploy(record)
+          // Static deploys serve from disk with no worker. If a redeploy flips
+          // an existing (resident) deploy to static, stop its worker; otherwise
+          // (re)boot the worker as usual.
+          if (record.isStatic) {
+            await stopDeploy(deployId)
+          } else {
+            await forkDeploy(record)
+          }
         } catch (err: any) {
           return c.json({ error: `Boot failed: ${err?.message ?? err}` }, 500)
         }
@@ -2796,7 +2825,7 @@ export const hostCommand = defineCommand({
       let result: {
         bundleBytes: number
         bundleHash: string
-        meta: { isPublic: boolean; title?: string; description?: string }
+        meta: { isPublic: boolean; isStatic: boolean; title?: string; description?: string }
       }
       try {
         result = await buildDeployFromSource(dir)
@@ -3071,6 +3100,27 @@ export const hostCommand = defineCommand({
       if (!hostHeader) return false
       const bare = hostHeader.toLowerCase().split(":")[0]
       return bare === externalHost || bare === `www.${externalHost}`
+    }
+
+    // Serve a static deploy: its prebuilt client.html for any navigational GET
+    // (SPA fallback), with no worker behind it. /api/* paths have no server to
+    // answer them on a static deploy, and non-GET methods are rejected. The
+    // surrounding security-header middleware (CSP/HSTS/frame-ancestors) still
+    // runs on the returned response, so static deploys get the same hardening
+    // as proxied ones.
+    function serveStaticDeploy(deployId: string, c: any): Response {
+      const clientPath = path.join(deployDirFor(deployId), "client.html")
+      if (!fs.existsSync(clientPath)) {
+        return c.json({ error: "Not found" }, 404)
+      }
+      if (c.req.path.startsWith("/api/")) {
+        return c.json({ error: "This is a static deploy — it has no server endpoints" }, 404)
+      }
+      if (c.req.method !== "GET" && c.req.method !== "HEAD") {
+        return c.json({ error: "Method not allowed" }, 405)
+      }
+      const html = fs.readFileSync(clientPath, "utf-8")
+      return c.html(html)
     }
 
     function landingHtml(): string {
@@ -3784,6 +3834,15 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
 
       const deployId = deployIdFromHost(c.req.header("host"))
       if (!deployId) return c.json({ error: "Not found" }, 404)
+      // Static deploys are served as their prebuilt client.html straight from
+      // disk — no worker, no capsule slot, exempt from capsule wake + the anon
+      // daily quota (serving a file is not metered compute). The record read is
+      // skipped whenever a worker is already resident, so a resident (therefore
+      // dynamic) capsule never pays for this check on the hot path.
+      if (!runningChildren.has(deployId)) {
+        const rec = readRecord(deployId)
+        if (rec?.isStatic) return serveStaticDeploy(deployId, c)
+      }
       // Per-deploy daily quota — anonymous deploys only; claiming a deploy lifts
       // it. Checked here (before ensureBooted) so an over-quota app can't even
       // wake its capsule. Every proxied request counts; POST /api/mutation/*
@@ -3849,6 +3908,13 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
       const hostHeader = (req.headers.host ?? "").toString()
       const deployId = deployIdFromHost(hostHeader)
       if (!deployId) {
+        clientSocket.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n")
+        clientSocket.destroy()
+        return
+      }
+      // Static deploys have no worker and no socket() handlers — never boot one
+      // for an upgrade. Only pay the record read when no worker is resident.
+      if (!runningChildren.has(deployId) && readRecord(deployId)?.isStatic) {
         clientSocket.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n")
         clientSocket.destroy()
         return
