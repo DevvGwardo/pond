@@ -138,7 +138,7 @@ test("first capsule is admitted, second is refused with 503 + Retry-After", asyn
   assert.equal(second.status, 503)
   assert.equal(second.headers.get("retry-after"), "30")
   const body = await second.json()
-  assert.match(body.error, /capacity/i)
+  assert.match(body.error, /unavailable/i)
 })
 
 test("deleting a capsule frees its slot so a new create succeeds", async () => {

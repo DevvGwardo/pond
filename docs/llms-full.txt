@@ -220,11 +220,11 @@ interface CapsuleShopify {
 
 All read from `.env.pond.server` (or set via `pond env set` for hosted deploys):
 
-| Var | Required | Default | Description |
-| --- | -------- | ------- | ----------- |
-| `SHOPIFY_SHOP` | yes | — | Your store's `.myshopify.com` domain. Accepts `my-store` (bare name) or `my-store.myshopify.com` or `https://my-store.myshopify.com/`. |
-| `SHOPIFY_TOKEN` | yes | — | The Admin API access token from a Shopify Custom App (Settings → Apps and sales channels → Develop apps). |
-| `SHOPIFY_API_VERSION` | no | `2025-01` | A [stable Shopify Admin API version](https://shopify.dev/docs/api/usage/versioning). |
+| Var                   | Required | Default   | Description                                                                                                                            |
+| --------------------- | -------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `SHOPIFY_SHOP`        | yes      | —         | Your store's `.myshopify.com` domain. Accepts `my-store` (bare name) or `my-store.myshopify.com` or `https://my-store.myshopify.com/`. |
+| `SHOPIFY_TOKEN`       | yes      | —         | The Admin API access token from a Shopify Custom App (Settings → Apps and sales channels → Develop apps).                              |
+| `SHOPIFY_API_VERSION` | no       | `2025-01` | A [stable Shopify Admin API version](https://shopify.dev/docs/api/usage/versioning).                                                   |
 
 #### Example
 

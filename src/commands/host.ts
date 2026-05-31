@@ -1300,7 +1300,13 @@ export const hostCommand = defineCommand({
           // ignore
         }
       }
-      const headers: Record<string, string> = {}
+      const headers: Record<string, string> = {
+        "strict-transport-security": "max-age=63072000; includeSubDomains; preload",
+        "x-content-type-options": "nosniff",
+        "x-frame-options": "DENY",
+        "referrer-policy": "strict-origin-when-cross-origin",
+        "permissions-policy": "camera=(), microphone=(), geolocation=()",
+      }
       if (allow && origin) {
         headers["access-control-allow-origin"] = origin
         headers["vary"] = "Origin"
@@ -1563,7 +1569,7 @@ export const hostCommand = defineCommand({
         // creation of a NET-NEW capsule is gated — redeploy/claim/update of an
         // existing deploy reuses its slot and is unaffected.
         if (atCapacity()) {
-          return new Response(JSON.stringify({ error: "Host at capacity — try again shortly" }), {
+          return new Response(JSON.stringify({ error: "Service unavailable" }), {
             status: 503,
             headers: { "content-type": "application/json", "retry-after": "30" },
           })
@@ -3360,7 +3366,7 @@ ${opts.bodyHtml}
   <h2>Reporting abuse</h2>
   <p>Email ${contact} with the deploy URL and a description of the issue. The host operator may take down any deploy at any time without notice. There is no SLA.</p>
   <h2>Service limits</h2>
-  <p>Anonymous deploys: 16 MB bundle, 128 MB disk, 128 MB memory, 1 hour grace before termination, 7 days before deletion, 5 deploys per IP per hour. Outbound network access is restricted at the JavaScript layer for anonymous deploys.</p>
+  <p>Anonymous deploys are subject to generous but finite resource limits (bundle size, disk, memory, and network requests). Unclaimed deploys are terminated after a grace period and deleted after a retention period. Outbound network access is restricted for anonymous deploys.</p>
   <h2>No warranty</h2>
   <p>Pond is provided as-is. The host operator makes no guarantees of availability, durability, or fitness for any purpose. Do not deploy production workloads.</p>
   <p style="margin-top:36px;"><a href="/">← back</a></p>
@@ -3462,7 +3468,7 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
             return c.html(galleryHtml())
           }
           if (url.pathname === "/dashboard" || url.pathname === "/dashboard/") {
-            const bootstrap = JSON.stringify({ controlUrl: apiUrl, publicHost })
+            const bootstrap = JSON.stringify({ publicHost })
             const html = dashboardHtml.replace(
               "__POND_DASHBOARD__BOOTSTRAP__",
               `window.__POND_DASHBOARD = ${bootstrap}`,

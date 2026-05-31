@@ -17,7 +17,17 @@ Versioning: [Semver](https://semver.org/spec/v2.0.0.html).
 - **`pond new --template shopify` scaffold.** A new template selectable via `pond new <name> --template shopify`. Scaffolds a capsule with a `products` query (calls `ctx.shopify.graphql()`), a Preact product-table UI, and placeholder env vars in `.env.pond.server`. Includes a comment block in `server/index.ts` explaining how to create a Shopify Custom App and set env vars.
   - `src/templates.ts` — new `SHOPIFY` template constant added to `TEMPLATES` array.
   - Template respects the existing Pond house style (bg-black, neutral palette, square corners, wireframe buttons, tabular-nums).
-  - Error state renders a clear error box with setup instructions when Shopify env vars are missing.
+
+### Security
+
+- **Security headers on all responses.** Added `strict-transport-security`, `x-content-type-options`, `x-frame-options`, `referrer-policy`, and `permissions-policy` headers via the existing middleware. CSP intentionally omitted because the dashboard loads Tailwind from CDN + inline scripts.
+- **Removed `controlUrl` from dashboard bootstrap.** The internal control plane URL (`http://0.0.0.0:8787`) is no longer injected into the dashboard HTML. The dashboard now derives its API endpoint from `window.location` instead.
+- **Generalized abuse page quotas.** Replaced exact service limits on the `/abuse` page with a summary of the quota model without disclosing specific numbers.
+- **Opaque capacity error message.** Changed the 503 "Host at capacity" error to a generic "Service unavailable" to avoid leaking internal state.
+
+### Changed
+
+- **Capacity 503 error message.** The admission-control 503 response now returns `"Service unavailable"` instead of `"Host at capacity — try again shortly"` to avoid exposing real-time capacity state.
 
 - **Authenticated-deploy requirement documented for Shopify capsules.** Anonymous deploys block outbound `fetch` by design. The docs and template both note that Shopify capsules must be claimed before `ctx.shopify.graphql()` can reach the Shopify Admin API. The anonymous sandbox is not weakened.
 

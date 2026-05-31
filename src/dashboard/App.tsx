@@ -3,23 +3,21 @@ import { useEffect, useMemo, useRef, useState } from "preact/hooks"
 
 declare global {
   interface Window {
-    __POND_DASHBOARD?: { controlUrl: string; publicHost: string }
+    __POND_DASHBOARD?: { publicHost: string }
   }
 }
 
 interface Bootstrap {
-  controlUrl: string
   publicHost: string
 }
 
 function readBootstrap(): Bootstrap {
   if (typeof window !== "undefined" && window.__POND_DASHBOARD) {
     return {
-      controlUrl: window.__POND_DASHBOARD.controlUrl,
       publicHost: window.__POND_DASHBOARD.publicHost,
     }
   }
-  return { controlUrl: "", publicHost: "" }
+  return { publicHost: "" }
 }
 
 const TOKEN_KEY = "pond-dashboard-token"
