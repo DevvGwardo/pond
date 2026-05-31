@@ -31,6 +31,15 @@ The full operational walkthrough lives in [`docs/operations.md`](../docs/operati
 
 ## Quickstart (Railway path)
 
+> **⚠ Status (2026-05-31): `pond.run` is served by the Docker + Cloudflare-Tunnel
+> path (see below), NOT Railway.** A Railway `pond-host` service exists but DNS is
+> **not** cut over to it and its volume holds **no production data** (deploys,
+> users, and tokens live on the Tunnel host). Running `railway up` deploys to that
+> idle service and does **not** affect live `pond.run`. Do not point `pond.run` DNS
+> at Railway, and do not set `POND_PUBLIC_HOST=pond.run` on the Railway service,
+> until you actually intend to migrate — see the cutover note at the end of this
+> section.
+
 Railway builds the image from source (`railway.json` → `deploy/Dockerfile`, a
 multi-stage build that compiles the TS so the image doesn't depend on
 gitignored `.js`). The host reads `PORT` and the `POND_*` vars from the Railway

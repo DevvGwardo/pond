@@ -93,7 +93,11 @@ function authHeaders(token: string): Record<string, string> {
 async function fetchMe(token: string): Promise<{ me: Me } | { error: string; status: number }> {
   const r = await fetch("/api/users/me", { headers: authHeaders(token) })
   if (!r.ok) return { error: (await r.json().catch(() => ({}))).error ?? "auth failed", status: r.status }
-  return { me: await r.json() }
+  // /api/users/me returns { userId, username, isAdmin } — map userId → id so
+  // ownership checks (me.id === ownerId) work. Passing the raw body through left
+  // me.id undefined, so every deploy looked SHARED and "Owned by you" read 0.
+  const raw = (await r.json()) as { userId: string; username: string; isAdmin: boolean }
+  return { me: { id: raw.userId, username: raw.username, isAdmin: raw.isAdmin } }
 }
 
 async function fetchDeploys(token: string): Promise<{ deploys: DeployRow[] } | { error: string }> {
