@@ -137,7 +137,43 @@ export interface ControlDb {
   ): { ok: boolean; kind?: "request" | "mutation" }
   /** Removes daily-usage rows for days strictly before `beforeDay` (YYYY-MM-DD). */
   pruneDailyUsage(beforeDay: string): number
+  /**
+   * Write a clean, transactionally-consistent snapshot of the control DB to
+   * `destPath` via `VACUUM INTO`. Unlike copying the file, this captures a
+   * coherent state even while the DB is in use (open WAL), so an operator cron
+   * can snapshot a live host without quiescing it.
+   */
+  backup(destPath: string): void
   close(): void
+}
+
+/**
+ * Verify that a SQLite file at `file` is a usable database, not merely one with
+ * the right magic header. Opens it read-only, runs `PRAGMA integrity_check`, and
+ * confirms the schema is queryable. Used to gate a restore: a candidate that
+ * passes the 16-byte header check can still be truncated/corrupt, and swapping
+ * it in would brick the host on next boot. Returns the failure reason instead of
+ * throwing so callers can turn it into a clean 4xx.
+ */
+export function validateSqliteFile(file: string): { ok: true } | { ok: false; error: string } {
+  let probe: Database.Database | null = null
+  try {
+    probe = new Database(file, { readonly: true, fileMustExist: true })
+    const result = probe.pragma("integrity_check", { simple: true })
+    if (result !== "ok") return { ok: false, error: `integrity_check failed: ${String(result)}` }
+    // Confirm the catalog itself is readable — a corrupt page can pass
+    // integrity_check on an empty db yet fail real queries.
+    probe.prepare("SELECT name FROM sqlite_master LIMIT 1").get()
+    return { ok: true }
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? String(err) }
+  } finally {
+    try {
+      probe?.close()
+    } catch {
+      // best effort
+    }
+  }
 }
 
 export function openControlDb(dataDir: string): ControlDb {
@@ -145,6 +181,13 @@ export function openControlDb(dataDir: string): ControlDb {
   const dbPath = path.join(dataDir, "control.db")
   const db = new Database(dbPath)
   db.pragma("journal_mode = WAL")
+  // The control DB is the source of truth for users, ownership, quotas and the
+  // audit log — an acknowledged write must survive an OS crash. FULL is SQLite's
+  // default, but WAL deployments often drop to NORMAL (which only fsyncs at
+  // checkpoints); pin it FULL explicitly so the durability of this DB can't be
+  // weakened by a future pragma/journal-mode change. This DB sees low write
+  // volume, so the extra fsync-per-commit cost is irrelevant.
+  db.pragma("synchronous = FULL")
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY,
@@ -550,6 +593,14 @@ export function openControlDb(dataDir: string): ControlDb {
     },
     pruneDailyUsage(beforeDay) {
       return pruneUsageStmt.run(beforeDay).changes
+    },
+    backup(destPath) {
+      // `VACUUM INTO` writes a consistent snapshot in one SQL statement. It takes
+      // a path string literal, not a bound parameter, so single-quotes in the
+      // (operator-supplied, admin-route-only) path are escaped. This is the same
+      // snapshot mechanism the per-capsule backup endpoint uses.
+      const sql = `VACUUM INTO '${destPath.replace(/'/g, "''")}'`
+      db.exec(sql)
     },
     listAudit(opts) {
       const limit = Math.min(Math.max(opts?.limit ?? 100, 1), 1000)

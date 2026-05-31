@@ -6,7 +6,7 @@
 
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { mkdtempSync, rmSync, existsSync } from "node:fs"
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import * as path from "node:path"
 
@@ -15,6 +15,7 @@ import {
   probeCapsuleCgroup,
   applyCapsuleCgroup,
   removeCapsuleCgroup,
+  readCapsuleCgroupUsage,
   capsuleCgroupDir,
   CGROUP_PERIOD_US,
   CAPSULE_PIDS_MAX,
@@ -63,6 +64,58 @@ test("probeCapsuleCgroup returns null for unset / non-cgroup paths", () => {
     assert.equal(probeCapsuleCgroup(dir), null)
   } finally {
     rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("probeCapsuleCgroup rejects a v2 tree whose delegation was stripped", () => {
+  // The false-confidence case the host must NOT mistake for "cgroup v2 enabled":
+  // controllers are AVAILABLE (cgroup.controllers) but NOT delegated to children
+  // (cgroup.subtree_control is empty) — common after a container restart on the
+  // systemd cgroup driver. Child cgroups then can't use cpu/memory/pids, so nft
+  // rules keyed on cgroup membership match nothing. Probe must return null.
+  const dir = mkdtempSync(path.join(tmpdir(), "pond-cgroup-stripped-"))
+  try {
+    writeFileSync(path.join(dir, "cgroup.controllers"), "cpu memory pids\n")
+    writeFileSync(path.join(dir, "cgroup.subtree_control"), "\n") // delegation stripped
+    assert.equal(probeCapsuleCgroup(dir), null)
+
+    // And the inverse: controllers present AND delegated, but partial (missing
+    // pids) is still rejected — all three must be delegated.
+    writeFileSync(path.join(dir, "cgroup.subtree_control"), "cpu memory\n")
+    assert.equal(probeCapsuleCgroup(dir), null)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("readCapsuleCgroupUsage is a safe no-op (null) with no cgroup files", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "pond-cgroup-usage-none-"))
+  try {
+    // No capsule-<id> dir exists → null, never throws (macOS/undelegated case).
+    assert.equal(readCapsuleCgroupUsage(root, "deadbeef"), null)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("readCapsuleCgroupUsage parses cpu.stat + memory.current", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "pond-cgroup-usage-"))
+  try {
+    const dir = capsuleCgroupDir(root, "deadbeef")
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(
+      path.join(dir, "cpu.stat"),
+      "usage_usec 2500000\nuser_usec 2000000\nsystem_usec 500000\nnr_periods 100\nnr_throttled 7\nthrottled_usec 1500000\n",
+    )
+    writeFileSync(path.join(dir, "memory.current"), "67108864\n")
+    const usage = readCapsuleCgroupUsage(root, "deadbeef")
+    assert.ok(usage, "expected usage object")
+    assert.equal(usage.cpuUsageSeconds, 2.5)
+    assert.equal(usage.memoryBytes, 67108864)
+    assert.equal(usage.nrThrottled, 7)
+    assert.equal(usage.throttledSeconds, 1.5)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
   }
 })
 

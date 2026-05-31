@@ -50,6 +50,13 @@ export const signupCommand = defineCommand({
       )
       process.exit(1)
     }
+    try {
+      const u = new URL(apiUrl)
+      if (u.protocol !== "http:" && u.protocol !== "https:") throw new Error("scheme")
+    } catch {
+      console.error(`apiUrl must be a valid http(s) URL, got "${apiUrl}"`)
+      process.exit(1)
+    }
 
     const username = String(args.username).trim()
     if (!/^[a-z0-9_-]{1,32}$/i.test(username)) {

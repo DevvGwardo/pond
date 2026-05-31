@@ -198,7 +198,8 @@ function applyMigrations(db: Database.Database, schema: Record<string, Record<st
         `Refusing to apply destructive schema change to table "${tableName}": columns ${removed
           .map((c) => `"${c}"`)
           .join(", ")} would be dropped. ` +
-          `If this is intentional, run \`pond db migrate --drop ${tableName}.${removed[0]}\` or rename via \`--rename ${removed[0]} <newCol>\` before redeploying.`,
+          `If this is intentional, drop it on the live database with \`pond db migrate --drop ${tableName}.${removed[0]}\`, ` +
+          `or rename it with \`pond db migrate --rename ${tableName}.${removed[0]} --to <newColumn>\`, then redeploy.`,
       )
     }
   }
@@ -423,7 +424,7 @@ function createRuntimeFromDefinition(
   applyMigrations(db, def.schema)
 
   const env = loadEnv(cwd, options.port ?? 3000)
-  const dbProxy = buildDbProxy(db)
+  const dbProxy = buildDbProxy(db, def.schema)
   const ai = createAi(env)
   const blob = createBlob(cwd, db)
   let sessionSecretSource = env.POND_SESSION_SECRET || env.GOOGLE_CLIENT_SECRET
@@ -505,6 +506,11 @@ function createRuntimeFromDefinition(
   async function buildContext(cookieHeader: string | null | undefined): Promise<CapsuleContext> {
     return {
       db: dbProxy,
+      // Atomic multi-step mutations. better-sqlite3 runs `fn` inside BEGIN/COMMIT
+      // (ROLLBACK if it throws), so a handler that does several writes either
+      // applies all of them or none — no partial state on error. `fn` must be
+      // synchronous (all ctx.db operations are); returning a promise throws.
+      transaction: <T>(fn: () => T): T => db.transaction(fn)(),
       auth: await resolveAuth(cookieHeader),
       env,
       ai,
@@ -916,15 +922,72 @@ function coerceBinding(value: any): any {
   return value
 }
 
-function buildDbProxy(db: Database.Database): CapsuleContext["db"] {
+// Runtime type-check a value about to be bound to a declared column. Handler
+// param types are TypeScript-only and fully erased in the bundled worker, so an
+// agent calling `add(ctx, "foo")` where a `number()` column was declared reaches
+// the DB with a string. SQLite is dynamically typed and would store it silently;
+// we reject it here so the column's declared type is actually enforced at the
+// untrusted-input boundary. Derived entirely from the schema's `_sqlType` (no
+// Zod, per the capsule spec). NULL/undefined pass — columns are nullable.
+function assertColumnValue(tableName: string, column: string, sqlType: string, value: any): void {
+  if (value === null || value === undefined) return
+  if (sqlType === "TEXT") {
+    if (typeof value !== "string") {
+      throw new Error(`Column "${tableName}.${column}" expects a string (TEXT), got ${typeof value}`)
+    }
+  } else if (sqlType === "REAL") {
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      throw new Error(`Column "${tableName}.${column}" expects a finite number (REAL), got ${typeof value}`)
+    }
+  } else if (sqlType === "INTEGER") {
+    // boolean() columns compile to INTEGER and agents pass true/false (coerced
+    // to 1/0 at binding), so both number and boolean are valid here.
+    if (typeof value !== "number" && typeof value !== "boolean") {
+      throw new Error(`Column "${tableName}.${column}" expects a number or boolean (INTEGER), got ${typeof value}`)
+    }
+    if (typeof value === "number" && !Number.isFinite(value)) {
+      throw new Error(`Column "${tableName}.${column}" expects a finite number (INTEGER), got ${value}`)
+    }
+  }
+  // Unknown sqlType: forward-compatible no-op.
+}
+
+function buildDbProxy(db: Database.Database, schema: Record<string, Record<string, ColumnType>>): CapsuleContext["db"] {
+  // Validate every supplied value that maps to a declared column. Keys not in
+  // the schema (reserved id/createdAt/updatedAt, or typos) are left to SQLite,
+  // which accepts the reserved ones and rejects unknown columns as it does today.
+  function validateColumns(tableName: string, data: Record<string, any>): void {
+    const cols = schema[tableName]
+    if (!cols) return
+    for (const key of Object.keys(data)) {
+      const colType = cols[key]
+      if (colType) assertColumnValue(tableName, key, colType._sqlType, data[key])
+    }
+  }
+  // limit/offset are interpolated into SQL (they can't be bound parameters in a
+  // prepared LIMIT clause), so they must be proven safe non-negative integers —
+  // values reach here from capsule handler args (untrusted) in the hosted model.
+  function assertPageArg(kind: "limit" | "offset", n: number): number {
+    if (!Number.isInteger(n) || n < 0) throw new Error(`Invalid ${kind}: ${n} (expected a non-negative integer)`)
+    return n
+  }
+
   function createBuilder(
     tableName: string,
     parts: {
       where: Array<{ column: string; value: any }>
       orderBy: Array<{ column: string; dir: "asc" | "desc" }>
       limit?: number
+      offset?: number
     },
   ) {
+    const whereClause = () => ({
+      sql:
+        parts.where.length > 0
+          ? ` WHERE ${parts.where.map(({ column }) => `${quoteIdent(column)} = ?`).join(" AND ")}`
+          : "",
+      values: parts.where.map(({ value }) => value),
+    })
     return {
       where(column: string, value: any) {
         assertIdent(column)
@@ -944,22 +1007,37 @@ function buildDbProxy(db: Database.Database): CapsuleContext["db"] {
       limit(limit: number) {
         return createBuilder(tableName, {
           ...parts,
-          limit,
+          limit: assertPageArg("limit", limit),
+        })
+      },
+      offset(offset: number) {
+        return createBuilder(tableName, {
+          ...parts,
+          offset: assertPageArg("offset", offset),
         })
       },
       all() {
-        const whereSql =
-          parts.where.length > 0
-            ? ` WHERE ${parts.where.map(({ column }) => `${quoteIdent(column)} = ?`).join(" AND ")}`
-            : ""
+        const { sql: whereSql, values } = whereClause()
         const orderSql =
           parts.orderBy.length > 0
             ? ` ORDER BY ${parts.orderBy.map(({ column, dir }) => `${quoteIdent(column)} ${dir.toUpperCase()}`).join(", ")}`
             : ""
-        const limitSql = typeof parts.limit === "number" ? ` LIMIT ${parts.limit}` : ""
-        return db
-          .prepare(`SELECT * FROM ${quoteIdent(tableName)}${whereSql}${orderSql}${limitSql}`)
-          .all(...parts.where.map(({ value }) => value))
+        // SQLite requires a LIMIT before an OFFSET; `LIMIT -1` means "no limit".
+        const hasLimit = typeof parts.limit === "number"
+        const hasOffset = typeof parts.offset === "number"
+        const pageSql = hasOffset
+          ? ` LIMIT ${hasLimit ? parts.limit : -1} OFFSET ${parts.offset}`
+          : hasLimit
+            ? ` LIMIT ${parts.limit}`
+            : ""
+        return db.prepare(`SELECT * FROM ${quoteIdent(tableName)}${whereSql}${orderSql}${pageSql}`).all(...values)
+      },
+      count(): number {
+        const { sql: whereSql, values } = whereClause()
+        const row = db.prepare(`SELECT COUNT(*) AS c FROM ${quoteIdent(tableName)}${whereSql}`).get(...values) as {
+          c: number
+        }
+        return row.c
       },
     }
   }
@@ -972,11 +1050,14 @@ function buildDbProxy(db: Database.Database): CapsuleContext["db"] {
         where: builder.where,
         orderBy: builder.orderBy,
         limit: builder.limit,
+        offset: builder.offset,
         all: builder.all,
+        count: builder.count,
         get(id: string) {
           return db.prepare(`SELECT * FROM ${quoteIdent(tableName)} WHERE id = ?`).get(id)
         },
         insert(data: Record<string, any>) {
+          validateColumns(tableName, data)
           const id = crypto.randomUUID()
           const keys = Object.keys(data)
           const cols = keys.map(quoteIdent)
@@ -987,6 +1068,7 @@ function buildDbProxy(db: Database.Database): CapsuleContext["db"] {
           return db.prepare(`SELECT * FROM ${quoteIdent(tableName)} WHERE id = ?`).get(id)
         },
         update(id: string, data: Record<string, any>) {
+          validateColumns(tableName, data)
           const keys = Object.keys(data)
           const sets = keys.map((key) => `${quoteIdent(key)} = ?`).join(", ")
           db.prepare(`UPDATE ${quoteIdent(tableName)} SET ${sets}, updatedAt = datetime('now') WHERE id = ?`).run(

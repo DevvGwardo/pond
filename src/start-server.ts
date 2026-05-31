@@ -7,6 +7,7 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { createHash, timingSafeEqual } from "node:crypto"
 import { createRuntimeFromDeployBundle } from "./runtime.js"
+import { validateSqliteFile } from "./host/control-db.js"
 import type { SocketHandler, SocketLike } from "./server/index.js"
 
 interface StartBundleServerOptions {
@@ -294,12 +295,87 @@ async function createBundleServerAppInternal(
     const dst = path.join(options.cwd, ".pond", "data.db")
     const staging = path.join(options.cwd, ".pond", "data.db.restored")
     fs.writeFileSync(staging, Buffer.from(body))
+    // The 16-byte magic check above only proves the upload starts like a SQLite
+    // file; a truncated or corrupt body sails past it and would brick the worker
+    // on next boot when it opens data.db. Prove the candidate is actually a
+    // queryable database BEFORE we stage it for the operator's swap. On failure
+    // the staging file is removed so a broken candidate is never left for swap.
+    const valid = validateSqliteFile(staging)
+    if (!valid.ok) {
+      try {
+        fs.unlinkSync(staging)
+      } catch {
+        // best effort
+      }
+      return c.json({ error: `restore candidate is not a usable SQLite database: ${valid.error}` }, 400)
+    }
     return c.json({
       ok: true,
-      message: `Wrote ${body.byteLength} bytes to ${staging}. Stop the server, atomically replace ${dst}, then restart.`,
+      message: `Wrote ${body.byteLength} bytes to ${staging} (validated: integrity_check ok). Stop the server, atomically replace ${dst}, then restart.`,
       staging,
       target: dst,
     })
+  })
+
+  // Destructive schema migration. The auto-migrator (applyMigrations) adds new
+  // columns but REFUSES to drop one, since a removed column in server/index.ts is
+  // far more likely a typo than an intentional data deletion. This endpoint is
+  // the explicit, owner-authorized escape hatch the boot error points at: drop or
+  // rename a column on the live data.db so the next deploy's schema diff is clean.
+  // Manage-gated (owner only) and confined to the capsule's own database.
+  app.post("/__pond/db/migrate", async (c) => {
+    if (!canManage(c.req.header("x-pond-claim-token"))) {
+      return c.json({ error: "Forbidden" }, 403)
+    }
+    const body = (await c.req.json().catch(() => null)) as {
+      op?: string
+      table?: string
+      column?: string
+      to?: string
+    } | null
+    if (!body || typeof body.op !== "string") return c.json({ error: "missing op" }, 400)
+
+    const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/
+    const RESERVED = new Set(["id", "createdAt", "updatedAt"])
+    // Validate an identifier (same rules as the runtime's assertIdent) and quote
+    // it. The regex admits no quote characters, so interpolation is injection-safe.
+    const ident = (
+      name: unknown,
+      what: string,
+    ): { ok: true; q: string; raw: string } | { ok: false; error: string } => {
+      if (typeof name !== "string" || !IDENT.test(name) || name.length > 64)
+        return { ok: false, error: `invalid ${what}` }
+      if (name.startsWith("_pond_")) return { ok: false, error: `${what} uses the reserved _pond_ prefix` }
+      return { ok: true, q: `"${name}"`, raw: name }
+    }
+
+    const t = ident(body.table, "table")
+    if (!t.ok) return c.json({ error: t.error }, 400)
+    const col = ident(body.column, "column")
+    if (!col.ok) return c.json({ error: col.error }, 400)
+
+    const tableExists = runtime.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = ?").get(t.raw)
+    if (!tableExists) return c.json({ error: `unknown table: ${t.raw}` }, 404)
+    const cols = (runtime.db.prepare(`PRAGMA table_info(${t.q})`).all() as Array<{ name: string }>).map((r) => r.name)
+    if (!cols.includes(col.raw)) return c.json({ error: `unknown column: ${t.raw}.${col.raw}` }, 404)
+    if (RESERVED.has(col.raw)) return c.json({ error: `cannot ${body.op} reserved column ${col.raw}` }, 400)
+
+    try {
+      if (body.op === "drop") {
+        runtime.db.prepare(`ALTER TABLE ${t.q} DROP COLUMN ${col.q}`).run()
+        return c.json({ ok: true, message: `Dropped column ${t.raw}.${col.raw}` })
+      }
+      if (body.op === "rename") {
+        const to = ident(body.to, "new column name")
+        if (!to.ok) return c.json({ error: to.error }, 400)
+        if (cols.includes(to.raw)) return c.json({ error: `column ${t.raw}.${to.raw} already exists` }, 409)
+        runtime.db.prepare(`ALTER TABLE ${t.q} RENAME COLUMN ${col.q} TO ${to.q}`).run()
+        return c.json({ ok: true, message: `Renamed column ${t.raw}.${col.raw} → ${to.raw}` })
+      }
+      return c.json({ error: `unknown op: ${body.op} (expected drop|rename)` }, 400)
+    } catch (err: any) {
+      return c.json({ error: `migration failed: ${err?.message ?? String(err)}` }, 400)
+    }
   })
 
   app.get("/__pond/logs", (c) => {

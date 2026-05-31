@@ -41,7 +41,9 @@ export interface CapsuleDbTable {
   where(column: string, value: any): QueryBuilder
   orderBy(column: string, dir: "asc" | "desc"): QueryBuilder
   limit(n: number): QueryBuilder
+  offset(n: number): QueryBuilder
   all(): any[]
+  count(): number
   get(id: string): any
   insert(data: Record<string, any>): any
   update(id: string, data: Record<string, any>): any
@@ -51,7 +53,9 @@ export interface CapsuleDbTable {
 export interface QueryBuilder {
   orderBy(column: string, dir: "asc" | "desc"): QueryBuilder
   limit(n: number): QueryBuilder
+  offset(n: number): QueryBuilder
   all(): any[]
+  count(): number
 }
 
 export interface CapsuleDb {
@@ -89,6 +93,9 @@ export interface CapsuleBlob {
 export interface CapsuleContext {
   auth: CapsuleAuth
   db: CapsuleDb
+  // Run a synchronous function atomically (BEGIN/COMMIT, ROLLBACK on throw) so a
+  // multi-write mutation can't leave partial state. ctx.db operations are sync.
+  transaction<T>(fn: () => T): T
   env: Record<string, string>
   log: CapsuleLog
   ai: CapsuleAi
@@ -239,4 +246,33 @@ export function endpoint(opts: { method: string; path: string }, handler: Endpoi
 
 export function socket(handler: SocketHandler): SocketDefinition {
   return { _kind: "socket", handler }
+}
+
+// ── Authorization helpers ──────────────────────────────────
+//
+// The runtime resolves identity into ctx.auth but enforces NO access control —
+// every handler is responsible for its own (capsule-spec §1.5). These wrappers
+// fold the two checks every handler otherwise hand-rolls. They are convenience
+// over the existing ctx, not a new enforcement layer: there is still no per-row
+// ACL and no automatic owner column — you choose which column holds the owner id.
+
+// Require a signed-in (non-guest) caller; returns their user id, or throws.
+export function requireUser(ctx: CapsuleContext): string {
+  if (ctx.auth.isGuest) throw new Error("unauthorized")
+  return ctx.auth.userId
+}
+
+// Fetch a row by id and assert the caller owns it (row[ownerColumn] === the
+// caller's user id). Throws "not found" on a missing row OR a non-owner — the
+// same response for both so a probe can't distinguish "exists but yours-not"
+// from "doesn't exist". Returns the row so callers can use it directly.
+export function requireOwner(
+  ctx: CapsuleContext,
+  table: string,
+  id: string,
+  ownerColumn = "owner",
+): Record<string, any> {
+  const row = ctx.db[table]?.get(id) as Record<string, any> | undefined
+  if (!row || row[ownerColumn] !== ctx.auth.userId) throw new Error("not found")
+  return row
 }

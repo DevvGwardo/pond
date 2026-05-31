@@ -143,3 +143,73 @@ test("pond host boots with an existing deploy on disk (TDZ-on-publicListingCache
     /(^[\s\S]*$)/, // catch-all so we still record stderr in test output via the assertion message above
   )
 })
+
+// P0 item 1: the gated/soft security posture must FAIL LOUD at boot, not silently
+// degrade. On a default host (no cgroup delegation, no bwrap) the banner must
+// state plainly that the fs boundary is the Node --permission speed-bump and that
+// the nft egress firewall matches nothing without a cgroup root — and advertise
+// the new observability endpoint.
+test("pond host boot banner loudly states the default (soft) isolation posture", async () => {
+  const dataDir = mkdtempSync(path.join(tmpdir(), "pond-host-banner-"))
+  cleanupDirs.push(dataDir)
+
+  const port = await pickFreePort()
+  const apiUrl = `http://127.0.0.1:${port}`
+  let stdoutBuf = ""
+
+  const proc = spawn(
+    process.execPath,
+    [
+      CLI_PATH,
+      "host",
+      "--port",
+      String(port),
+      "--host",
+      "127.0.0.1",
+      "--public-host",
+      "localhost",
+      "--data-dir",
+      dataDir,
+      "--anonymous-rate-per-hour",
+      "100",
+    ],
+    {
+      env: { ...process.env, POND_HOST_TOKEN: randomBytes(16).toString("hex") },
+      stdio: ["ignore", "pipe", "pipe"],
+      cwd: REPO_ROOT,
+    },
+  )
+  cleanupProcs.push(proc)
+  proc.stdout.on("data", (c) => {
+    stdoutBuf += c.toString("utf8")
+  })
+  proc.stderr.on("data", () => {})
+
+  // The banner prints right after the server starts listening. Wait for health,
+  // then give the banner a moment to flush.
+  const start = Date.now()
+  let healthy = false
+  while (Date.now() - start < 8000) {
+    try {
+      const r = await fetch(`${apiUrl}/api/health`)
+      if (r.ok) {
+        healthy = true
+        break
+      }
+    } catch {
+      // retry
+    }
+    await new Promise((r) => setTimeout(r, 100))
+  }
+  assert.ok(healthy, "host never became healthy")
+
+  // Poll the captured stdout for the banner lines.
+  const deadline = Date.now() + 4000
+  while (Date.now() < deadline && !/capsule fs isolation: OFF/.test(stdoutBuf)) {
+    await new Promise((r) => setTimeout(r, 100))
+  }
+
+  assert.match(stdoutBuf, /capsule fs isolation: OFF \(Node --permission only\)/, `banner=\n${stdoutBuf}`)
+  assert.match(stdoutBuf, /match(es)? NOTHING|no OS-level egress enforcement/, `banner=\n${stdoutBuf}`)
+  assert.match(stdoutBuf, /GET \/metrics/, `banner=\n${stdoutBuf}`)
+})
