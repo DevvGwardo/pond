@@ -1439,7 +1439,6 @@ export const hostCommand = defineCommand({
       const headers: Record<string, string> = {
         "strict-transport-security": "max-age=63072000; includeSubDomains; preload",
         "x-content-type-options": "nosniff",
-        "x-frame-options": "DENY",
         "referrer-policy": "strict-origin-when-cross-origin",
         "permissions-policy": "camera=(), microphone=(), geolocation=()",
       }
@@ -1456,6 +1455,28 @@ export const hostCommand = defineCommand({
       await next()
       for (const [k, v] of Object.entries(headers)) {
         c.res.headers.set(k, v)
+      }
+      // Clickjacking policy. The control plane / dashboard must never be framed.
+      // Deploy pages ARE framed — as scaled live previews — by the dashboard on
+      // the apex origin, so allow only the apex to frame a deploy (not other
+      // deploys, so tenants can't clickjack each other). The host is already the
+      // framing authority here, so on deploy responses we drop any capsule-set
+      // x-frame-options and merge frame-ancestors into (rather than clobber) a
+      // capsule's own CSP.
+      if (isBareDomainRequest(hostHdr)) {
+        c.res.headers.set("x-frame-options", "DENY")
+      } else {
+        const apexOrigin = publicBaseUrl
+          ? `${publicBaseUrl.protocol}//${publicBaseUrl.host}`
+          : `https://${externalHost}`
+        const frameAncestors = `frame-ancestors 'self' ${apexOrigin}`
+        c.res.headers.delete("x-frame-options")
+        const existingCsp = c.res.headers.get("content-security-policy")
+        if (!existingCsp) {
+          c.res.headers.set("content-security-policy", frameAncestors)
+        } else if (!/frame-ancestors/i.test(existingCsp)) {
+          c.res.headers.set("content-security-policy", `${existingCsp}; ${frameAncestors}`)
+        }
       }
     })
 
@@ -3054,6 +3075,8 @@ export const hostCommand = defineCommand({
 
     function landingHtml(): string {
       const installCmd = "npm install -g pondsh"
+      const demoVideoUrl = "https://raw.githubusercontent.com/DevvGwardo/pond-assets/main/pond-demo.mp4"
+      const demoPosterUrl = "https://raw.githubusercontent.com/DevvGwardo/pond-assets/main/pond-demo-poster.png"
       return `<!doctype html>
 <html lang="en">
 <head>
@@ -3152,6 +3175,23 @@ export const hostCommand = defineCommand({
     line-height: 1.5;
   }
   .fine a { color: #7a7a7a; font-size: 13px; }
+  .demo { margin: 44px 0 0; }
+  .demo-label {
+    margin: 0 0 12px;
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 13px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .demo video {
+    display: block;
+    width: 100%;
+    max-width: 520px;
+    border: 1px solid var(--line);
+    background: var(--code-bg);
+    cursor: pointer;
+  }
   @media (max-width: 640px) {
     main { width: min(100vw - 28px, 720px); padding: 48px 0; align-items: flex-start; }
     p { font-size: 18px; }
@@ -3172,6 +3212,12 @@ export const hostCommand = defineCommand({
     <div class="links">
       <a href="/docs">Docs</a>
       <a href="https://github.com/DevvGwardo/pond" rel="noreferrer">GitHub</a>
+    </div>
+    <div class="demo">
+      <p class="demo-label">See how it works</p>
+      <video controls playsinline preload="none" poster="${demoPosterUrl}">
+        <source src="${demoVideoUrl}" type="video/mp4" />
+      </video>
     </div>
     <p class="fine">
       Anonymous deploys are sandboxed and may be terminated at any time. <a href="/abuse">Abuse policy</a> · <a href="/.well-known/security.txt">Security</a>
