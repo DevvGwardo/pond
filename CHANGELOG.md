@@ -7,6 +7,14 @@ Versioning: [Semver](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`pond edit "<change>"` — iterate on a capsule with a local agent.** The counterpart to `pond new --generate`: run it inside an existing capsule with a plain-English change request and the same agent cascade (hermes → claude → codex) reads the current `server/index.ts`, `client/index.tsx`, `shared/`, and the `.claude/CLAUDE.md` contract, then makes the change in place (preserving working features). Headless rules match `--generate` — no dev server, no curl/verify loops. An agent that exits without touching any source file is treated as a failure and the next agent is tried. `--agent <hermes|claude|codex>` forces a specific agent.
+  - `src/agent-run.ts` (new) — `runAgentTask()`, the detect-cascade + live-progress panel + proof-of-work change detection, extracted from `pond new --generate` so both commands share one implementation.
+  - `src/commands/edit.ts` (new) — the command: capsule-root check (`server/index.ts`), prompt construction, agent forcing, next-steps output.
+  - `src/commands/new.ts` — `--generate` now calls `runAgentTask()` instead of its own inline loop (no behavior change; the old per-file spinner is now a generic changed-files panel).
+  - `src/cli.ts` — register `edit` next to `new`.
+  - `test/cli.test.mjs` — 3 guard-path tests (not-a-capsule, missing description, unknown `--agent`).
+  - Docs: `README.md` CLI table + "Keep building: `pond edit`" section; `docs/cli-reference.md` at-a-glance row + `## pond edit` section.
+
 - **Shopify-connected capsules — `ctx.shopify.graphql()`.** A new first-class context helper that lets a capsule call the Shopify Admin GraphQL API using a Custom App access token. Reads `SHOPIFY_SHOP`, `SHOPIFY_TOKEN`, and `SHOPIFY_API_VERSION` from capsule env (`.env.pond.server` or `pond env set`). Normalizes bare shop names and protocol-prefixed URLs. Throws clear errors on missing env, non-2xx responses, and GraphQL `errors` arrays. Export `createShopify()` from `src/runtime.ts` for testing.
   - `src/server/index.ts` — new `CapsuleShopify` interface, `shopify` field on `CapsuleContext`.
   - `src/runtime.ts` — `createShopify()` implementation wired into `buildContext()`.
