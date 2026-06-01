@@ -1266,11 +1266,22 @@ export const hostCommand = defineCommand({
     // Boot a deploy on demand when a request arrives for one that isn't running
     // (host restarted, or it was paused). Deduped via inFlightBoots so a burst
     // of concurrent requests triggers a single fork.
-    async function ensureBooted(deployId: string): Promise<{ child: ChildProcess; port: number } | null> {
+    async function ensureBooted(
+      deployId: string,
+    ): Promise<{ child: ChildProcess; port: number } | null | "at-capacity"> {
       const existing = runningChildren.get(deployId)
       if (existing) return existing
       const inFlight = inFlightBoots.get(deployId)
       if (inFlight) return inFlight
+      // Wake-path admission control. ensureBooted is the only lazy-wake path for a
+      // scaled-to-zero capsule and, unlike POST /api/deploys, had no capacity gate:
+      // a burst of traffic across many slept deploys could collectively boot past
+      // maxActiveCapsules and trip the OOM killer. Reserve a slot synchronously via
+      // the same pendingBoots counter the create path uses, so concurrent wakes of
+      // DISTINCT deploys can't all clear the check during each other's await.
+      // Same-deploy concurrency is already coalesced by inFlightBoots above.
+      if (atCapacity()) return "at-capacity"
+      pendingBoots++
       const p = (async () => {
         const record = readRecord(deployId)
         if (!record) return null
@@ -1288,6 +1299,7 @@ export const hostCommand = defineCommand({
         return await p
       } finally {
         inFlightBoots.delete(deployId)
+        pendingBoots--
       }
     }
 
@@ -4137,7 +4149,17 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
           )
         }
       }
-      const entry = runningChildren.get(deployId) ?? (await ensureBooted(deployId))
+      const woke = runningChildren.get(deployId) ?? (await ensureBooted(deployId))
+      // Wake-path at capacity: the deploy exists but the box is full, so shed with
+      // a 503 instead of a misleading 404. Short retry-after — a slot frees as soon
+      // as the idle reaper sleeps a neighbour.
+      if (woke === "at-capacity") {
+        return new Response(JSON.stringify({ error: "Service unavailable" }), {
+          status: 503,
+          headers: { "content-type": "application/json", "retry-after": "5" },
+        })
+      }
+      const entry = woke
       if (!entry) return c.json({ error: "Unknown deploy" }, 404)
       // Mark the capsule active so the idle reaper keeps it resident.
       lastActivityAt.set(deployId, Date.now())
@@ -4192,7 +4214,13 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
       void (async () => {
         // Wake a slept capsule on demand (parity with the HTTP path) so a
         // WebSocket-first client still reaches a scaled-to-zero deploy.
-        const entry = runningChildren.get(deployId) ?? (await ensureBooted(deployId))
+        const woke = runningChildren.get(deployId) ?? (await ensureBooted(deployId))
+        if (woke === "at-capacity") {
+          clientSocket.write("HTTP/1.1 503 Service Unavailable\r\nRetry-After: 5\r\nConnection: close\r\n\r\n")
+          clientSocket.destroy()
+          return
+        }
+        const entry = woke
         if (!entry) {
           clientSocket.write("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
           clientSocket.destroy()
