@@ -24,3 +24,9 @@ deploy/cloudflared/credentials.json
 *.sqlite
 *.sqlite3
 .claude/
+
+# Local scratch projects that live inside the repo dir but are NOT part of pond:
+# a standalone pond capsule app (has its own .git) and a Remotion video project
+# (~570 MB of node_modules + rendered .mp4s). Keep them out of pond's history.
+professional-modern-landing-page-project/
+video/
