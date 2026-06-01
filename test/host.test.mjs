@@ -266,6 +266,60 @@ test("bare domain GET /abuse serves abuse policy", async () => {
   assert.match(result.body, /Abuse policy/)
 })
 
+test("bare domain GET /stats serves the deployment stats page", async () => {
+  const http = await import("node:http")
+  const result = await new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: "127.0.0.1",
+        port,
+        method: "GET",
+        path: "/stats",
+        headers: { host: `${publicHost}:${port}` },
+      },
+      (res) => {
+        let data = ""
+        res.on("data", (c) => (data += c))
+        res.on("end", () => resolve({ status: res.statusCode, body: data, ct: res.headers["content-type"] }))
+      },
+    )
+    req.on("error", reject)
+    req.end()
+  })
+  assert.equal(result.status, 200)
+  assert.match(result.ct, /text\/html/)
+  assert.match(result.body, /Deployments/)
+  assert.match(result.body, /last 7 days/)
+})
+
+test("bare domain GET /api/stats returns deploy counts (>=1 deploy created in this suite)", async () => {
+  const http = await import("node:http")
+  const result = await new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: "127.0.0.1",
+        port,
+        method: "GET",
+        path: "/api/stats",
+        headers: { host: `${publicHost}:${port}` },
+      },
+      (res) => {
+        let data = ""
+        res.on("data", (c) => (data += c))
+        res.on("end", () => resolve({ status: res.statusCode, body: data }))
+      },
+    )
+    req.on("error", reject)
+    req.end()
+  })
+  assert.equal(result.status, 200)
+  const s = JSON.parse(result.body)
+  assert.ok(Number.isInteger(s.total) && s.total >= 1, `expected total >= 1, got ${s.total}`)
+  assert.ok(Number.isInteger(s.last7d) && s.last7d >= 1)
+  assert.ok(Number.isInteger(s.last24h))
+  assert.ok(Array.isArray(s.daily))
+})
+
 test("bare domain GET /.well-known/security.txt serves a valid file", async () => {
   const http = await import("node:http")
   const result = await new Promise((resolve, reject) => {

@@ -113,6 +113,14 @@ export interface ControlDb {
   deleteEgress(deployId: string): void
   appendAudit(entry: AuditEntry): void
   listAudit(opts?: { limit?: number; sinceTs?: string }): AuditLogRow[]
+  /** Aggregate deployment counts (from deploy.create audit events): rolling
+   *  24h / 7d windows, all-time total, and a per-day breakdown for the last 7 days. */
+  deployStats(): {
+    last24h: number
+    last7d: number
+    total: number
+    daily: Array<{ day: string; count: number }>
+  }
   /**
    * Records an attempt and returns true if it is within the limit for the
    * (scope, key) pair over the trailing `windowMs` window. Atomically prunes
@@ -399,6 +407,18 @@ export function openControlDb(dataDir: string): ControlDb {
     "SELECT id, ts, actor, action, targetDeployId, targetUserId, metadata FROM audit_log WHERE ts >= ? ORDER BY id DESC LIMIT ?",
   )
 
+  // Deployment counts derived from deploy.create audit events (which persist
+  // even after a deploy expires/is deleted, so the windows reflect actual
+  // deploy activity, not the current resident set). The `?` binds a SQLite
+  // datetime modifier like '-1 day' / '-7 days'.
+  const countDeploysSince = db.prepare(
+    "SELECT COUNT(*) AS c FROM audit_log WHERE action = 'deploy.create' AND ts >= datetime('now', ?)",
+  )
+  const countDeploysTotal = db.prepare("SELECT COUNT(*) AS c FROM audit_log WHERE action = 'deploy.create'")
+  const deploysPerDay = db.prepare(
+    "SELECT date(ts) AS day, COUNT(*) AS c FROM audit_log WHERE action = 'deploy.create' AND ts >= datetime('now', '-7 days') GROUP BY day ORDER BY day",
+  )
+
   return {
     hashToken,
     createUser(username, isAdmin) {
@@ -576,6 +596,16 @@ export function openControlDb(dataDir: string): ControlDb {
         entry.targetUserId ?? null,
         entry.metadata ? JSON.stringify(entry.metadata) : null,
       )
+    },
+    deployStats() {
+      const last24h = (countDeploysSince.get("-1 day") as { c: number }).c
+      const last7d = (countDeploysSince.get("-7 days") as { c: number }).c
+      const total = (countDeploysTotal.get() as { c: number }).c
+      const daily = (deploysPerDay.all() as Array<{ day: string; c: number }>).map((r) => ({
+        day: r.day,
+        count: r.c,
+      }))
+      return { last24h, last7d, total, daily }
     },
     rateAllow(scope, key, windowMs, limit) {
       return rateAllowTxn(scope, key, windowMs, limit) as boolean
