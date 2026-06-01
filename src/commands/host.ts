@@ -3253,18 +3253,27 @@ export const hostCommand = defineCommand({
   .player.playing .big { opacity: 0; pointer-events: none; }
   .player .ctrl {
     position: absolute; left: 0; right: 0; bottom: 0;
-    display: flex; align-items: center; gap: 12px; padding: 12px 14px;
-    background: linear-gradient(to top, rgba(0, 0, 0, 0.8), rgba(0, 0, 0, 0));
-    opacity: 0; pointer-events: none; transition: opacity 0.2s; font-family: var(--mono);
+    display: flex; align-items: center; gap: 14px; padding: 18px 16px 14px;
+    background: linear-gradient(to top, rgba(0, 0, 0, 0.9), rgba(0, 0, 0, 0.4) 55%, rgba(0, 0, 0, 0));
+    -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px);
+    opacity: 0; transform: translateY(8px); pointer-events: none;
+    transition: opacity 0.25s ease, transform 0.25s ease; font-family: var(--mono);
   }
-  .player:hover .ctrl, .player:not(.playing) .ctrl { opacity: 1; pointer-events: auto; }
-  .player .ctrl button { display: flex; padding: 0; border: 0; background: none; color: #fff; cursor: pointer; }
-  .player .ctrl button svg { width: 18px; height: 18px; fill: #fff; }
-  .player .bar { position: relative; flex: 1; height: 4px; border-radius: 999px; background: rgba(255, 255, 255, 0.22); cursor: pointer; }
-  .player .bar .fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; border-radius: 999px; background: #fff; }
-  .player .bar .fill::after { content: ""; position: absolute; right: -5px; top: 50%; width: 10px; height: 10px; margin-top: -5px; border-radius: 50%; background: #fff; opacity: 0; transition: opacity 0.15s; }
-  .player .bar:hover .fill::after { opacity: 1; }
-  .player .t { min-width: 84px; color: #e4e4e7; font-size: 12px; font-variant-numeric: tabular-nums; }
+  .player:hover .ctrl, .player:not(.playing) .ctrl { opacity: 1; transform: none; pointer-events: auto; }
+  .player .ctrl button {
+    display: flex; padding: 0; border: 0; background: none; color: #fff; cursor: pointer;
+    opacity: 0.82; transition: opacity 0.15s ease, transform 0.15s ease;
+  }
+  .player .ctrl button:hover { opacity: 1; transform: scale(1.14); }
+  .player .ctrl button svg { width: 19px; height: 19px; fill: #fff; filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.55)); }
+  .player .pp svg { width: 21px; height: 21px; }
+  .player .bar { position: relative; flex: 1; height: 5px; border-radius: 999px; background: rgba(255, 255, 255, 0.18); cursor: pointer; transition: height 0.15s ease; }
+  .player .bar:hover { height: 8px; }
+  .player .bar .buf { position: absolute; left: 0; top: 0; bottom: 0; width: 0; border-radius: 999px; background: rgba(255, 255, 255, 0.16); }
+  .player .bar .fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; border-radius: 999px; background: #fff; box-shadow: 0 0 10px rgba(255, 255, 255, 0.45); }
+  .player .bar .fill::after { content: ""; position: absolute; right: -6px; top: 50%; width: 13px; height: 13px; margin-top: -6.5px; border-radius: 50%; background: #fff; box-shadow: 0 0 10px rgba(255, 255, 255, 0.6), 0 1px 3px rgba(0, 0, 0, 0.5); transform: scale(0.55); opacity: 0; transition: transform 0.15s ease, opacity 0.15s ease; }
+  .player .bar:hover .fill::after { transform: scale(1); opacity: 1; }
+  .player .t { min-width: 92px; color: #f2f2f2; font-size: 12px; letter-spacing: 0.02em; font-variant-numeric: tabular-nums; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6); }
   @media (max-width: 640px) {
     main { width: min(100vw - 28px, 720px); padding: 48px 0; align-items: flex-start; }
     p { font-size: 18px; }
@@ -3295,7 +3304,7 @@ export const hostCommand = defineCommand({
         <button class="big" type="button" aria-label="Play video"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button>
         <div class="ctrl">
           <button class="pp" type="button" aria-label="Play/pause"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button>
-          <div class="bar" data-bar><div class="fill" data-fill></div></div>
+          <div class="bar" data-bar><div class="buf" data-buf></div><div class="fill" data-fill></div></div>
           <span class="t" data-time>0:00 / 0:00</span>
           <button class="mute" type="button" aria-label="Mute"><svg viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3z"/></svg></button>
           <button class="fs" type="button" aria-label="Fullscreen"><svg viewBox="0 0 24 24"><path d="M7 7h3V5H5v5h2V7zm10 0v3h2V5h-5v2h3zM7 17v-3H5v5h5v-2H7zm10 0h-3v2h5v-5h-2v3z"/></svg></button>
@@ -3350,6 +3359,7 @@ export const hostCommand = defineCommand({
     const pp = root.querySelector(".pp");
     const ppPath = pp.querySelector("path");
     const fill = root.querySelector("[data-fill]");
+    const buf = root.querySelector("[data-buf]");
     const bar = root.querySelector("[data-bar]");
     const tEl = root.querySelector("[data-time]");
     const mute = root.querySelector(".mute");
@@ -3370,11 +3380,20 @@ export const hostCommand = defineCommand({
     v.addEventListener("click", toggle);
     v.addEventListener("play", () => { root.classList.add("playing"); root.classList.remove("paused"); ppPath.setAttribute("d", PAUSE); });
     v.addEventListener("pause", () => { root.classList.remove("playing"); root.classList.add("paused"); ppPath.setAttribute("d", PLAY); });
+    const updateBuf = () => {
+      try {
+        if (v.buffered.length && v.duration) {
+          buf.style.width = (v.buffered.end(v.buffered.length - 1) / v.duration) * 100 + "%";
+        }
+      } catch (e) { /* buffered not ready */ }
+    };
     v.addEventListener("timeupdate", () => {
       const d = v.duration || 0;
       fill.style.width = (d ? (v.currentTime / d) * 100 : 0) + "%";
       tEl.textContent = fmt(v.currentTime) + " / " + fmt(d);
+      updateBuf();
     });
+    v.addEventListener("progress", updateBuf);
     bar.addEventListener("click", (e) => {
       const r = bar.getBoundingClientRect();
       if (v.duration) v.currentTime = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)) * v.duration;
@@ -3815,7 +3834,7 @@ ${opts.bodyHtml}
         for (let row = 0; row < ROWS; row++) {
           const cy = padT + row * cellY
           if (row < ROWS - h) {
-            unlit.push(`<circle cx="${cx}" cy="${cy}" r="1.7" fill="#3f3f46" opacity="0.5"/>`)
+            unlit.push(`<circle cx="${cx}" cy="${cy}" r="1.7" fill="#2a2a2a" opacity="0.6"/>`)
             continue
           }
           const depth = row - (ROWS - h)
@@ -3831,7 +3850,7 @@ ${opts.bodyHtml}
       const ticks = [0, 7, 14, 21, COLS - 1]
         .map((c) => {
           const cx = padL + c * cellX
-          return `<text x="${cx}" y="${H - 8}" fill="#52525b" font-size="9" text-anchor="middle" font-family="ui-monospace,monospace">${series[c].day.slice(5)}</text>`
+          return `<text x="${cx}" y="${H - 8}" fill="#5a5a5a" font-size="9" text-anchor="middle" font-family="ui-monospace,monospace">${series[c].day.slice(5)}</text>`
         })
         .join("")
       const chart = `<svg viewBox="0 0 ${W} ${H}" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Deployments per day, last 30 days">
@@ -3849,19 +3868,19 @@ ${opts.bodyHtml}
 <title>Pond — Stats</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
 <style>
-  body { margin: 0; background: #09090b; color: #fafafa; font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; line-height: 1.6; }
+  body { margin: 0; background: #000; color: #fafafa; font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; line-height: 1.6; }
   main { max-width: 720px; margin: 0 auto; padding: 48px 24px 96px; }
   h1 { font-size: 32px; margin: 0 0 4px; color: #fafafa; }
-  .sub { color: #71717a; margin: 0 0 32px; font-size: 14px; }
+  .sub { color: #8a8a8a; margin: 0 0 32px; font-size: 14px; }
   .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 44px; }
-  .card { background: #131316; border: 1px solid #27272a; padding: 20px; }
+  .card { background: #080808; border: 1px solid #242424; padding: 20px; }
   .card .v { font-size: 36px; font-weight: 700; color: #fafafa; font-variant-numeric: tabular-nums; }
-  .card .k { font-size: 12px; color: #a1a1aa; text-transform: uppercase; letter-spacing: 0.06em; margin-top: 4px; }
-  h2 { font-size: 14px; color: #a1a1aa; text-transform: uppercase; letter-spacing: 0.06em; margin: 0 0 16px; display: flex; justify-content: space-between; align-items: baseline; }
-  .peak { color: #52525b; text-transform: none; letter-spacing: 0; font-weight: 400; }
-  .chart { background: #0c0c0e; border: 1px solid #1f1f23; border-radius: 10px; padding: 18px 12px 8px; }
+  .card .k { font-size: 12px; color: #aaaaaa; text-transform: uppercase; letter-spacing: 0.06em; margin-top: 4px; }
+  h2 { font-size: 14px; color: #aaaaaa; text-transform: uppercase; letter-spacing: 0.06em; margin: 0 0 16px; display: flex; justify-content: space-between; align-items: baseline; }
+  .peak { color: #5a5a5a; text-transform: none; letter-spacing: 0; font-weight: 400; }
+  .chart { background: #080808; border: 1px solid #242424; border-radius: 10px; padding: 18px 12px 8px; }
   a { color: #fafafa; text-decoration: underline; text-underline-offset: 2px; }
-  .foot { margin-top: 40px; font-size: 13px; color: #52525b; }
+  .foot { margin-top: 40px; font-size: 13px; color: #5a5a5a; }
 </style>
 </head>
 <body>
