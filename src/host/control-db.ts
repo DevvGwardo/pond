@@ -416,7 +416,7 @@ export function openControlDb(dataDir: string): ControlDb {
   )
   const countDeploysTotal = db.prepare("SELECT COUNT(*) AS c FROM audit_log WHERE action = 'deploy.create'")
   const deploysPerDay = db.prepare(
-    "SELECT date(ts) AS day, COUNT(*) AS c FROM audit_log WHERE action = 'deploy.create' AND ts >= datetime('now', '-7 days') GROUP BY day ORDER BY day",
+    "SELECT date(ts) AS day, COUNT(*) AS c FROM audit_log WHERE action = 'deploy.create' AND ts >= datetime('now', '-30 days') GROUP BY day ORDER BY day",
   )
 
   return {
