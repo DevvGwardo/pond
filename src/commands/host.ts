@@ -3270,7 +3270,7 @@ export const hostCommand = defineCommand({
       </video>
     </div>
     <p class="fine">
-      Anonymous deploys are sandboxed and may be terminated at any time. <a href="/abuse">Abuse policy</a> · <a href="/.well-known/security.txt">Security</a>
+      Anonymous deploys are sandboxed and may be terminated at any time. <a href="/stats">Stats</a> · <a href="/abuse">Abuse policy</a> · <a href="/.well-known/security.txt">Security</a>
     </p>
   </div>
 </main>
@@ -3697,6 +3697,70 @@ ${opts.bodyHtml}
 </html>`
     }
 
+    // Public deployment stats. Aggregate counts only (no deploy ids / inventory),
+    // derived from deploy.create audit events — safe to expose, unlike /metrics.
+    function statsHtml(): string {
+      const s = controlDb.deployStats()
+      const fmt = (n: number) => n.toLocaleString("en-US")
+      // Fill a complete trailing 7-day (UTC) series so empty days still render.
+      const counts = new Map(s.daily.map((d) => [d.day, d.count]))
+      const now = new Date()
+      const days: Array<{ day: string; count: number }> = []
+      for (let i = 6; i >= 0; i--) {
+        const dt = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - i))
+        const key = dt.toISOString().slice(0, 10)
+        days.push({ day: key, count: counts.get(key) ?? 0 })
+      }
+      const maxDay = days.reduce((m, d) => Math.max(m, d.count), 0)
+      const bars = days
+        .map((d) => {
+          const pct = maxDay > 0 ? Math.max(d.count > 0 ? 6 : 0, Math.round((d.count / maxDay) * 100)) : 0
+          return `      <div class="row"><span class="day">${d.day.slice(5)}</span><span class="track"><span class="bar" style="width:${pct}%"></span></span><span class="n">${fmt(d.count)}</span></div>`
+        })
+        .join("\n")
+      return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Pond — Stats</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+<style>
+  body { margin: 0; background: #09090b; color: #e4e4e7; font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; line-height: 1.6; }
+  main { max-width: 720px; margin: 0 auto; padding: 48px 24px 96px; }
+  h1 { font-size: 32px; margin: 0 0 4px; }
+  .sub { color: #71717a; margin: 0 0 32px; font-size: 14px; }
+  .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 40px; }
+  .card { background: #18181b; border: 1px solid #27272a; padding: 20px; }
+  .card .v { font-size: 36px; font-weight: 700; color: #67e8f9; font-variant-numeric: tabular-nums; }
+  .card .k { font-size: 12px; color: #a1a1aa; text-transform: uppercase; letter-spacing: 0.06em; margin-top: 4px; }
+  h2 { font-size: 14px; color: #a1a1aa; text-transform: uppercase; letter-spacing: 0.06em; margin: 0 0 14px; }
+  .row { display: flex; align-items: center; gap: 12px; margin: 6px 0; font-variant-numeric: tabular-nums; }
+  .day { width: 52px; color: #71717a; font-size: 13px; font-family: ui-monospace, monospace; }
+  .track { flex: 1; background: #18181b; border: 1px solid #27272a; height: 18px; }
+  .bar { display: block; height: 100%; background: #67e8f9; }
+  .n { width: 56px; text-align: right; color: #d4d4d8; font-size: 14px; }
+  a { color: #a5f3fc; }
+  .foot { margin-top: 40px; font-size: 13px; color: #52525b; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Deployments</h1>
+  <p class="sub">Capsules deployed to this Pond host. <a href="/api/stats">JSON</a></p>
+  <div class="cards">
+    <div class="card"><div class="v">${fmt(s.last24h)}</div><div class="k">last 24h</div></div>
+    <div class="card"><div class="v">${fmt(s.last7d)}</div><div class="k">last 7 days</div></div>
+    <div class="card"><div class="v">${fmt(s.total)}</div><div class="k">all time</div></div>
+  </div>
+  <h2>Last 7 days</h2>
+${bars}
+  <p class="foot"><a href="/">← back</a></p>
+</main>
+</body>
+</html>`
+    }
+
     function securityTxt(): string {
       const contact = abuseEmail
         ? `Contact: mailto:${abuseEmail}`
@@ -3719,6 +3783,12 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
           }
           if (url.pathname === "/abuse") {
             return c.html(abuseHtml())
+          }
+          if (url.pathname === "/stats") {
+            return c.html(statsHtml())
+          }
+          if (url.pathname === "/api/stats") {
+            return c.json(controlDb.deployStats())
           }
           if (url.pathname === "/.well-known/security.txt") {
             return new Response(securityTxt(), {
