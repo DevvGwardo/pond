@@ -3127,13 +3127,45 @@ export const hostCommand = defineCommand({
       const installCmd = "npm install -g pondsh"
       const demoVideoUrl = "https://raw.githubusercontent.com/DevvGwardo/pond-assets/main/pond-demo.mp4"
       const demoPosterUrl = "https://raw.githubusercontent.com/DevvGwardo/pond-assets/main/pond-demo-poster.png"
+      // SEO: absolute origin for canonical/OG, a descriptive title + meta
+      // description, and SoftwareApplication structured data.
+      const origin = publicBaseUrl ? `${publicBaseUrl.protocol}//${publicBaseUrl.host}` : `http://${publicHost}:${port}`
+      const metaTitle = "Pond — Agent-native full-stack TypeScript, deployed anonymously"
+      const metaDesc =
+        "Pond runs agent-native full-stack TypeScript capsules — schema, queries, mutations, and UI in one file. Deploy anonymously in seconds, no account required."
+      const ldJson = JSON.stringify({
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        name: "Pond",
+        applicationCategory: "DeveloperApplication",
+        operatingSystem: "Any",
+        description: metaDesc,
+        url: `${origin}/`,
+        offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
+      }).replace(/</g, "\\u003c")
       return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Pond</title>
-<meta name="description" content="Agent-native full-stack TypeScript capsules." />
+<title>${metaTitle}</title>
+<meta name="description" content="${metaDesc}" />
+<meta name="robots" content="index, follow, max-image-preview:large" />
+<meta name="theme-color" content="#000000" />
+<link rel="canonical" href="${origin}/" />
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="Pond" />
+<meta property="og:title" content="${metaTitle}" />
+<meta property="og:description" content="${metaDesc}" />
+<meta property="og:url" content="${origin}/" />
+<meta property="og:image" content="${demoPosterUrl}" />
+<meta property="og:image:alt" content="Pond — agent-native full-stack TypeScript" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="${metaTitle}" />
+<meta name="twitter:description" content="${metaDesc}" />
+<meta name="twitter:image" content="${demoPosterUrl}" />
+<script type="application/ld+json">${ldJson}</script>
 <style>
   :root {
     --bg: #000;
@@ -3148,7 +3180,8 @@ export const hostCommand = defineCommand({
     color-scheme: dark;
   }
   * { box-sizing: border-box; }
-  html { min-height: 100%; background: var(--bg); color: var(--text); font-family: var(--sans); }
+  html { min-height: 100%; background: var(--bg); color: var(--text); font-family: var(--sans); scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
   body { min-height: 100vh; margin: 0; background: var(--bg); }
   main {
     display: flex;
@@ -3218,6 +3251,18 @@ export const hostCommand = defineCommand({
     text-underline-offset: 4px;
   }
   .links { display: flex; flex-wrap: wrap; gap: 22px; }
+  .watch {
+    display: inline-flex; align-items: center; gap: 9px;
+    margin-top: 30px; padding: 11px 18px;
+    border: 1px solid var(--line); border-radius: 999px;
+    color: var(--text); font-family: var(--mono); font-size: 14px;
+    text-decoration: none; letter-spacing: 0.02em;
+    transition: border-color 0.2s ease, background 0.2s ease;
+  }
+  .watch:hover { border-color: #3a3a3a; background: #0d0d0d; }
+  .watch svg { width: 15px; height: 15px; fill: currentColor; }
+  .watch .arrow { color: var(--muted); transition: transform 0.4s ease; }
+  .watch:hover .arrow { transform: translateY(3px); }
   .fine {
     margin-top: 28px;
     color: #5a5a5a;
@@ -3295,7 +3340,12 @@ export const hostCommand = defineCommand({
       <a href="/docs">Docs</a>
       <a href="https://github.com/DevvGwardo/pond" rel="noreferrer">GitHub</a>
     </div>
-    <div class="demo">
+    <a class="watch" href="#demo" aria-label="Watch the demo video">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+      Watch the demo
+      <span class="arrow" aria-hidden="true">↓</span>
+    </a>
+    <div class="demo" id="demo">
       <p class="demo-label">See how it works</p>
       <div class="player paused" data-player>
         <video playsinline preload="none" poster="${demoPosterUrl}" controls>
@@ -3404,6 +3454,17 @@ export const hostCommand = defineCommand({
       else if (root.requestFullscreen) root.requestFullscreen();
       else if (v.requestFullscreen) v.requestFullscreen();
     });
+    // "Watch the demo" — smooth-scroll the player into view, then start playback
+    // (the click is a user gesture, so audio is permitted). href="#demo" is the
+    // no-JS fallback (scrolls without autoplay).
+    const watch = document.querySelector(".watch");
+    if (watch) {
+      watch.addEventListener("click", (e) => {
+        e.preventDefault();
+        root.scrollIntoView({ behavior: "smooth", block: "center" });
+        window.setTimeout(() => { const p = v.play(); if (p && p.catch) p.catch(() => {}); }, 600);
+      });
+    }
   })();
 </script>
 </body>
