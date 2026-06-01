@@ -1,12 +1,10 @@
 import { Hono } from "hono"
 import { deleteCookie, getCookie, setCookie } from "hono/cookie"
 import Database from "better-sqlite3"
-import * as esbuild from "esbuild"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto"
 import { pathToFileURL } from "node:url"
-import { Google, GitHub, generateCodeVerifier, generateState } from "arctic"
 import { SignJWT, jwtVerify } from "jose"
 import {
   CapsuleAi,
@@ -51,6 +49,10 @@ export async function createRuntime(
   env: Record<string, string>
   buildContext: (cookieHeader: string | null | undefined) => Promise<CapsuleContext>
 }> {
+  // Build-time only. Dynamic so the hosted capsule worker (which imports this
+  // module via createRuntimeFromDeployBundle and never builds) doesn't carry
+  // esbuild's ~5 MB resident weight in every running deploy.
+  const esbuild = await import("esbuild")
   const result = await esbuild.build({
     entryPoints: [serverFile],
     bundle: true,
@@ -436,14 +438,24 @@ function createRuntimeFromDefinition(
   }
   const sessionSecret = new TextEncoder().encode(sessionSecretSource)
   const guestAuth = options.getGuestAuth ?? (() => ({ isGuest: true, userId: "guest", displayName: "Guest" }))
-  const google =
-    env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET && env.GOOGLE_REDIRECT_URI
-      ? new Google(env.GOOGLE_CLIENT_ID, env.GOOGLE_CLIENT_SECRET, env.GOOGLE_REDIRECT_URI)
-      : null
-  const github =
-    env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET
-      ? new GitHub(env.GITHUB_CLIENT_ID, env.GITHUB_CLIENT_SECRET, env.GITHUB_REDIRECT_URI || null)
-      : null
+  const googleConfigured = !!(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET && env.GOOGLE_REDIRECT_URI)
+  const githubConfigured = !!(env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET)
+  // Lazy-load `arctic` (the OAuth client lib, ~5 MB resident) only when an OAuth
+  // route is actually hit on a configured capsule. The common no-OAuth capsule
+  // never imports it, shrinking the per-worker memory floor. OAuth flows are
+  // low-frequency, so reconstructing the client per request is negligible.
+  let arcticMod: typeof import("arctic") | undefined
+  const loadArctic = async () => (arcticMod ??= await import("arctic"))
+  const getGoogle = async () => {
+    if (!googleConfigured) return null
+    const { Google } = await loadArctic()
+    return new Google(env.GOOGLE_CLIENT_ID, env.GOOGLE_CLIENT_SECRET, env.GOOGLE_REDIRECT_URI)
+  }
+  const getGitHub = async () => {
+    if (!githubConfigured) return null
+    const { GitHub } = await loadArctic()
+    return new GitHub(env.GITHUB_CLIENT_ID, env.GITHUB_CLIENT_SECRET, env.GITHUB_REDIRECT_URI || null)
+  }
 
   const log = (level: "info" | "error", message: string, data?: any) => {
     const entry = { timestamp: new Date().toISOString(), level, message, data }
@@ -584,7 +596,9 @@ function createRuntimeFromDefinition(
 
     // ── Google OAuth (unchanged from previous implementation) ───
     app.get("/auth/google", async (c) => {
+      const google = await getGoogle()
       if (!google) return c.text("Missing Google OAuth configuration", 500)
+      const { generateState, generateCodeVerifier } = await loadArctic()
       const state = generateState()
       const codeVerifier = generateCodeVerifier()
       const url = google.createAuthorizationURL(state, codeVerifier, ["openid", "profile", "email"])
@@ -594,6 +608,7 @@ function createRuntimeFromDefinition(
     })
 
     app.get("/auth/google/callback", async (c) => {
+      const google = await getGoogle()
       if (!google) return c.text("Missing Google OAuth configuration", 500)
       const code = c.req.query("code")
       const state = c.req.query("state")
@@ -629,7 +644,9 @@ function createRuntimeFromDefinition(
 
     // ── GitHub OAuth ────────────────────────────────────────────
     app.get("/auth/github", async (c) => {
+      const github = await getGitHub()
       if (!github) return c.text("Missing GitHub OAuth configuration", 500)
+      const { generateState } = await loadArctic()
       const state = generateState()
       const url = github.createAuthorizationURL(state, ["read:user", "user:email"])
       setCookie(c, GITHUB_STATE_COOKIE, state, { httpOnly: true, sameSite: "Lax", path: "/", maxAge: 600 })
@@ -637,6 +654,7 @@ function createRuntimeFromDefinition(
     })
 
     app.get("/auth/github/callback", async (c) => {
+      const github = await getGitHub()
       if (!github) return c.text("Missing GitHub OAuth configuration", 500)
       const code = c.req.query("code")
       const state = c.req.query("state")
@@ -873,6 +891,7 @@ export async function buildForDeploy(
   const outfile = outfileOverride ?? path.join(cwd, ".pond", "deploy-bundle.mjs")
   fs.mkdirSync(path.dirname(outfile), { recursive: true })
 
+  const esbuild = await import("esbuild")
   await esbuild.build({
     entryPoints: [serverFile],
     bundle: true,

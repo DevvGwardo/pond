@@ -185,6 +185,12 @@ export interface CapsuleDefinition {
   allowedOrigins?: string[]
   rateLimit?: Record<string, RouteRateLimit>
   public?: boolean
+  // When true, the deploy is served as a pure static site (its prebuilt
+  // client.html straight from the host) and NO capsule worker is ever booted —
+  // no SQLite, auth, AI, blobs, queries/mutations/endpoints. Requires a
+  // client/index.tsx. The host detects this by statically scanning the
+  // capsule({ … }) call (see extractCapsuleMeta), so it must be a literal.
+  static?: boolean
   title?: string
   description?: string
 }
@@ -207,6 +213,7 @@ export function capsule(def: {
   allowedOrigins?: string[]
   rateLimit?: Record<string, RouteRateLimit>
   public?: boolean
+  static?: boolean
   title?: string
   description?: string
 }): CapsuleDefinition {
@@ -219,6 +226,7 @@ export function capsule(def: {
     allowedOrigins: def.allowedOrigins,
     rateLimit: def.rateLimit,
     public: def.public,
+    static: def.static,
     title: def.title,
     description: def.description,
   }

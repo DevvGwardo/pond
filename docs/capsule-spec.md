@@ -158,6 +158,7 @@ capsule(def: {
   allowedOrigins?: string[]
   rateLimit?:    Record<string, RouteRateLimit>
   public?:       boolean
+  static?:       boolean
   title?:        string
   description?:  string
 }): CapsuleDefinition
@@ -173,6 +174,10 @@ capsule(def: {
   dev/`pond start` runtime mounts them; see §8).
 - `rateLimit` keys match query / mutation / endpoint **names** (see §3.7).
 - `public`, `title`, `description` feed the public listing / fork surface.
+- `static: true` deploys the capsule as a pure static site — the host serves the
+  prebuilt `client.html` directly and never boots a worker, so there is no
+  server runtime (no DB/auth/AI/blobs; `/api/*` returns 404). Requires a
+  `client/index.tsx`; `schema`/`queries`/`mutations` may be empty.
 
 `schema`, `queries`, and `mutations` are required object literals. Empty objects
 are allowed (`queries: {}`).
