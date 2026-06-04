@@ -12,13 +12,27 @@ import { buildClient } from "./bundler.js"
 import { createRuntime } from "./runtime.js"
 import type { CapsuleContext, SocketHandler, SocketLike } from "./server/index.js"
 
-function isPortFree(port: number): Promise<boolean> {
+// Probe one network stack: resolves true if `port` is bindable on `host`.
+// Only a real EADDRINUSE/EACCES counts as "in use" — an unavailable address
+// (e.g. ::1 on an IPv4-only host) resolves true so a missing IPv6 stack
+// doesn't make every port look busy and stall findAvailablePort.
+function probePort(port: number, host: string): Promise<boolean> {
   return new Promise((resolve) => {
     const srv = net.createServer()
-    srv.once("error", () => resolve(false))
+    srv.once("error", (err: NodeJS.ErrnoException) => resolve(err.code !== "EADDRINUSE" && err.code !== "EACCES"))
     srv.once("listening", () => srv.close(() => resolve(true)))
-    srv.listen(port, "127.0.0.1")
+    srv.listen(port, host)
   })
+}
+
+// A port is free only if BOTH loopback stacks are bindable. An IPv4-only probe
+// missed a server holding just the IPv6 side of a port (e.g. a Next.js dev
+// server on `::`): pond would then take the IPv4 side of the same port and
+// `localhost` — IPv6-first on macOS — would route to the other app instead of
+// the capsule. Checking both stacks makes findAvailablePort walk past it.
+async function isPortFree(port: number): Promise<boolean> {
+  const [v4, v6] = await Promise.all([probePort(port, "127.0.0.1"), probePort(port, "::1")])
+  return v4 && v6
 }
 
 // Walk forward from the requested port until we find one free, so a
