@@ -1078,8 +1078,8 @@ A few useful ones:
 | `POND_SESSION_SECRET`      | Persistent session-cookie secret. Set this in `.env.pond.server` for production; without it sessions don't survive a restart. |
 | `POND_TRUST_PROXY_HEADERS` | Same effect as `--trust-proxy` on `pond host`.                                                                                |
 | `POND_PUBLIC_BASE_URL`     | Same effect as `--public-base-url` on `pond host`.                                                                            |
-| `POND_TURNSTILE_SECRET`    | Same effect as `--turnstile-secret` on `pond host` — requires a verified Cloudflare Turnstile token on anonymous deploys.    |
-| `POND_HOST_TOKEN`          | The control-plane host token. Used by `pond admin terminate` and host bootstrap.                                             |
+| `POND_TURNSTILE_SECRET`    | Same effect as `--turnstile-secret` on `pond host` — requires a verified Cloudflare Turnstile token on anonymous deploys.     |
+| `POND_HOST_TOKEN`          | The control-plane host token. Used by `pond admin terminate` and host bootstrap.                                              |
 
 ---
 
