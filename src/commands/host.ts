@@ -3137,8 +3137,12 @@ export const hostCommand = defineCommand({
 
     function landingHtml(): string {
       const installCmd = "npm install -g pondsh"
-      const demoVideoUrl = "https://raw.githubusercontent.com/DevvGwardo/pond-assets/main/pond-demo.mp4"
-      const demoPosterUrl = "https://raw.githubusercontent.com/DevvGwardo/pond-assets/main/pond-demo-poster.png"
+      // Served via jsDelivr's CDN front over the public pond-assets repo (not
+      // raw.githubusercontent.com): correct video/mp4 content-type, week-long
+      // edge caching, and multi-region nodes — so the landing demo survives a
+      // launch traffic spike that would throttle raw.githubusercontent.
+      const demoVideoUrl = "https://cdn.jsdelivr.net/gh/DevvGwardo/pond-assets@main/pond-demo.mp4"
+      const demoPosterUrl = "https://cdn.jsdelivr.net/gh/DevvGwardo/pond-assets@main/pond-demo-poster.png"
       // SEO: absolute origin for canonical/OG, a descriptive title + meta
       // description, and SoftwareApplication structured data.
       const origin = publicBaseUrl ? `${publicBaseUrl.protocol}//${publicBaseUrl.host}` : `http://${publicHost}:${port}`
