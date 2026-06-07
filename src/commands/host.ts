@@ -4108,7 +4108,6 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
               deployId,
               deployUrl: record.url,
               publicHost,
-              controlUrl: apiUrl,
               lastBuild,
             })
             const html = ideHtml.replace("__POND_IDE__BOOTSTRAP__", `window.__POND_IDE = ${bootstrap}`)

@@ -176,6 +176,7 @@ test("GET /ide/:deployId bootstraps with lastBuild metadata persisted on the rec
   assert.ok(m, "bootstrap object missing from /ide html")
   const bootstrap = JSON.parse(m[1])
   assert.equal(bootstrap.deployId, deployId)
+  assert.equal(bootstrap.controlUrl, undefined, "IDE bootstrap must not leak internal control plane URL")
   assert.ok(bootstrap.lastBuild, "bootstrap.lastBuild should be populated after a fresh deploy create")
   assert.ok(typeof bootstrap.lastBuild.bundleBytes === "number" && bootstrap.lastBuild.bundleBytes > 0)
   assert.ok(typeof bootstrap.lastBuild.bundleHash === "string" && bootstrap.lastBuild.bundleHash.length === 64)

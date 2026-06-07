@@ -30,7 +30,6 @@ declare global {
       deployId: string
       deployUrl: string
       publicHost: string
-      controlUrl: string
       lastBuild?: BootstrapLastBuild | null
     }
   }
