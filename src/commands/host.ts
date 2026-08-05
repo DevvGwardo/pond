@@ -3378,7 +3378,7 @@ export const hostCommand = defineCommand({
       </div>
     </div>
     <p class="fine">
-      Anonymous deploys are sandboxed and may be terminated at any time. <a href="/stats">Stats</a> · <a href="/abuse">Abuse policy</a> · <a href="/.well-known/security.txt">Security</a>
+      Anonymous deploys are sandboxed and may be terminated at any time. Idle capsules sleep after 15 minutes and wake on their next request — the first load after a nap may take a moment. <a href="/stats">Stats</a> · <a href="/abuse">Abuse policy</a> · <a href="/.well-known/security.txt">Security</a>
     </p>
   </div>
 </main>
