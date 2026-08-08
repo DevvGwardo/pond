@@ -31,7 +31,7 @@
     "docs/*.txt"
   ],
   "scripts": {
-    "build": "node scripts/build-ide.mjs && node scripts/build-llms.mjs && tsc",
+    "build": "tsc && node scripts/build-ide.mjs && node scripts/build-llms.mjs",
     "build:ide": "node scripts/build-ide.mjs",
     "build:llms": "node scripts/build-llms.mjs",
     "dev": "npm run build:ide && tsc --watch",
