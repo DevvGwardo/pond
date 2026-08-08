@@ -70,7 +70,8 @@ async function api(opts: McpServerOptions, path: string, init: RequestInit = {})
   if (init.body && !headers.has("content-type")) {
     headers.set("content-type", "application/json")
   }
-  const res = await fetch(`${opts.apiUrl}${path}`, { ...init, headers })
+  // A stalled control plane must not hang tools/call forever.
+  const res = await fetch(`${opts.apiUrl}${path}`, { ...init, headers, signal: AbortSignal.timeout(30_000) })
   const ct = res.headers.get("content-type") ?? ""
   if (ct.includes("application/json")) {
     const json = await res.json()
@@ -80,6 +81,12 @@ async function api(opts: McpServerOptions, path: string, init: RequestInit = {})
   const text = await res.text()
   if (!res.ok) throw new Error(`${path}: ${res.status} ${text}`)
   return text
+}
+
+// Encode one path segment (the host's files routes treat the subpath as a
+// URL segment, so spaces/#/? in a filename would otherwise break the request).
+function fileUrl(deployId: string, path: string): string {
+  return `/api/deploys/${encodeURIComponent(deployId)}/files/${path.split("/").map(encodeURIComponent).join("/")}`
 }
 
 function tools(opts: McpServerOptions): ToolDef[] {
@@ -162,7 +169,7 @@ function tools(opts: McpServerOptions): ToolDef[] {
         },
         required: ["deployId", "path"],
       },
-      handler: async ({ deployId, path }) => api(opts, `/api/deploys/${deployId}/files/${path}`),
+      handler: async ({ deployId, path }) => api(opts, fileUrl(deployId, path)),
     },
     {
       name: "write_file",
@@ -176,10 +183,13 @@ function tools(opts: McpServerOptions): ToolDef[] {
         },
         required: ["deployId", "path", "content"],
       },
+      // The host's files PUT takes the RAW file text as the body — sending
+      // JSON.stringify({content}) would write `{"content":"..."}` to disk.
       handler: async ({ deployId, path, content }) =>
-        api(opts, `/api/deploys/${deployId}/files/${path}`, {
+        api(opts, fileUrl(deployId, path), {
           method: "PUT",
-          body: JSON.stringify({ content }),
+          body: content,
+          headers: { "content-type": "text/plain; charset=utf-8" },
         }),
     },
     {
@@ -231,13 +241,15 @@ function tools(opts: McpServerOptions): ToolDef[] {
         required: ["deployId", "key", "value"],
       },
       handler: async ({ deployId, key, value }) => {
-        const cur = (await api(opts, `/api/deploys/${deployId}/env`)) as { envText?: string }
-        const lines = (cur.envText ?? "").split("\n").filter((l: string) => l.length > 0)
-        const filtered = lines.filter((l: string) => !new RegExp(`^${key}=`).test(l))
-        filtered.push(`${key}=${value}`)
+        // The host's env API is `{ entries: {...} }` on both GET and PUT —
+        // not an envText blob. Merge into the current entries so unrelated
+        // keys survive.
+        const cur = (await api(opts, `/api/deploys/${deployId}/env`)) as { entries?: Record<string, string> }
+        const entries = { ...(cur.entries ?? {}) }
+        entries[key] = value
         return api(opts, `/api/deploys/${deployId}/env`, {
           method: "PUT",
-          body: JSON.stringify({ envText: filtered.join("\n") + "\n" }),
+          body: JSON.stringify({ entries }),
         })
       },
     },
@@ -282,7 +294,9 @@ export function runMcpServer() {
       })
       return
     }
-    if (req.method === "notifications/initialized") {
+    // JSON-RPC notifications (no `id`) must NEVER be answered. The client
+    // doesn't expect a response, and sending one is a protocol violation.
+    if (req.method?.startsWith("notifications/")) {
       return
     }
     if (req.method === "tools/list") {
@@ -292,6 +306,12 @@ export function runMcpServer() {
       return
     }
     if (req.method === "tools/call") {
+      // Validate params up front: a missing/odd params object is an Invalid
+      // params error (-32602), not an Internal error (-32603).
+      if (!req.params || typeof req.params !== "object" || typeof req.params.name !== "string") {
+        fail(req.id ?? null, -32602, "Invalid params: tools/call requires a params object with a string `name`")
+        return
+      }
       const params = req.params as { name: string; arguments?: Record<string, unknown> }
       const tool = toolMap.get(params.name)
       if (!tool) {

@@ -1,0 +1,62 @@
+name: release
+# Cut a release from a version tag (vX.Y.Z). The tag is created manually with
+# `npm version patch|minor|major` — that bumps package.json, commits, and tags
+# in one step. This workflow then sanity-checks the package and publishes.
+#
+# Publishing uses `npm publish --provenance` so the registry records which
+# workflow + commit built the artifact (requires the npm `id-token` permission;
+# the package must be public or the repo linked to an OIDC-enabled scope).
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          registry-url: "https://registry.npmjs.org"
+          cache: npm
+      - run: npm ci
+      # Fail the release if the tag version and package.json disagree (npm
+      # version bumps both, but a hand-made tag can drift silently).
+      - name: Verify version matches the tag
+        run: |
+          pkg_version=$(node -p "require('./package.json').version")
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [ "$pkg_version" != "$tag_version" ]; then
+            echo "package.json version ($pkg_version) does not match tag ($tag_version)" >&2
+            exit 1
+          fi
+      # Sanity-check what would be published: the tarball must contain the
+      # bins and not stray files (node_modules, tests, worktrees).
+      - run: npm run build
+      - name: Inspect the publish tarball
+        run: |
+          npm pack --dry-run
+          npm pack --json | node -e '
+            let s = "";
+            process.stdin.on("data", (c) => (s += c));
+            process.stdin.on("end", () => {
+              const [meta] = JSON.parse(s);
+              const files = meta.files.map((f) => f.path).join("\n");
+              for (const bad of ["node_modules/", "test/", ".claude/"]) {
+                if (files.includes(bad)) {
+                  console.error(`tarball contains ${bad} — aborting release`);
+                  process.exit(1);
+                }
+              }
+              console.log(`package tarball: ${files.split("\n").length} files, ${(meta.size / 1024).toFixed(0)} KB`);
+            });
+          '
+      - run: npm publish --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

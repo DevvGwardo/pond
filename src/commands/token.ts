@@ -1,4 +1,5 @@
 import { defineCommand } from "citty"
+import { fetchOrFail, showGroupUsageIfBare } from "./shared.js"
 import { loadCredentials, saveCredentials } from "../host/credentials.js"
 
 export const tokenCommand = defineCommand({
@@ -6,6 +7,7 @@ export const tokenCommand = defineCommand({
     name: "token",
     description: "Manage the saved user API token",
   },
+  run: showGroupUsageIfBare,
   subCommands: {
     rotate: defineCommand({
       meta: {
@@ -22,7 +24,7 @@ export const tokenCommand = defineCommand({
           console.error(`No saved credentials for ${apiUrl}.`)
           process.exit(1)
         }
-        const res = await fetch(`${apiUrl}/api/users/me/rotate-token`, {
+        const res = await fetchOrFail(`${apiUrl}/api/users/me/rotate-token`, {
           method: "POST",
           headers: { authorization: `Bearer ${cred.token}` },
         })

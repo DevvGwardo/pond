@@ -13,10 +13,10 @@ import { spawn } from "node:child_process"
 import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import * as path from "node:path"
-import * as net from "node:net"
 import { randomBytes } from "node:crypto"
 
 import { stopProc } from "./proc-kill.mjs"
+import { pickFreePort, waitForHealth } from "./helpers.mjs"
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "..")
 const CLI_PATH = path.join(REPO_ROOT, "src", "cli.js")
@@ -41,33 +41,6 @@ function staticSourceFiles() {
     "client/index.tsx": STATIC_CLIENT_SRC,
     "package.json": '{"name":"static-cap","private":true,"type":"module"}\n',
   }
-}
-
-async function pickFreePort() {
-  return await new Promise((resolve, reject) => {
-    const s = net.createServer()
-    s.unref()
-    s.on("error", reject)
-    s.listen(0, "127.0.0.1", () => {
-      const addr = s.address()
-      const port = typeof addr === "object" && addr ? addr.port : 0
-      s.close(() => resolve(port))
-    })
-  })
-}
-
-async function waitForHealth(url, timeoutMs = 8000) {
-  const start = Date.now()
-  while (Date.now() - start < timeoutMs) {
-    try {
-      const r = await fetch(`${url}/api/health`)
-      if (r.ok) return
-    } catch {
-      // retry
-    }
-    await new Promise((r) => setTimeout(r, 100))
-  }
-  throw new Error(`host did not become healthy at ${url} within ${timeoutMs}ms`)
 }
 
 // GET against the host with an explicit Host header so the deploy-subdomain

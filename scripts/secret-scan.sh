@@ -18,7 +18,7 @@ fail=0
 # Matches real env/credential/key files but NOT *.example templates.
 staged_files=$(git diff --cached --name-only --diff-filter=AM)
 bad_paths=$(printf '%s\n' "$staged_files" | grep -E \
-  '(^|/)\.env(\.pond\.server|\.local|\.production)?$|(^|/)credentials\.json$|\.pem$|(^|/)id_(rsa|ed25519)$|keypair.*\.json$' \
+  '(^|/)\.env(\.pond\.server|\.local|\.production)?$|(^|/)credentials\.json$|\.pem$|(^|/)id_(rsa|ed25519)$|keypair.*\.json$|(^|/)host-token$' \
   || true)
 if [ -n "$bad_paths" ]; then
   echo "✖ secret-scan: refusing to commit secret-bearing file(s):" >&2

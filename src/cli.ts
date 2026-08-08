@@ -1,6 +1,7 @@
 import { defineCommand, runMain } from "citty"
 import { fileURLToPath } from "node:url"
 import * as path from "node:path"
+import * as fs from "node:fs"
 import { newCommand } from "./commands/new.js"
 import { devCommand } from "./commands/dev.js"
 import { deployCommand } from "./commands/deploy.js"
@@ -22,10 +23,16 @@ import { signupCommand } from "./commands/signup.js"
 import { dashboardCommand } from "./commands/dashboard.js"
 import { uninstallCommand } from "./commands/uninstall.js"
 
+// Version lives in package.json only; keep it in sync automatically so
+// `pond --version` can never drift from the published release.
+const POND_VERSION = JSON.parse(fs.readFileSync(path.resolve(import.meta.dirname, "../package.json"), "utf-8"))
+  .version as string
+
 const main = defineCommand({
   meta: {
     name: "pond",
     description: "Agent-native CLI and runtime for building small full-stack TypeScript apps",
+    version: POND_VERSION,
   },
   subCommands: {
     new: newCommand,

@@ -1,5 +1,6 @@
 import { defineCommand } from "citty"
 import { startDevServer } from "../dev-server.js"
+import { parsePort } from "./shared.js"
 
 export const devCommand = defineCommand({
   meta: {
@@ -14,7 +15,8 @@ export const devCommand = defineCommand({
     },
   },
   async run({ args }) {
-    const port = parseInt(args.port, 10)
+    // parsePort fails loudly on garbage instead of "No free port in range NaN-NaN".
+    const port = parsePort(typeof args.port === "string" ? args.port : undefined, 3000)
     await startDevServer(port)
   },
 })

@@ -1,0 +1,24 @@
+# Keep dependencies current: npm packages + the GitHub Actions themselves.
+# The release flow depends on these updates landing (e.g. Node engine floors,
+# action versions), so auto-open PRs rather than leaving it to memory.
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      # Runtime deps are the risky ones (native modules, esbuild); update them
+      # as a group so a release can validate the whole set at once.
+      runtime-deps:
+        dependency-type: "production"
+      dev-deps:
+        dependency-type: "development"
+    open-pull-requests-limit: 10
+    versioning-strategy: "auto"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5

@@ -23,8 +23,12 @@ function runGit(args: string[], cwd: string): void {
 const POND_VERSION = JSON.parse(fs.readFileSync(path.resolve(import.meta.dirname, "../package.json"), "utf-8"))
   .version as string
 
+// The session secret line is ACTIVE (not commented): copyTemplate substitutes
+// a fresh random value per project, so capsule sessions survive restarts in
+// dev. It was previously commented out — the runtime skips `#` lines, so the
+// generated secret never loaded and every restart minted an ephemeral one.
 const BASE_ENV_TEMPLATE = `# Server-only environment variables
-# POND_SESSION_SECRET={{SESSION_SECRET}}
+POND_SESSION_SECRET={{SESSION_SECRET}}
 # OPENAI_API_KEY=sk-...
 # ANTHROPIC_API_KEY=sk-...
 # HERMES_BASE_URL=http://127.0.0.1:8642

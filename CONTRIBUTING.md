@@ -12,7 +12,7 @@ npm run build      # tsc once; produces .js next to .ts
 npm test           # build + node --test test/*.test.mjs
 ```
 
-You need **Node 18+** (Node 22+ to exercise the `--experimental-permission` sandbox in the host tests).
+You need **Node 20.19+** (Node 22+ to exercise the `--permission` sandbox in the host tests).
 
 ## Dev loop
 

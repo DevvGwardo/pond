@@ -98,16 +98,14 @@ function hermesCandidatePaths(home: string, platform: NodeJS.Platform, env: Node
 }
 
 export async function detectClaude(deps: DetectionDeps = {}): Promise<DetectedAgent | null> {
-  const home = (deps.homedir ?? os.homedir)()
-  const exists = deps.existsSync ?? fs.existsSync
   const which = deps.which ?? defaultWhich
-  const dir = path.join(home, ".claude")
-  if (exists(dir)) {
-    const cli = which("claude")
-    if (cli) return { name: "claude", detail: cli }
-    return { name: "claude", detail: dir }
-  }
-  return null
+  // A `claude` binary on PATH is required. The config dir alone (created by
+  // any previous claude run) can't be spawned — returning it made
+  // invokeClaude treat the directory as the CLI and die with ENOENT instead
+  // of falling through the agent cascade.
+  const cli = which("claude")
+  if (!cli) return null
+  return { name: "claude", detail: cli }
 }
 
 export async function detectCodex(deps: DetectionDeps = {}): Promise<DetectedAgent | null> {

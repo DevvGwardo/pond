@@ -10,7 +10,7 @@ import {
   healDeployRecord,
   readDeployRecord,
 } from "../src/host/deploy-record.js"
-import { hasErrorCode } from "../src/commands/inspect.js"
+import { hasErrorCode } from "../src/commands/shared.js"
 
 const cleanupDirs = []
 after(() => {

@@ -110,50 +110,62 @@ export interface LogEntry {
   data?: unknown
 }
 
+export type LogStreamStatus = "live" | "reconnecting"
+
+// Stream a deploy's logs through the CONTROL PLANE's owner-authed
+// /api/deploys/:deployId/logs endpoint. The capsule's own SSE stream at
+// /__pond/logs is unreachable from the IDE: it lives on the deploy origin
+// (cross-origin from the apex), the custom claim/bearer headers trigger a
+// CORS preflight the capsule can't answer, and owned deploys gate on a header
+// the bearer flow never sends. Polling the same-origin control-plane endpoint
+// sidesteps all three, works for claim-token AND bearer auth, and keeps
+// working across redeploys (the capsule restarting doesn't tear down the
+// connection). Exponential backoff + auto-reconnect on failure.
 export function streamLogs(
-  deployUrl: string,
   opts: ApiOptions,
   onEntry: (entry: LogEntry) => void,
   onError: (err: unknown) => void,
+  onStatus?: (status: LogStreamStatus) => void,
 ): () => void {
-  // The capsule's SSE log stream is served at /__pond/logs on the deploy origin,
-  // not the control plane. We pass the same claim/bearer token via the standard
-  // header — anonymous deploys gate on `x-pond-claim-token`, owned ones on Bearer.
   const ac = new AbortController()
-  void (async () => {
+  let lastTs = ""
+  let retryTimer: ReturnType<typeof setTimeout> | null = null
+  let retryMs = 1000
+
+  const poll = async () => {
     try {
-      const res = await fetch(`${deployUrl.replace(/\/$/, "")}/__pond/logs`, {
+      const r = await fetch(`/api/deploys/${opts.deployId}/logs?limit=500`, {
         headers: headers(opts),
         signal: ac.signal,
       })
-      if (!res.ok || !res.body) {
-        onError(`logs: ${res.status}`)
+      if (!r.ok) {
+        onError(`logs: ${r.status}`)
         return
       }
-      const reader = res.body.getReader()
-      const dec = new TextDecoder()
-      let buf = ""
-      while (true) {
-        const { value, done } = await reader.read()
-        if (done) break
-        buf += dec.decode(value, { stream: true })
-        const parts = buf.split("\n\n")
-        buf = parts.pop() ?? ""
-        for (const part of parts) {
-          const line = part.split("\n").find((l) => l.startsWith("data: "))
-          if (!line) continue
-          try {
-            onEntry(JSON.parse(line.slice(6)) as LogEntry)
-          } catch {
-            // skip malformed
-          }
-        }
+      const { entries } = (await r.json()) as { entries: LogEntry[] }
+      for (const e of entries) {
+        if (lastTs && e.timestamp <= lastTs) continue
+        onEntry(e)
       }
+      if (entries.length > 0) lastTs = entries[entries.length - 1].timestamp
+      retryMs = 1000
+      onStatus?.("live")
     } catch (err) {
-      if ((err as { name?: string }).name !== "AbortError") onError(err)
+      if ((err as { name?: string }).name === "AbortError") return
+      onError(err)
+      onStatus?.("reconnecting")
+    } finally {
+      if (!ac.signal.aborted) {
+        retryTimer = setTimeout(() => void poll(), retryMs)
+        retryMs = Math.min(retryMs * 2, 10_000)
+      }
     }
-  })()
-  return () => ac.abort()
+  }
+  void poll()
+  return () => {
+    ac.abort()
+    if (retryTimer) clearTimeout(retryTimer)
+  }
 }
 
 export async function build(opts: ApiOptions): Promise<BuildResult> {

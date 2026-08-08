@@ -26,11 +26,12 @@ import {
 import { findPackageJsonLifecycleScripts } from "../host/package-json-validation.js"
 import { verifyTurnstile } from "../host/turnstile.js"
 import { selectIdleDeploys } from "../host/idle.js"
+import { containedRealPath, safeReadFile, safeWriteFile } from "../host/fs-safe.js"
 import { createHash } from "node:crypto"
 import { buildForDeploy } from "../runtime.js"
 import { buildClient } from "../bundler.js"
-import { ideHtml } from "../ide/built.js"
-import { dashboardHtml } from "../dashboard/built.js"
+import { ideHtml, ideJs, ideHash } from "../ide/built.js"
+import { dashboardHtml, dashboardJs, dashboardHash } from "../dashboard/built.js"
 import { marked } from "marked"
 import Database from "better-sqlite3"
 
@@ -177,7 +178,9 @@ async function buildDeployFromSource(deployDir: string): Promise<{
   let clientBuilt = false
   if (fs.existsSync(clientFile)) {
     const html = await buildClient(clientFile)
-    fs.writeFileSync(path.join(deployDir, "client.html"), html)
+    // safeWriteFile: client.html is tenant-writable; a planted symlink must
+    // not redirect this write onto host files.
+    safeWriteFile(deployDir, path.join(deployDir, "client.html"), html)
     clientBuilt = true
   } else {
     const stale = path.join(deployDir, "client.html")
@@ -185,7 +188,7 @@ async function buildDeployFromSource(deployDir: string): Promise<{
   }
   const bundleBuf = fs.readFileSync(outfile)
   const bundleHash = createHash("sha256").update(bundleBuf).digest("hex")
-  const meta = extractCapsuleMeta(serverFile)
+  const meta = extractCapsuleMeta(deployDir, serverFile)
   // A static deploy is served as its client.html with no worker, so a client
   // is mandatory — reject the meaningless "static, no client" combination at
   // build time rather than shipping a deploy that 404s on every request.
@@ -301,14 +304,20 @@ function capsuleArgRange(scanSrc: string): { start: number; end: number } | null
 // can't unintentionally flip the deploy public and expose its source via
 // /gallery and /api/public-deploys/:id/source. Strings/comments are stripped
 // before the brace scan so a `}` inside a string can't end the range early.
-function extractCapsuleMeta(serverFile: string): {
+function extractCapsuleMeta(
+  deployDir: string,
+  serverFile: string,
+): {
   isPublic: boolean
   isStatic: boolean
   title?: string
   description?: string
 } {
-  if (!fs.existsSync(serverFile)) return { isPublic: false, isStatic: false }
-  const rawSrc = fs.readFileSync(serverFile, "utf-8")
+  // safeReadFile: the scan runs on the tenant-writable tree; a symlinked
+  // entry must not feed host file content into the gallery metadata.
+  const buf = safeReadFile(deployDir, serverFile)
+  if (!buf) return { isPublic: false, isStatic: false }
+  const rawSrc = buf.toString("utf-8")
   const scanSrc = stripJsStringsAndComments(rawSrc)
   const range = capsuleArgRange(scanSrc)
   if (!range) return { isPublic: false, isStatic: false }
@@ -392,6 +401,10 @@ const SUBDOMAIN_LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
 const HEX_DEPLOY_ID_RE = /^[a-f0-9]{16}$/
 const MAX_DOMAINS_PER_USER = 50
 
+// Total bytes of regular files under `dir`, walked with readdirSync dirents.
+// Dirents describe the entry itself, not its target, so symlinks are never
+// followed: a capsule-planted symlink can't make the watchdog walk (and
+// freeze on) the host filesystem or inflate its own measured usage.
 function dirSize(dir: string): number {
   let total = 0
   if (!fs.existsSync(dir)) return 0
@@ -405,6 +418,7 @@ function dirSize(dir: string): number {
       continue
     }
     for (const e of entries) {
+      if (e.isSymbolicLink()) continue
       const p = path.join(cur, e.name)
       if (e.isDirectory()) {
         stack.push(p)
@@ -425,6 +439,16 @@ function safeEqual(a: string, b: string): boolean {
   const bb = Buffer.from(b)
   if (ab.length !== bb.length) return false
   return timingSafeEqual(ab, bb)
+}
+
+// Tolerate corrupt metadata rows (legacy writes, interrupted transactions) so
+// one bad row can't 500 the whole audit listing.
+function parseJsonLoose(text: string): unknown {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
 }
 
 function bearer(header: string | undefined): string | null {
@@ -463,6 +487,30 @@ function parseEnvText(text: string): Record<string, string> {
     out[trimmed.slice(0, eqIdx).trim()] = trimmed.slice(eqIdx + 1).trim()
   }
   return out
+}
+
+// Capsule session cookies are signed with POND_SESSION_SECRET. Deployers may
+// push their own secret via .env.pond.server (envText); when they don't, the
+// capsule runtime generates an ephemeral one per process start, so sessions die
+// on every restart. The host therefore injects a stable PER-DEPLOY secret into
+// every capsule env file that lacks one. Never a host-wide secret: the env file
+// lives in the tenant-writable deploy dir, so any tenant could read a shared
+// secret and forge sessions for every other capsule on the host. `onDisk` is
+// the deploy's previously materialized secret (if any) — reusing it keeps
+// sessions alive across updates that don't push env.
+export function envTextWithSessionSecret(envText: string | undefined, onDisk: string | undefined): string {
+  const existing = parseEnvText(envText ?? "")["POND_SESSION_SECRET"]
+  if (existing) return envText ?? ""
+  // The runtime treats an empty POND_SESSION_SECRET as unset, so drop any
+  // (empty) lines and append the secret.
+  const secret = onDisk || randomBytes(32).toString("hex")
+  const stripped = (envText ?? "")
+    .split("\n")
+    .filter((l) => !l.trim().startsWith("POND_SESSION_SECRET="))
+    .join("\n")
+  const trimmed = stripped.replace(/\s+$/, "")
+  const secretLine = `POND_SESSION_SECRET=${secret}`
+  return trimmed ? `${trimmed}\n${secretLine}\n` : `${secretLine}\n`
 }
 
 function serializeEnv(entries: Record<string, string>): string {
@@ -673,6 +721,10 @@ export const hostCommand = defineCommand({
     // the host binds the port the ingress proxy probes; fall back to --port then
     // the default. Without this a PaaS healthcheck can't reach the control plane.
     const port = parseInt(process.env.PORT ?? (typeof args.port === "string" ? args.port : "8787"), 10)
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      console.error(`[pond host] invalid port: ${args.port ?? process.env.PORT ?? "8787"} (expected 1-65535)`)
+      process.exit(1)
+    }
     const hostname = typeof args.host === "string" && args.host ? args.host : "127.0.0.1"
     const publicHost =
       process.env.POND_PUBLIC_HOST ??
@@ -719,12 +771,41 @@ export const hostCommand = defineCommand({
     // resets on any user-initiated (re)deploy — see forkDeploy's `auto` flag.
     const restartState = new Map<string, { windowStart: number; count: number }>()
     const inFlightBoots = new Map<string, Promise<{ child: ChildProcess; port: number } | null>>()
+    // Per-deploy boot serialization. A boot isn't visible to stopDeploy until
+    // it registers in runningChildren (up to 10s later), so two concurrent
+    // forks of one deploy (IDE autobuild + env update, two tabs, claim +
+    // rotate) would each pass stopDeploy, boot twice, and orphan the first
+    // worker — invisible to the idle reaper and disk watchdog, still writing
+    // to the shared deploy dir past quota. Chaining makes each boot wait for
+    // the previous to settle; its own stopDeploy then replaces the old worker
+    // cleanly, so at most one worker per deploy exists at any time.
+    const bootChains = new Map<string, Promise<void>>()
+    function chainBoot(deployId: string, boot: () => Promise<void>): Promise<void> {
+      const prev = bootChains.get(deployId) ?? Promise.resolve()
+      // Run regardless of the previous link's outcome — one failed boot must
+      // not wedge all future boots of the deploy.
+      const next = prev.then(boot, boot)
+      bootChains.set(deployId, next)
+      // Release the slot once this link settles (unless a newer link replaced
+      // it, in which case that link owns the slot).
+      void next
+        .catch(() => {})
+        .then(() => {
+          if (bootChains.get(deployId) === next) bootChains.delete(deployId)
+        })
+      return next
+    }
     // Scale-to-zero bookkeeping. lastActivityAt: last proxied request (or boot)
     // per resident deploy. liveSockets: open WebSocket connections per deploy, so
     // the idle reaper never sleeps a capsule mid-stream. Both are advisory — a
     // lost entry at worst sleeps a capsule early, and the next request re-wakes it.
     const lastActivityAt = new Map<string, number>()
     const liveSockets = new Map<string, number>()
+    // Per-deploy in-flight proxy request counter. A capsule that accepts
+    // connections and stalls could otherwise pin unbounded host sockets; this
+    // bounds how many concurrent upstream connections one tenant can hold.
+    const proxyInFlight = new Map<string, number>()
+    const MAX_PROXY_IN_FLIGHT_PER_DEPLOY = 200
     // Last on-disk size measured per resident deploy by the disk watchdog (every
     // 60s). Cached so the /metrics endpoint can report per-capsule disk without
     // re-walking every deploy dir on each scrape.
@@ -753,10 +834,13 @@ export const hostCommand = defineCommand({
       (typeof args["anonymous-retention"] === "string" ? args["anonymous-retention"] : "7d")
     const anonymousGraceMs = parseDuration(graceStr)
     const anonymousRetentionMs = parseDuration(retentionStr)
-    const anonymousRateLimit = parseInt(
+    // NaN would silently disable the rate limit (count >= NaN is always
+    // false in rateAllow) — heal to the documented default on bad input.
+    const anonymousRateLimitParsed = parseInt(
       typeof args["anonymous-rate-per-hour"] === "string" ? args["anonymous-rate-per-hour"] : "5",
       10,
     )
+    const anonymousRateLimit = Number.isNaN(anonymousRateLimitParsed) ? 5 : Math.max(0, anonymousRateLimitParsed)
     const maxActiveCapsules = Math.max(
       0,
       parseInt(
@@ -827,10 +911,17 @@ export const hostCommand = defineCommand({
     // is requested but the platform/binary can't provide it, refuse to start
     // rather than silently booting capsules with only the JS --permission
     // boundary — the same "never fail open" rule the egress proxy follows.
-    const fsIsolationMode: CapsuleFsIsolationMode = resolveFsIsolationMode(
+    // Unknown values are also refused (a typo like `bwarp` must not silently
+    // fall back to unconfined).
+    const fsIsolationRaw = (
       process.env.POND_CAPSULE_FS_ISOLATION ??
-        (typeof args["capsule-fs-isolation"] === "string" ? args["capsule-fs-isolation"] : "off"),
-    )
+      (typeof args["capsule-fs-isolation"] === "string" ? args["capsule-fs-isolation"] : "off")
+    ).toLowerCase()
+    if (!["off", "bwrap"].includes(fsIsolationRaw)) {
+      console.error(`[pond host] invalid --capsule-fs-isolation: ${fsIsolationRaw} (expected off|bwrap)`)
+      process.exit(1)
+    }
+    const fsIsolationMode: CapsuleFsIsolationMode = resolveFsIsolationMode(fsIsolationRaw)
     if (fsIsolationMode === "bwrap" && !bwrapAvailable()) {
       console.error(
         process.platform !== "linux"
@@ -945,8 +1036,19 @@ export const hostCommand = defineCommand({
     function readRecord(deployId: string): HostedDeployRecord | null {
       if (!/^[a-f0-9]+$/i.test(deployId)) return null
       const file = metaFileFor(deployId)
-      if (!fs.existsSync(file)) return null
-      const raw = JSON.parse(fs.readFileSync(file, "utf-8")) as LegacyDeployRecord
+      // The deploy dir is tenant-writable: the record file could be replaced
+      // by a symlink (escape check) or corrupted/truncated (parse guard). A
+      // bare JSON.parse here would throw inside request handlers, the raw
+      // WebSocket upgrade path and the crash-respawn path — one bad file
+      // could take down the whole control plane, so treat it as "no record".
+      const buf = safeReadFile(deployDirFor(deployId), file)
+      if (!buf) return null
+      let raw: LegacyDeployRecord
+      try {
+        raw = JSON.parse(buf.toString("utf-8")) as LegacyDeployRecord
+      } catch {
+        return null
+      }
       // Migration: pre-0.3.10 records have plaintext `claimToken` and no
       // `claimTokenHash`. Compute the hash, drop the plaintext, rewrite once.
       // After migration the file no longer holds a usable claim token; a
@@ -955,7 +1057,7 @@ export const hostCommand = defineCommand({
         raw.claimTokenHash = sha256Hex(raw.claimToken)
         delete raw.claimToken
         try {
-          fs.writeFileSync(file, JSON.stringify(raw, null, 2))
+          safeWriteFile(deployDirFor(deployId), file, JSON.stringify(raw, null, 2))
         } catch {
           // best-effort; the in-memory record still has the hash for this
           // request, and the next successful read will retry
@@ -985,7 +1087,9 @@ export const hostCommand = defineCommand({
       // belongs on disk.
       const sanitized = { ...(record as unknown as Record<string, unknown>) }
       delete sanitized.claimToken
-      fs.writeFileSync(metaFileFor(record.deployId), JSON.stringify(sanitized, null, 2))
+      // safeWriteFile: a tenant-planted symlink at deploy.json must never
+      // redirect the write (e.g. onto host-token or a sibling's record).
+      safeWriteFile(dir, metaFileFor(record.deployId), JSON.stringify(sanitized, null, 2))
       // Any record change can flip visibility (publish/unpublish/title/etc.)
       // — drop the public-listing cache so the next GET reflects reality.
       invalidatePublicListing()
@@ -993,14 +1097,25 @@ export const hostCommand = defineCommand({
 
     function readEnv(deployId: string): Record<string, string> {
       const file = envFileFor(deployId)
-      if (!fs.existsSync(file)) return {}
-      return parseEnvText(fs.readFileSync(file, "utf-8"))
+      const buf = safeReadFile(deployDirFor(deployId), file)
+      if (!buf) return {}
+      return parseEnvText(buf.toString("utf-8"))
     }
 
     function writeEnv(deployId: string, entries: Record<string, string>) {
-      const file = envFileFor(deployId)
-      fs.mkdirSync(path.dirname(file), { recursive: true })
-      fs.writeFileSync(file, serializeEnv(entries), { mode: 0o600 })
+      const dir = deployDirFor(deployId)
+      fs.mkdirSync(dir, { recursive: true })
+      safeWriteFile(dir, envFileFor(deployId), serializeEnv(entries), { mode: 0o600 })
+    }
+
+    // Materialize the capsule env file with a stable session secret: a
+    // deployer-supplied POND_SESSION_SECRET wins; otherwise reuse the deploy's
+    // existing auto-generated secret (sessions survive updates that don't push
+    // env) or mint a fresh per-deploy one. See envTextWithSessionSecret.
+    function materializeEnvFile(deployId: string, pushedEnvText: string | undefined): void {
+      const onDiskSecret = readEnv(deployId)["POND_SESSION_SECRET"]
+      const dir = deployDirFor(deployId)
+      safeWriteFile(dir, envFileFor(deployId), envTextWithSessionSecret(pushedEnvText, onDiskSecret), { mode: 0o600 })
     }
 
     function scopedEnvFor(_record: HostedDeployRecord): NodeJS.ProcessEnv {
@@ -1171,6 +1286,20 @@ export const hostCommand = defineCommand({
             },
           })
         })
+        // A concurrent DELETE may have removed the deploy while we were
+        // booting. Don't register a worker for a deleted deploy — the
+        // writeRecord below would resurrect its record, and the orphan would
+        // keep a cgroup + disk handles nobody can reach. Kill and bail
+        // instead. (DELETE waits on the boot chain before deleting; this
+        // check is defense-in-depth for sweep / operator paths.)
+        if (!fs.existsSync(metaFileFor(deployId))) {
+          if (child.exitCode === null && child.signalCode === null) {
+            const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()))
+            child.kill("SIGKILL")
+            await Promise.race([exited, new Promise<void>((resolve) => setTimeout(resolve, 3000).unref())])
+          }
+          return
+        }
         runningChildren.set(deployId, { child, port: bootedPort })
         // Give a freshly-booted capsule a full idle window before it can be slept.
         lastActivityAt.set(deployId, Date.now())
@@ -1256,7 +1385,7 @@ export const hostCommand = defineCommand({
       const delay = RESTART_BACKOFF_MS[Math.min(st.count, RESTART_BACKOFF_MS.length - 1)]
       st.count++
       const timer = setTimeout(() => {
-        void forkDeploy(record, { auto: true }).catch((err) => {
+        void chainBoot(deployId, () => forkDeploy(record, { auto: true })).catch((err) => {
           console.error(`[pond host] respawn failed for ${deployId}: ${err?.message ?? err}`)
         })
       }, delay)
@@ -1288,7 +1417,7 @@ export const hostCommand = defineCommand({
         const opts = bootOptsForRecord(deployId)
         if (!opts) return null
         try {
-          await forkDeploy(record, { auto: true })
+          await chainBoot(deployId, () => forkDeploy(record, { auto: true }))
         } catch {
           return null
         }
@@ -1315,16 +1444,19 @@ export const hostCommand = defineCommand({
       if (anon && anon.terminated === 1) continue
       try {
         // forkDeploy derives the uniform isolation policy itself.
-        await forkDeploy(record)
+        await chainBoot(record.deployId, () => forkDeploy(record))
       } catch (err) {
         console.error(`[pond host] boot failed for ${record.deployId}:`, err)
       }
     }
 
-    function runSweep() {
+    async function runSweep() {
       const now = new Date().toISOString()
       for (const id of controlDb.listForTermination(now)) {
         try {
+          // Wait for any in-flight boot to settle so a worker can't register
+          // for a deploy that is about to be marked terminated.
+          await chainBoot(id, async () => {})
           stopDeploy(id)
           controlDb.markTerminated(id)
           console.log(`[pond host] anonymous deploy ${id} terminated (grace passed)`)
@@ -1334,6 +1466,7 @@ export const hostCommand = defineCommand({
       }
       for (const id of controlDb.listForDeletion(now)) {
         try {
+          await chainBoot(id, async () => {})
           stopDeploy(id)
           restartState.delete(id)
           if (capsuleCgroupRoot) removeCapsuleCgroup(capsuleCgroupRoot, id)
@@ -1448,11 +1581,35 @@ export const hostCommand = defineCommand({
         console.error("sweep prune deploy_usage:", e)
       }
     }
-    runSweep()
-    const sweepTimer = setInterval(runSweep, SWEEP_INTERVAL_MS)
+    runSweep().catch((e) => console.error("initial sweep:", e))
+    const sweepTimer = setInterval(() => {
+      runSweep().catch((e) => console.error("sweep:", e))
+    }, SWEEP_INTERVAL_MS)
     sweepTimer.unref()
 
     const app = new Hono()
+
+    // Strict CSP for the host-controlled pages. The IDE/dashboard hold account
+    // tokens, so no third-party script may run: only the per-request nonce'd
+    // inline bootstrap + the hashed same-origin bundle (both generated by
+    // build-ide.mjs). Deploy origins are added to connect-src (the IDE talks
+    // to its capsule's origin). Docs pages carry no scripts at all
+    // (nonce = null → script-src 'none').
+    function cspFor(nonce: string | null, deployOrigin: string | null): string {
+      const scriptSrc = nonce ? `'nonce-${nonce}'` : "'none'"
+      const connectSrc = deployOrigin ? `'self' ${deployOrigin}` : "'self'"
+      return [
+        "default-src 'self'",
+        `script-src ${scriptSrc}`,
+        "style-src 'unsafe-inline'",
+        "img-src 'self' data:",
+        `connect-src ${connectSrc}`,
+        "frame-src *",
+        "object-src 'none'",
+        "base-uri 'self'",
+        "form-action 'self'",
+      ].join("; ")
+    }
     app.use("*", async (c, next) => {
       const origin = c.req.header("origin")
       const hostHdr = (c.req.header("host") ?? "").toLowerCase()
@@ -1769,7 +1926,7 @@ export const hostCommand = defineCommand({
         action: row.action,
         targetDeployId: row.targetDeployId,
         targetUserId: row.targetUserId,
-        metadata: row.metadata ? JSON.parse(row.metadata) : null,
+        metadata: row.metadata ? parseJsonLoose(row.metadata) : null,
       }))
       return c.json({ entries })
     })
@@ -1928,6 +2085,12 @@ export const hostCommand = defineCommand({
             lastBuildDurationMs: Date.now() - createStart,
           }
           writeRecord(record)
+          // Deployers may not push env (anonymous deploys never do). Always
+          // materialize a capsule env file with a stable PER-DEPLOY session
+          // secret so capsule sessions survive restarts even without a
+          // deployer-supplied POND_SESSION_SECRET (a host-wide default would
+          // let any tenant forge sessions for every other capsule).
+          materializeEnvFile(deployId, undefined)
           let extra: { terminatesAt?: string; expiresAt?: string } = {}
           if (isAnonymous) {
             controlDb.setQuota(deployId, ANONYMOUS_QUOTA)
@@ -1946,7 +2109,7 @@ export const hostCommand = defineCommand({
             // never boot a worker — skip the fork entirely so they consume no
             // capsule slot. forkDeploy derives the uniform isolation policy
             // itself (the anon row, if any, was just written above).
-            if (!record.isStatic) await forkDeploy(record)
+            if (!record.isStatic) await chainBoot(record.deployId, () => forkDeploy(record))
           } catch (err: any) {
             try {
               removeDeployDir(dir)
@@ -2014,60 +2177,88 @@ export const hostCommand = defineCommand({
         if (!validated.ok) return c.json({ error: validated.error }, 400)
         const quota = controlDb.getQuota(deployId)
         const dir = deployDirFor(deployId)
-        writeSourceTree(dir, validated.files)
-        const updateStart = Date.now()
-        let buildResult: {
-          bundleBytes: number
-          bundleHash: string
-          meta: { isPublic: boolean; isStatic: boolean; title?: string; description?: string }
-        }
+        // Build into a staging dir and check quotas BEFORE committing, so a
+        // failed update can never persist an oversized bundle/source tree for
+        // the next boot to load (the old flow wrote first and checked after —
+        // a 413 left the new state on disk and the client believing it failed).
+        const staging = path.join(dir, `.staging-${randomBytes(6).toString("hex")}`)
         try {
-          buildResult = await buildDeployFromSource(dir)
-        } catch (err: any) {
-          return c.json({ error: `Build failed: ${err?.message ?? err}` }, 400)
-        }
-        if (buildResult.bundleBytes > quota.maxBundleBytes) {
-          return c.json({ error: `Bundle exceeds per-deploy quota (${quota.maxBundleBytes} bytes)` }, 413)
-        }
-        if (typeof body.envText === "string") {
-          const v = validateEnvText(body.envText)
-          if (!v.ok) return c.json({ error: v.error }, 413)
-          fs.writeFileSync(path.join(dir, ".env.pond.server"), body.envText, { mode: 0o600 })
-        }
-        const sizeAfter = dirSize(dir)
-        if (sizeAfter > quota.maxDiskBytes) {
-          return c.json({ error: `Disk usage ${sizeAfter} exceeds quota ${quota.maxDiskBytes}` }, 413)
-        }
-        const updateNow = new Date().toISOString()
-        record.publicInspect = Boolean(body.publicInspect)
-        record.updatedAt = updateNow
-        record.isPublic = buildResult.meta.isPublic
-        record.isStatic = buildResult.meta.isStatic
-        record.title = buildResult.meta.title
-        record.description = buildResult.meta.description
-        record.bundleBytes = buildResult.bundleBytes
-        record.bundleHash = buildResult.bundleHash
-        record.lastBuiltAt = updateNow
-        record.lastBuildDurationMs = Date.now() - updateStart
-        writeRecord(record)
-        try {
-          // Static deploys serve from disk with no worker. If a redeploy flips
-          // an existing (resident) deploy to static, stop its worker; otherwise
-          // (re)boot the worker as usual.
-          if (record.isStatic) {
-            await stopDeploy(deployId)
-          } else {
-            await forkDeploy(record)
+          writeSourceTree(staging, validated.files)
+          const updateStart = Date.now()
+          let buildResult: {
+            bundleBytes: number
+            bundleHash: string
+            meta: { isPublic: boolean; isStatic: boolean; title?: string; description?: string }
           }
-        } catch (err: any) {
-          return c.json({ error: `Boot failed: ${err?.message ?? err}` }, 500)
+          try {
+            buildResult = await buildDeployFromSource(staging)
+          } catch (err: any) {
+            return c.json({ error: `Build failed: ${err?.message ?? err}` }, 400)
+          }
+          if (buildResult.bundleBytes > quota.maxBundleBytes) {
+            return c.json({ error: `Bundle exceeds per-deploy quota (${quota.maxBundleBytes} bytes)` }, 413)
+          }
+          const pushedEnvText = typeof body.envText === "string" ? body.envText : undefined
+          if (pushedEnvText !== undefined) {
+            const v = validateEnvText(pushedEnvText)
+            if (!v.ok) return c.json({ error: v.error }, 413)
+          }
+          // Reuse the deploy's existing auto-generated session secret when the
+          // deployer didn't push one, so sessions survive this update.
+          const envText = envTextWithSessionSecret(pushedEnvText, readEnv(deployId)["POND_SESSION_SECRET"])
+          // Projected footprint = staged source + bundle + client + env. The
+          // commit below replaces (not adds to) the old source/bundle/client,
+          // so this is an exact pre-commit quota check.
+          const projectedBytes = dirSize(staging) + Buffer.byteLength(envText, "utf8")
+          if (projectedBytes > quota.maxDiskBytes) {
+            return c.json({ error: `Disk usage ${projectedBytes} exceeds quota ${quota.maxDiskBytes}` }, 413)
+          }
+          // Commit: swap the staged tree + artifacts into the deploy dir.
+          const sourceDir = path.join(dir, "source")
+          fs.rmSync(sourceDir, { recursive: true, force: true })
+          fs.renameSync(path.join(staging, "source"), sourceDir)
+          const bundleDest = path.join(dir, "deploy-bundle.mjs")
+          fs.rmSync(bundleDest, { force: true })
+          fs.renameSync(path.join(staging, "deploy-bundle.mjs"), bundleDest)
+          const clientDest = path.join(dir, "client.html")
+          fs.rmSync(clientDest, { force: true })
+          if (fs.existsSync(path.join(staging, "client.html"))) {
+            fs.renameSync(path.join(staging, "client.html"), clientDest)
+          }
+          safeWriteFile(dir, envFileFor(deployId), envText, { mode: 0o600 })
+          const updateNow = new Date().toISOString()
+          record.publicInspect = Boolean(body.publicInspect)
+          record.updatedAt = updateNow
+          record.isPublic = buildResult.meta.isPublic
+          record.isStatic = buildResult.meta.isStatic
+          record.title = buildResult.meta.title
+          record.description = buildResult.meta.description
+          record.bundleBytes = buildResult.bundleBytes
+          record.bundleHash = buildResult.bundleHash
+          record.lastBuiltAt = updateNow
+          record.lastBuildDurationMs = Date.now() - updateStart
+          writeRecord(record)
+          try {
+            // Static deploys serve from disk with no worker. If a redeploy flips
+            // an existing (resident) deploy to static, stop its worker; otherwise
+            // (re)boot the worker as usual.
+            if (record.isStatic) {
+              await stopDeploy(deployId)
+            } else {
+              await chainBoot(record.deployId, () => forkDeploy(record))
+            }
+          } catch (err: any) {
+            return c.json({ error: `Boot failed: ${err?.message ?? err}` }, 500)
+          }
+          const actor = auth.kind === "claim" ? "__claim_token__" : actorFor(auth.user, false)
+          audit(actor, "deploy.update", {
+            targetDeployId: deployId,
+            metadata: { bundleBytes: buildResult.bundleBytes, envChanged: typeof body.envText === "string" },
+          })
+          return c.json({ ...record, bundleHash: buildResult.bundleHash, bundleBytes: buildResult.bundleBytes })
+        } finally {
+          fs.rmSync(staging, { recursive: true, force: true })
         }
-        const actor = auth.kind === "claim" ? "__claim_token__" : actorFor(auth.user, false)
-        audit(actor, "deploy.update", {
-          targetDeployId: deployId,
-          metadata: { bundleBytes: buildResult.bundleBytes, envChanged: typeof body.envText === "string" },
-        })
-        return c.json({ ...record, bundleHash: buildResult.bundleHash, bundleBytes: buildResult.bundleBytes })
       },
     )
 
@@ -2162,11 +2353,12 @@ export const hostCommand = defineCommand({
         controlDb.setDeployOwner(deployId, user.id)
       }
 
-      if (typeof body.envText === "string") {
-        const v = validateEnvText(body.envText)
+      const pushedEnvText = typeof body.envText === "string" ? body.envText : undefined
+      if (pushedEnvText !== undefined) {
+        const v = validateEnvText(pushedEnvText)
         if (!v.ok) return c.json({ error: v.error }, 413)
-        fs.writeFileSync(path.join(deployDirFor(deployId), ".env.pond.server"), body.envText, { mode: 0o600 })
       }
+      materializeEnvFile(deployId, pushedEnvText)
       // Rotate the claim token on every successful claim. The token that
       // authorized this claim may have leaked (IDE links with #token=…,
       // .pond/deploy.json, persisted localStorage). authorizeDeployMutation
@@ -2180,7 +2372,7 @@ export const hostCommand = defineCommand({
       record.updatedAt = new Date().toISOString()
       writeRecord(record)
       try {
-        await forkDeploy(record)
+        await chainBoot(record.deployId, () => forkDeploy(record))
       } catch (err: any) {
         return c.json({ error: `Boot failed: ${err?.message ?? err}` }, 500)
       }
@@ -2218,7 +2410,7 @@ export const hostCommand = defineCommand({
       record.updatedAt = new Date().toISOString()
       writeRecord(record)
       try {
-        await forkDeploy(record)
+        await chainBoot(record.deployId, () => forkDeploy(record))
       } catch (err: any) {
         return c.json({ error: `Boot failed: ${err?.message ?? err}` }, 500)
       }
@@ -2232,6 +2424,11 @@ export const hostCommand = defineCommand({
       if (!record) return c.json({ error: "Not found" }, 404)
       const auth = authorizeDeployMutation(c, record)
       if (auth instanceof Response) return auth
+      // Wait for any in-flight boot to settle so a slow boot can't register a
+      // worker for a deploy whose directory we're about to remove (the boot
+      // path also checks the record still exists, but waiting makes the
+      // removal deterministic).
+      await chainBoot(deployId, async () => {})
       await stopDeploy(deployId)
       restartState.delete(deployId)
       if (capsuleCgroupRoot) removeCapsuleCgroup(capsuleCgroupRoot, deployId)
@@ -2258,6 +2455,7 @@ export const hostCommand = defineCommand({
       if (!record) return c.json({ error: "Not found" }, 404)
       const r = requireAdmin(c)
       if (r instanceof Response) return r
+      await chainBoot(deployId, async () => {})
       await stopDeploy(deployId)
       restartState.delete(deployId)
       const anonymous = controlDb.findAnonymous(deployId) !== null
@@ -2320,7 +2518,7 @@ export const hostCommand = defineCommand({
       const next = controlDb.setQuota(deployId, patch)
       if (next.maxMemoryMb !== prev.maxMemoryMb || next.maxCpuPercent !== prev.maxCpuPercent) {
         try {
-          await forkDeploy(record)
+          await chainBoot(record.deployId, () => forkDeploy(record))
         } catch (err: any) {
           return c.json({ error: `Re-fork failed: ${err?.message ?? err}`, quota: next }, 500)
         }
@@ -2386,8 +2584,9 @@ export const hostCommand = defineCommand({
       const parsed = raw === undefined ? 100 : Number.parseInt(raw, 10)
       const limit = Number.isFinite(parsed) ? Math.min(Math.max(parsed, 1), 500) : 100
       const logFile = path.join(deployDirFor(deployId), ".pond", "logs.ndjson")
-      if (!fs.existsSync(logFile)) return c.json({ entries: [] })
-      const text = fs.readFileSync(logFile, "utf-8")
+      const buf = safeReadFile(deployDirFor(deployId), logFile)
+      if (!buf) return c.json({ entries: [] })
+      const text = buf.toString("utf-8")
       const lines = text.split("\n").filter((l) => l.length > 0)
       const start = Math.max(0, lines.length - limit)
       const entries: unknown[] = []
@@ -2413,12 +2612,16 @@ export const hostCommand = defineCommand({
       const dir = deployDirFor(deployId)
       const dbPath = path.join(dir, ".pond", "data.db")
       const sourceDir = path.join(dir, "source")
+      // .pond/data.db is tenant-writable — a planted symlink must not make
+      // the host open a sibling's database. The realpath must resolve inside
+      // the deploy dir before we open it (better-sqlite3 follows symlinks).
+      const dbPathOk = containedRealPath(dir, dbPath) !== null
 
       type TableInfo = { name: string; rowCount: number; columns: number }
       const tables: TableInfo[] = []
       let dbBytes = 0
       let dbOpenError: string | undefined
-      if (fs.existsSync(dbPath)) {
+      if (dbPathOk && fs.existsSync(dbPath)) {
         try {
           dbBytes = fs.statSync(dbPath).size
         } catch {
@@ -2467,13 +2670,18 @@ export const hostCommand = defineCommand({
       let sourceFileCount = 0
       const countFiles = (rel: string) => {
         const abs = path.join(sourceDir, rel)
-        if (!fs.existsSync(abs)) return
-        const stat = fs.statSync(abs)
+        let stat: fs.Stats
+        try {
+          // lstat: don't count or recurse through tenant-planted symlinks.
+          stat = fs.lstatSync(abs)
+        } catch {
+          return
+        }
         if (stat.isFile()) {
           sourceFileCount += 1
           return
         }
-        if (stat.isDirectory()) {
+        if (stat.isDirectory() && !stat.isSymbolicLink()) {
           for (const entry of fs.readdirSync(abs)) {
             if (entry === "node_modules" || entry.startsWith(".")) continue
             countFiles(path.join(rel, entry))
@@ -2514,7 +2722,7 @@ export const hostCommand = defineCommand({
       r.record.updatedAt = new Date().toISOString()
       writeRecord(r.record)
       try {
-        await forkDeploy(r.record)
+        await chainBoot(r.record.deployId, () => forkDeploy(r.record))
       } catch (err: any) {
         return c.json({ error: `Boot failed: ${err?.message ?? err}` }, 500)
       }
@@ -2631,16 +2839,21 @@ export const hostCommand = defineCommand({
       if (serializedBytes > MAX_ENV_BYTES) {
         return c.json({ error: `merged env exceeds ${MAX_ENV_BYTES} bytes` }, 413)
       }
-      writeEnv(deployId, merged)
+      // Projected disk check BEFORE the write: current footprint minus the old
+      // env file plus the new one. A post-write check would 413 after the
+      // oversized env was already persisted.
+      const dir = deployDirFor(deployId)
+      const oldEnvBuf = safeReadFile(dir, envFileFor(deployId))
+      const projected = dirSize(dir) - (oldEnvBuf ? oldEnvBuf.length : 0) + serializedBytes
       const quota = controlDb.getQuota(deployId)
-      const sizeAfter = dirSize(deployDirFor(deployId))
-      if (sizeAfter > quota.maxDiskBytes) {
-        return c.json({ error: `Disk usage ${sizeAfter} exceeds quota ${quota.maxDiskBytes}` }, 413)
+      if (projected > quota.maxDiskBytes) {
+        return c.json({ error: `Disk usage ${projected} exceeds quota ${quota.maxDiskBytes}` }, 413)
       }
+      writeEnv(deployId, merged)
       r.record.updatedAt = new Date().toISOString()
       writeRecord(r.record)
       try {
-        await forkDeploy(r.record)
+        await chainBoot(r.record.deployId, () => forkDeploy(r.record))
       } catch (err: any) {
         return c.json({ error: `Boot failed: ${err?.message ?? err}` }, 500)
       }
@@ -2666,7 +2879,7 @@ export const hostCommand = defineCommand({
       r.record.updatedAt = new Date().toISOString()
       writeRecord(r.record)
       try {
-        await forkDeploy(r.record)
+        await chainBoot(r.record.deployId, () => forkDeploy(r.record))
       } catch (err: any) {
         return c.json({ error: `Boot failed: ${err?.message ?? err}` }, 500)
       }
@@ -2716,12 +2929,20 @@ export const hostCommand = defineCommand({
       const out: { path: string; size: number; mtime: string }[] = []
       const walk = (rel: string) => {
         const abs = path.join(sourceDir, rel)
-        const stat = fs.statSync(abs)
+        // lstat: a tenant-planted symlink must not leak stats (or recurse)
+        // beyond the source tree — and it isn't editable through the IDE, so
+        // skipping it is honest.
+        let stat: fs.Stats
+        try {
+          stat = fs.lstatSync(abs)
+        } catch {
+          return
+        }
         if (stat.isFile()) {
           out.push({ path: rel, size: stat.size, mtime: stat.mtime.toISOString() })
           return
         }
-        if (stat.isDirectory()) {
+        if (stat.isDirectory() && !stat.isSymbolicLink()) {
           for (const entry of fs.readdirSync(abs).sort()) walk(rel ? `${rel}/${entry}` : entry)
         }
       }
@@ -2755,8 +2976,12 @@ export const hostCommand = defineCommand({
       if (!sub) return c.json({ error: "Invalid path" }, 400)
       const abs = safeSourcePath(deployId, sub)
       if (!abs) return c.json({ error: "Path not allowed" }, 400)
-      if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) return c.json({ error: "Not found" }, 404)
-      return c.body(fs.readFileSync(abs), 200, { "content-type": "text/plain; charset=utf-8" })
+      // safeReadFile refuses to follow a symlink out of the deploy dir — the
+      // source tree is tenant-writable, so a planted symlink could otherwise
+      // read host-token or a sibling's env through this endpoint.
+      const buf = safeReadFile(deployDirFor(deployId), abs)
+      if (!buf) return c.json({ error: "Not found" }, 404)
+      return c.body(new Uint8Array(buf), 200, { "content-type": "text/plain; charset=utf-8" })
     })
 
     app.put(
@@ -2789,8 +3014,10 @@ export const hostCommand = defineCommand({
             )
           }
         }
-        fs.mkdirSync(path.dirname(abs), { recursive: true })
-        fs.writeFileSync(abs, body)
+        // safeWriteFile (temp + rename) replaces any symlink at the
+        // destination instead of following it — a planted symlink can't
+        // redirect this write onto host files.
+        safeWriteFile(deployDirFor(deployId), abs, body)
         r.record.updatedAt = new Date().toISOString()
         writeRecord(r.record)
         const fileActor = authUser(c)
@@ -2878,7 +3105,7 @@ export const hostCommand = defineCommand({
       r.record.lastBuildDurationMs = buildDuration
       writeRecord(r.record)
       try {
-        await forkDeploy(r.record)
+        await chainBoot(r.record.deployId, () => forkDeploy(r.record))
       } catch (err: any) {
         return c.json({ ok: false, errors: [{ text: `Boot failed: ${err?.message ?? err}` }] }, 200)
       }
@@ -2912,6 +3139,12 @@ export const hostCommand = defineCommand({
       if (!fs.existsSync(fromAbs)) return c.json({ error: "Source not found" }, 404)
       if (fs.existsSync(toAbs)) return c.json({ error: "Destination exists" }, 409)
       fs.mkdirSync(path.dirname(toAbs), { recursive: true })
+      // rename follows parent-dir symlinks; verify the destination's parent
+      // resolves inside the deploy dir first. (The basename itself is safe —
+      // rename replaces a symlink at the destination.)
+      if (!containedRealPath(deployDirFor(deployId), path.dirname(toAbs))) {
+        return c.json({ error: "Path not allowed" }, 400)
+      }
       fs.renameSync(fromAbs, toAbs)
       r.record.updatedAt = new Date().toISOString()
       writeRecord(r.record)
@@ -2978,13 +3211,21 @@ export const hostCommand = defineCommand({
       const files: Record<string, string> = {}
       const walk = (rel: string) => {
         const abs = path.join(sourceDir, rel)
-        const stat = fs.statSync(abs)
-        if (stat.isDirectory()) {
+        // lstat + safeReadFile: a planted symlink must not leak host files
+        // through this unauthenticated endpoint.
+        let stat: fs.Stats
+        try {
+          stat = fs.lstatSync(abs)
+        } catch {
+          return
+        }
+        if (stat.isDirectory() && !stat.isSymbolicLink()) {
           for (const entry of fs.readdirSync(abs).sort()) walk(rel ? `${rel}/${entry}` : entry)
         } else if (stat.isFile()) {
           // 1 MB per file ceiling — same as the IDE
           if (stat.size > 1 * 1024 * 1024) return
-          files[rel] = fs.readFileSync(abs, "utf-8")
+          const buf = safeReadFile(deployDirFor(deployId), abs)
+          if (buf) files[rel] = buf.toString("utf-8")
         }
       }
       for (const entry of fs.readdirSync(sourceDir).sort()) walk(entry)
@@ -3122,7 +3363,10 @@ export const hostCommand = defineCommand({
     // as proxied ones.
     function serveStaticDeploy(deployId: string, c: any): Response {
       const clientPath = path.join(deployDirFor(deployId), "client.html")
-      if (!fs.existsSync(clientPath)) {
+      // safeReadFile: client.html is tenant-writable, so a planted symlink
+      // must not make the host serve host files as the deploy page.
+      const buf = safeReadFile(deployDirFor(deployId), clientPath)
+      if (!buf) {
         return c.json({ error: "Not found" }, 404)
       }
       if (c.req.path.startsWith("/api/")) {
@@ -3131,8 +3375,7 @@ export const hostCommand = defineCommand({
       if (c.req.method !== "GET" && c.req.method !== "HEAD") {
         return c.json({ error: "Method not allowed" }, 405)
       }
-      const html = fs.readFileSync(clientPath, "utf-8")
-      return c.html(html)
+      return c.html(buf.toString("utf-8"))
     }
 
     function landingHtml(): string {
@@ -4041,7 +4284,14 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
           }
           // Human-readable docs index. /docs and /docs/ both land here.
           if (url.pathname === "/docs" || url.pathname === "/docs/") {
-            return c.html(docsIndexHtml())
+            // No inline scripts on docs pages → script-src 'none'.
+            return new Response(docsIndexHtml(), {
+              status: 200,
+              headers: {
+                "content-type": "text/html; charset=utf-8",
+                "content-security-policy": cspFor(null, null),
+              },
+            })
           }
           // Human-readable docs page. /docs/<slug> with no .md suffix renders
           // the markdown to HTML. We deliberately fall through to the raw-
@@ -4054,7 +4304,16 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
             const abs = path.join(pondDocsDir, `${slug}.md`)
             if (fs.existsSync(abs) && fs.statSync(abs).isFile()) {
               const rendered = docsPageHtml(slug, fs.readFileSync(abs, "utf-8"))
-              if (rendered) return c.html(rendered)
+              if (rendered) {
+                // No inline scripts on docs pages → script-src 'none'.
+                return new Response(rendered, {
+                  status: 200,
+                  headers: {
+                    "content-type": "text/html; charset=utf-8",
+                    "content-security-policy": cspFor(null, null),
+                  },
+                })
+              }
             }
             return c.json({ error: "Not found" }, 404)
           }
@@ -4075,13 +4334,36 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
           if (url.pathname === "/gallery") {
             return c.html(galleryHtml())
           }
+          // Versioned frontend bundles. Hashed names + immutable caching: the
+          // HTML (generated by build-ide.mjs) references the exact hash, so a
+          // changed bundle gets a new URL and the old one can be cached forever.
+          const ideAsset = `/assets/ide-${ideHash}.js`
+          const dashboardAsset = `/assets/dashboard-${dashboardHash}.js`
+          if (url.pathname === ideAsset || url.pathname === dashboardAsset) {
+            const js = url.pathname === ideAsset ? ideJs : dashboardJs
+            return new Response(js, {
+              status: 200,
+              headers: {
+                "content-type": "text/javascript; charset=utf-8",
+                "cache-control": "public, max-age=31536000, immutable",
+              },
+            })
+          }
           if (url.pathname === "/dashboard" || url.pathname === "/dashboard/") {
-            const bootstrap = JSON.stringify({ publicHost })
-            const html = dashboardHtml.replace(
-              "__POND_DASHBOARD__BOOTSTRAP__",
-              `window.__POND_DASHBOARD = ${bootstrap}`,
-            )
-            return c.html(html)
+            const nonce = randomBytes(16).toString("base64url")
+            // `<`-escape the JSON so a value can never terminate the inline
+            // script early (landingHtml does the same for its ld+json block).
+            const bootstrap = JSON.stringify({ publicHost }).replace(/</g, "\\u003c")
+            const html = dashboardHtml
+              .replaceAll("__POND_NONCE__", nonce)
+              .replace("__POND_DASHBOARD__BOOTSTRAP__", `window.__POND_DASHBOARD = ${bootstrap}`)
+            return new Response(html, {
+              status: 200,
+              headers: {
+                "content-type": "text/html; charset=utf-8",
+                "content-security-policy": cspFor(nonce, null),
+              },
+            })
           }
           const ideMatch = url.pathname.match(/^\/ide\/([a-f0-9]+)\/?$/)
           if (ideMatch) {
@@ -4104,14 +4386,29 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
                     durationMs: record.lastBuildDurationMs ?? 0,
                   }
                 : null
+            const nonce = randomBytes(16).toString("base64url")
             const bootstrap = JSON.stringify({
               deployId,
               deployUrl: record.url,
               publicHost,
               lastBuild,
+            }).replace(/</g, "\\u003c")
+            let deployOrigin: string | null = null
+            try {
+              deployOrigin = new URL(record.url).origin
+            } catch {
+              // unparseable record.url — CSP falls back to same-origin only
+            }
+            const html = ideHtml
+              .replaceAll("__POND_NONCE__", nonce)
+              .replace("__POND_IDE__BOOTSTRAP__", `window.__POND_IDE = ${bootstrap}`)
+            return new Response(html, {
+              status: 200,
+              headers: {
+                "content-type": "text/html; charset=utf-8",
+                "content-security-policy": cspFor(nonce, deployOrigin),
+              },
             })
-            const html = ideHtml.replace("__POND_IDE__BOOTSTRAP__", `window.__POND_IDE = ${bootstrap}`)
-            return c.html(html)
           }
         }
         return c.json({ error: "Not found" }, 404)
@@ -4180,10 +4477,19 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
         init.duplex = "half"
       }
       let upstream: Response
+      const inFlight = proxyInFlight.get(deployId) ?? 0
+      if (inFlight >= MAX_PROXY_IN_FLIGHT_PER_DEPLOY) {
+        return c.json({ error: "Upstream busy — too many concurrent requests for this capsule" }, 503)
+      }
+      proxyInFlight.set(deployId, inFlight + 1)
       try {
         upstream = await fetch(target, init)
       } catch (err: any) {
         return c.json({ error: `Upstream error: ${err?.message ?? err}` }, 502)
+      } finally {
+        const n = proxyInFlight.get(deployId) ?? 1
+        if (n <= 1) proxyInFlight.delete(deployId)
+        else proxyInFlight.set(deployId, n - 1)
       }
       const respHeaders = new Headers()
       upstream.headers.forEach((v, k) => {
@@ -4245,8 +4551,14 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
         // Open a TCP connection to the deploy worker, re-serialize the original
         // upgrade request (parsed headers + any head bytes already buffered),
         // then full-duplex pipe both directions until either end closes.
-        const upstream = net.connect({ host: "127.0.0.1", port: entry.port })
+        // `timeout` bounds the connect phase: a wedged worker or a full listen
+        // backlog must not hang the client's upgrade forever.
+        const upstream = net.connect({ host: "127.0.0.1", port: entry.port, timeout: 15_000 })
         upstream.once("connect", () => {
+          // The timeout option armed an idle timer before connect; the socket
+          // now carries arbitrary WS frames (which may legitimately idle), so
+          // disarm it — it served its connect-phase purpose.
+          upstream.setTimeout(0)
           const lines: string[] = [`${req.method} ${req.url} HTTP/${req.httpVersion}`]
           for (const [name, value] of Object.entries(req.headers)) {
             if (value == null) continue
@@ -4274,6 +4586,7 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
             // best effort
           }
         }
+        upstream.on("timeout", destroyBoth)
         upstream.on("error", destroyBoth)
         clientSocket.on("error", destroyBoth)
         clientSocket.on("close", () => {
@@ -4284,7 +4597,16 @@ Canonical: ${publicBaseUrl ? publicBaseUrl.toString().replace(/\/$/, "") : `http
           releaseSocket()
           clientSocket.destroy()
         })
-      })()
+      })().catch((err) => {
+        // A rejection here used to be an unhandled rejection — fatal for the
+        // process on modern Node. Log it and drop the client socket.
+        console.error(`[pond host] websocket upgrade failed for ${deployId}: ${err?.message ?? err}`)
+        try {
+          clientSocket.destroy()
+        } catch {
+          // best effort
+        }
+      })
     })
 
     const shutdown = async () => {

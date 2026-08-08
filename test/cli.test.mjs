@@ -5,7 +5,7 @@ import { promisify } from "node:util"
 import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import * as path from "node:path"
-import * as net from "node:net"
+import { pickFreePort } from "./helpers.mjs"
 
 const execFileP = promisify(execFile)
 const REPO_ROOT = path.resolve(import.meta.dirname, "..")
@@ -34,19 +34,6 @@ function tmp(prefix) {
   const d = mkdtempSync(path.join(tmpdir(), prefix))
   cleanupDirs.push(d)
   return d
-}
-
-async function pickFreePort() {
-  return await new Promise((resolve, reject) => {
-    const s = net.createServer()
-    s.unref()
-    s.on("error", reject)
-    s.listen(0, "127.0.0.1", () => {
-      const addr = s.address()
-      const port = typeof addr === "object" && addr ? addr.port : 0
-      s.close(() => resolve(port))
-    })
-  })
 }
 
 async function waitForUrl(url, timeoutMs = 8000) {
@@ -198,9 +185,11 @@ test("`pond dev` boots, serves /api/query, and exits cleanly on SIGINT", async (
     await exited
     clearTimeout(t)
   }
-  // SIGINT should produce a clean exit (code 0 OR signal SIGINT)
+  // SIGINT should produce a clean exit (code 0 OR signal SIGINT). A null
+  // exitCode means the process was still running when the SIGKILL timer fired
+  // — the old assertion accepted that as "clean", masking real hangs.
   assert.ok(
-    proc.exitCode === 0 || proc.signalCode === "SIGINT" || proc.exitCode === null,
+    proc.exitCode === 0 || proc.signalCode === "SIGINT",
     `dev exited unexpectedly: code=${proc.exitCode}, signal=${proc.signalCode}, stderr=${stderrBuf.slice(-300)}`,
   )
 })
@@ -243,6 +232,80 @@ test("`pond dev` /__pond/auth/guest accepts loopback POST", async () => {
       body: JSON.stringify({ name: "evil; DROP TABLE--" }),
     })
     assert.equal(bad.status, 400)
+  } finally {
+    const exited = new Promise((r) => proc.once("exit", r))
+    proc.kill("SIGINT")
+    const t = setTimeout(() => proc.kill("SIGKILL"), 4000)
+    t.unref()
+    await exited
+    clearTimeout(t)
+  }
+})
+
+test("`pond dev` hot-reloads on shared/* edits (regression: watcher only watched 3 files)", async () => {
+  const parent = tmp("pond-cli-reload-")
+  await execFileP(process.execPath, [CLI_PATH, "new", "capreload", "--no-git"], {
+    cwd: parent,
+    timeout: 30000,
+  })
+  const projDir = path.join(parent, "capreload")
+  const port = await pickFreePort()
+  const proc = spawn(process.execPath, [CLI_PATH, "dev", "--port", String(port)], {
+    cwd: projDir,
+    env: { ...process.env },
+    stdio: ["ignore", "pipe", "pipe"],
+  })
+  cleanupProcs.push(proc)
+  proc.stdout.on("data", () => {})
+  proc.stderr.on("data", () => {})
+  try {
+    await waitForUrl(`http://127.0.0.1:${port}/api/query/messages`, 15000)
+
+    // Open the reload stream BEFORE the edit so the broadcast isn't missed,
+    // then pump it into a buffer.
+    const sseRes = await fetch(`http://127.0.0.1:${port}/__pond_reload`)
+    const reader = sseRes.body.getReader()
+    const decoder = new TextDecoder()
+    let sseBuf = ""
+    const pump = (async () => {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        sseBuf += decoder.decode(value, { stream: true })
+      }
+    })().catch(() => {})
+    const waitForReload = (reason, timeoutMs = 15000) =>
+      new Promise((resolve, reject) => {
+        const deadline = Date.now() + timeoutMs
+        const timer = setInterval(() => {
+          if (sseBuf.includes(`"reason":"${reason}"`)) {
+            clearInterval(timer)
+            resolve()
+          } else if (Date.now() > deadline) {
+            clearInterval(timer)
+            reject(new Error(`no reload event for "${reason}" within ${timeoutMs}ms — buffer: ${sseBuf.slice(-200)}`))
+          }
+        }, 100)
+      })
+
+    // A brand-new shared/ file is bundled into the server build; the watcher
+    // must pick it up (it used to watch only server/index.ts, client/index.tsx
+    // and the env file, so shared edits produced zero reload).
+    mkdirSync(path.join(projDir, "shared"), { recursive: true })
+    writeFileSync(path.join(projDir, "shared", "types.ts"), "export type Reloaded = true\n")
+    await waitForReload("server")
+
+    // A server edit must also reload (and the reload stream must survive the
+    // first rebuild — the rebuild chain stays healthy across edits).
+    const serverPath = path.join(projDir, "server", "index.ts")
+    const serverSrc = readFileSync(serverPath, "utf8")
+    writeFileSync(serverPath, serverSrc + "\n// touched by reload test\n")
+    await waitForReload("server")
+
+    // The capsule still answers after both rebuilds.
+    const res = await fetch(`http://127.0.0.1:${port}/api/query/messages`)
+    assert.equal(res.status, 200)
+    await pump
   } finally {
     const exited = new Promise((r) => proc.once("exit", r))
     proc.kill("SIGINT")

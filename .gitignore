@@ -18,6 +18,11 @@ output/
 .env
 .env.pond.server
 .pond/
+# Local host runtime state (src/commands/host.ts default data dir): contains
+# the generated host-token (live host credential) + control.db WAL/SHM.
+.pond-host/
+# Local editor scratch (plans, sessions).
+.zcode/
 deploy/cloudflared/config.yml
 deploy/cloudflared/credentials.json
 *.db

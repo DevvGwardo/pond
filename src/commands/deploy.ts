@@ -6,6 +6,7 @@ import { buildForDeploy } from "../runtime.js"
 import { buildClient } from "../bundler.js"
 import { loadCredentials } from "../host/credentials.js"
 import { readDeployRecord } from "../host/deploy-record.js"
+import { fail, fetchOrFail } from "./shared.js"
 
 const SOURCE_ROOTS = ["server", "client", "shared"]
 const SOURCE_FILE_LIMIT = 200
@@ -81,7 +82,7 @@ async function tryAliasDomain(opts: {
   for (let attempt = 0; attempt < 10; attempt++) {
     const candidate = attempt === 0 ? opts.baseSlug : `${opts.baseSlug}-${attempt + 1}`
     if (!candidate) return undefined
-    const res = await fetch(`${opts.apiUrl}/api/domains`, {
+    const res = await fetchOrFail(`${opts.apiUrl}/api/domains`, {
       method: "POST",
       headers,
       body: JSON.stringify({ subdomain: candidate, deployId: opts.deployId }),
@@ -277,7 +278,7 @@ export const deployCommand = defineCommand({
       const headers: Record<string, string> = { "content-type": "application/json" }
       if (userToken) headers.authorization = `Bearer ${userToken}`
       if (localRecord.claimToken) headers["x-pond-claim-token"] = localRecord.claimToken
-      response = await fetch(`${apiUrl}/api/deploys/${localRecord.deployId}`, {
+      response = await fetchOrFail(`${apiUrl}/api/deploys/${localRecord.deployId}`, {
         method: "PUT",
         headers,
         body: JSON.stringify({ ...baseBody, envText }),
@@ -285,7 +286,7 @@ export const deployCommand = defineCommand({
     } else {
       const headers: Record<string, string> = { "content-type": "application/json" }
       if (userToken) headers.authorization = `Bearer ${userToken}`
-      response = await fetch(`${apiUrl}/api/deploys`, {
+      response = await fetchOrFail(`${apiUrl}/api/deploys`, {
         method: "POST",
         headers,
         body: JSON.stringify(baseBody),
@@ -295,7 +296,7 @@ export const deployCommand = defineCommand({
 
     if (!response.ok) {
       const text = await response.text().catch(() => "")
-      throw new Error(`Hosted deploy failed: ${response.status} ${text}`)
+      fail(`Hosted deploy failed: ${response.status} ${text}`)
     }
 
     const remote = (await response.json()) as {

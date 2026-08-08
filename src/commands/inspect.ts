@@ -1,63 +1,5 @@
 import { defineCommand } from "citty"
-import { readDeployRecord } from "../host/deploy-record.js"
-
-interface ResolvedTarget {
-  baseUrl: string
-  headers: Record<string, string>
-  source: "explicit" | "auto-remote" | "local"
-}
-
-// See logs.ts:resolveTarget for the resolution matrix. Same rules: --local
-// forces localhost, explicit URL/deployId wins, otherwise auto-target the
-// deploy in .pond/deploy.json, otherwise localhost.
-function resolveTarget(target: string | undefined, port: string, local: boolean): ResolvedTarget {
-  const localhostUrl = `http://localhost:${port}`
-  if (local) {
-    return { baseUrl: localhostUrl, headers: {}, source: "local" }
-  }
-  const deploy = readDeployRecord(process.cwd())
-  if (target) {
-    if (target.startsWith("http://") || target.startsWith("https://")) {
-      return { baseUrl: target.replace(/\/$/, ""), headers: {}, source: "explicit" }
-    }
-    if (deploy?.deployId === target && deploy?.url) {
-      const headers: Record<string, string> = deploy.claimToken ? { "x-pond-claim-token": deploy.claimToken } : {}
-      return { baseUrl: deploy.url, headers, source: "explicit" }
-    }
-    throw new Error(`Unknown deploy target: ${target}`)
-  }
-  if (deploy?.url && deploy?.claimToken) {
-    return {
-      baseUrl: deploy.url,
-      headers: { "x-pond-claim-token": deploy.claimToken },
-      source: "auto-remote",
-    }
-  }
-  return { baseUrl: localhostUrl, headers: {}, source: "local" }
-}
-
-// Walk `err.cause` and any AggregateError.errors[] looking for a matching
-// error code. Node's undici uses happy-eyeballs on dual-stack hosts (`localhost`
-// → IPv4 + IPv6 in parallel); when both families refuse, `err.cause` is an
-// AggregateError, not a single Error with `.code`. Without this walker the
-// caller's friendly "is the capsule running?" message never fires and the
-// raw undici stack leaks. Bounded depth so a malformed chain can't loop.
-export function hasErrorCode(err: unknown, target: string, depth = 0): boolean {
-  if (depth > 5 || err == null) return false
-  if (typeof err === "object") {
-    const e = err as { code?: unknown; cause?: unknown; errors?: unknown }
-    if (typeof e.code === "string" && e.code === target) return true
-    if (Array.isArray(e.errors)) {
-      for (const sub of e.errors) {
-        if (hasErrorCode(sub, target, depth + 1)) return true
-      }
-    }
-    if (e.cause && e.cause !== err) {
-      if (hasErrorCode(e.cause, target, depth + 1)) return true
-    }
-  }
-  return false
-}
+import { fail, httpError, hasErrorCode, resolveTarget } from "./shared.js"
 
 export const inspectCommand = defineCommand({
   meta: {
@@ -99,7 +41,9 @@ export const inspectCommand = defineCommand({
       }
       throw err
     }
-    if (!res.ok) throw new Error(`Request failed: ${res.status}`)
+    if (!res.ok) {
+      await httpError(res, "Request")
+    }
     console.log(JSON.stringify(await res.json(), null, 2))
   },
 })

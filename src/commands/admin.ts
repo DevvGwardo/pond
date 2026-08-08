@@ -1,4 +1,5 @@
 import { defineCommand } from "citty"
+import { fetchOrFail, showGroupUsageIfBare } from "./shared.js"
 
 const terminateCommand = defineCommand({
   meta: {
@@ -38,7 +39,7 @@ const terminateCommand = defineCommand({
       process.exit(1)
     }
 
-    const res = await fetch(`${apiUrl}/api/admin/deploys/${deployId}/terminate`, {
+    const res = await fetchOrFail(`${apiUrl}/api/admin/deploys/${deployId}/terminate`, {
       method: "POST",
       headers: { authorization: `Bearer ${token}` },
     })
@@ -57,6 +58,7 @@ export const adminCommand = defineCommand({
     name: "admin",
     description: "Host-token-gated operator commands for a pond control plane",
   },
+  run: showGroupUsageIfBare,
   subCommands: {
     terminate: terminateCommand,
   },

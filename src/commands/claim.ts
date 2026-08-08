@@ -3,6 +3,7 @@ import * as fs from "node:fs"
 import { loadCredentials, saveCredentials } from "../host/credentials.js"
 import { deployRecordPath, readDeployRecord } from "../host/deploy-record.js"
 import * as path from "node:path"
+import { fail, fetchOrFail } from "./shared.js"
 
 export const claimCommand = defineCommand({
   meta: {
@@ -62,7 +63,7 @@ export const claimCommand = defineCommand({
       headers.authorization = `Bearer ${cred.token}`
     }
 
-    const response = await fetch(`${apiUrl}/api/deploys/${deploy.deployId}/claim`, {
+    const response = await fetchOrFail(`${apiUrl}/api/deploys/${deploy.deployId}/claim`, {
       method: "POST",
       headers,
       body: JSON.stringify(body),
@@ -70,7 +71,7 @@ export const claimCommand = defineCommand({
 
     if (!response.ok) {
       const text = await response.text().catch(() => "")
-      throw new Error(`Claim failed: ${response.status} ${text}`)
+      fail(`Claim failed: ${response.status} ${text}`)
     }
 
     const remote = (await response.json()) as {

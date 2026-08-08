@@ -2,10 +2,9 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 import { spawn, execFile } from "node:child_process"
 import { promisify } from "node:util"
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, existsSync } from "node:fs"
+import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import * as path from "node:path"
-import * as net from "node:net"
 
 const execFileP = promisify(execFile)
 const REPO_ROOT = path.resolve(import.meta.dirname, "..")
@@ -15,6 +14,7 @@ const cleanupDirs = []
 const cleanupProcs = []
 
 import { after } from "node:test"
+import { pickFreePort } from "./helpers.mjs"
 after(async () => {
   for (const p of cleanupProcs) {
     if (p && p.exitCode === null) {
@@ -35,19 +35,6 @@ function tmp(prefix) {
   const d = mkdtempSync(path.join(tmpdir(), prefix))
   cleanupDirs.push(d)
   return d
-}
-
-async function pickFreePort() {
-  return await new Promise((resolve, reject) => {
-    const s = net.createServer()
-    s.unref()
-    s.on("error", reject)
-    s.listen(0, "127.0.0.1", () => {
-      const addr = s.address()
-      const port = typeof addr === "object" && addr ? addr.port : 0
-      s.close(() => resolve(port))
-    })
-  })
 }
 
 async function waitForUrl(url, timeoutMs = 15000) {

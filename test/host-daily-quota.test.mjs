@@ -4,56 +4,14 @@ import { spawn } from "node:child_process"
 import { mkdtempSync, rmSync, existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import * as path from "node:path"
-import * as net from "node:net"
 import * as http from "node:http"
 import { randomBytes } from "node:crypto"
 
 import { stopProc } from "./proc-kill.mjs"
+import { pickFreePort, waitForHealth, TINY_SERVER_SRC, tinySourceFiles } from "./helpers.mjs"
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "..")
 const CLI_PATH = path.join(REPO_ROOT, "src", "cli.js")
-
-async function pickFreePort() {
-  return await new Promise((resolve, reject) => {
-    const s = net.createServer()
-    s.unref()
-    s.on("error", reject)
-    s.listen(0, "127.0.0.1", () => {
-      const addr = s.address()
-      resolve(typeof addr === "object" && addr ? addr.port : 0)
-      s.close()
-    })
-  })
-}
-
-async function waitForHealth(apiUrl, timeoutMs = 8000) {
-  const start = Date.now()
-  while (Date.now() - start < timeoutMs) {
-    try {
-      const r = await fetch(`${apiUrl}/api/health`)
-      if (r.ok) return
-    } catch {
-      // retry
-    }
-    await new Promise((r) => setTimeout(r, 100))
-  }
-  throw new Error(`host did not become healthy at ${apiUrl} within ${timeoutMs}ms`)
-}
-
-const TINY_SERVER_SRC = `import { capsule, mutation, query, string, table } from "pond/server"
-export default capsule({
-  schema: { items: table({ name: string() }) },
-  queries: { items: query((ctx) => ctx.db.items.all()) },
-  mutations: { add: mutation((ctx, name) => ctx.db.items.insert({ name })) },
-})
-`
-
-function tinySourceFiles() {
-  return {
-    "server/index.ts": TINY_SERVER_SRC,
-    "package.json": '{"name":"test-cap","private":true,"type":"module"}\n',
-  }
-}
 
 let hostProc = null
 let dataDir = null

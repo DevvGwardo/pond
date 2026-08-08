@@ -135,7 +135,7 @@ export const newCommand = defineCommand({
       (args as unknown as { name_flag?: string; dir?: string }).name_flag ??
       (args as unknown as { name_flag?: string; dir?: string }).dir
 
-    const isSingleSlug = positionals.length === 1 && SLUG_RE.test(positionals[0]) && !positionals[0].includes(" ")
+    const isSingleSlug = positionals.length === 1 && SLUG_RE.test(positionals[0])
 
     if (positionals.length === 0) {
       console.error("Pass a name (pond new my-app) or a description (pond new a dashboard for hermes-agent)")
@@ -175,6 +175,13 @@ export const newCommand = defineCommand({
     // can still force a starting template by passing --template explicitly.
     const useStub = wantsGenerate && !templateArg
 
+    // Validate BEFORE scaffolding: `pond new my-app --generate` with no prompt
+    // must fail without stranding a half-created project directory.
+    if (wantsGenerate && !promptText) {
+      console.error('\n  --generate requires a prompt. Try: pond new "<description>" --generate')
+      process.exit(1)
+    }
+
     const { template } = await copyTemplate({
       name,
       templateName: requestedTemplate ?? "todo",
@@ -193,10 +200,6 @@ export const newCommand = defineCommand({
     }
 
     if (wantsGenerate) {
-      if (!promptText) {
-        console.error('\n  --generate requires a prompt. Try: pond new "<description>" --generate')
-        process.exit(1)
-      }
       if (!detected.length) {
         console.error(
           "\n  --generate: no local agent detected (looked for `hermes` on PATH, ~/.claude, ~/.codex/auth.json).",

@@ -90,9 +90,24 @@ function authHeaders(token: string): Record<string, string> {
   return { authorization: `Bearer ${token}` }
 }
 
+// A 401/403 on ANY API call means the stored token is stale (rotated
+// elsewhere, or expired) — the whole dashboard is broken until a fresh one is
+// pasted. The App component registers the sign-out handler here so every fetch
+// helper can trigger it, not just the mount-time fetchMe.
+let onUnauthorized: (() => void) | null = null
+export function setUnauthorizedHandler(fn: (() => void) | null) {
+  onUnauthorized = fn
+}
+function handleUnauthorized(status: number) {
+  if ((status === 401 || status === 403) && onUnauthorized) onUnauthorized()
+}
+
 async function fetchMe(token: string): Promise<{ me: Me } | { error: string; status: number }> {
   const r = await fetch("/api/users/me", { headers: authHeaders(token) })
-  if (!r.ok) return { error: (await r.json().catch(() => ({}))).error ?? "auth failed", status: r.status }
+  if (!r.ok) {
+    handleUnauthorized(r.status)
+    return { error: (await r.json().catch(() => ({}))).error ?? "auth failed", status: r.status }
+  }
   // /api/users/me returns { userId, username, isAdmin } — map userId → id so
   // ownership checks (me.id === ownerId) work. Passing the raw body through left
   // me.id undefined, so every deploy looked SHARED and "Owned by you" read 0.
@@ -102,7 +117,10 @@ async function fetchMe(token: string): Promise<{ me: Me } | { error: string; sta
 
 async function fetchDeploys(token: string): Promise<{ deploys: DeployRow[] } | { error: string }> {
   const r = await fetch("/api/deploys", { headers: authHeaders(token) })
-  if (!r.ok) return { error: (await r.json().catch(() => ({}))).error ?? "list failed" }
+  if (!r.ok) {
+    handleUnauthorized(r.status)
+    return { error: (await r.json().catch(() => ({}))).error ?? "list failed" }
+  }
   return r.json()
 }
 
@@ -111,7 +129,10 @@ async function rotateClaim(token: string, deployId: string): Promise<{ claimToke
     method: "POST",
     headers: authHeaders(token),
   })
-  if (!r.ok) return { error: (await r.json().catch(() => ({}))).error ?? "rotate failed" }
+  if (!r.ok) {
+    handleUnauthorized(r.status)
+    return { error: (await r.json().catch(() => ({}))).error ?? "rotate failed" }
+  }
   return r.json()
 }
 
@@ -120,13 +141,20 @@ async function rotateUserToken(token: string): Promise<{ token: string } | { err
     method: "POST",
     headers: authHeaders(token),
   })
-  if (!r.ok) return { error: (await r.json().catch(() => ({}))).error ?? "rotate failed" }
+  if (!r.ok) {
+    handleUnauthorized(r.status)
+    return { error: (await r.json().catch(() => ({}))).error ?? "rotate failed" }
+  }
   return r.json()
 }
 
-async function deleteDeploy(token: string, deployId: string): Promise<boolean> {
+async function deleteDeploy(token: string, deployId: string): Promise<{ ok: true } | { error: string }> {
   const r = await fetch(`/api/deploys/${deployId}`, { method: "DELETE", headers: authHeaders(token) })
-  return r.ok
+  if (!r.ok) {
+    handleUnauthorized(r.status)
+    return { error: (await r.json().catch(() => ({}))).error ?? "delete failed" }
+  }
+  return { ok: true }
 }
 
 interface InspectData {
@@ -141,7 +169,10 @@ interface InspectData {
 
 async function fetchInspect(token: string, deployId: string): Promise<InspectData | { error: string }> {
   const r = await fetch(`/api/deploys/${deployId}/inspect`, { headers: authHeaders(token) })
-  if (!r.ok) return { error: (await r.json().catch(() => ({}))).error ?? "inspect failed" }
+  if (!r.ok) {
+    handleUnauthorized(r.status)
+    return { error: (await r.json().catch(() => ({}))).error ?? "inspect failed" }
+  }
   return r.json()
 }
 
@@ -154,7 +185,10 @@ interface LogEntry {
 
 async function fetchLogs(token: string, deployId: string): Promise<{ entries: LogEntry[] } | { error: string }> {
   const r = await fetch(`/api/deploys/${deployId}/logs?limit=200`, { headers: authHeaders(token) })
-  if (!r.ok) return { error: (await r.json().catch(() => ({}))).error ?? "logs failed" }
+  if (!r.ok) {
+    handleUnauthorized(r.status)
+    return { error: (await r.json().catch(() => ({}))).error ?? "logs failed" }
+  }
   return r.json()
 }
 
@@ -163,7 +197,10 @@ async function fetchEnv(
   deployId: string,
 ): Promise<{ entries: Record<string, string> } | { error: string }> {
   const r = await fetch(`/api/deploys/${deployId}/env`, { headers: authHeaders(token) })
-  if (!r.ok) return { error: (await r.json().catch(() => ({}))).error ?? "env load failed" }
+  if (!r.ok) {
+    handleUnauthorized(r.status)
+    return { error: (await r.json().catch(() => ({}))).error ?? "env load failed" }
+  }
   return r.json()
 }
 
@@ -177,7 +214,10 @@ async function saveEnv(
     headers: { "content-type": "application/json", ...authHeaders(token) },
     body: JSON.stringify({ entries: partial }),
   })
-  if (!r.ok) return { error: (await r.json().catch(() => ({}))).error ?? "save failed" }
+  if (!r.ok) {
+    handleUnauthorized(r.status)
+    return { error: (await r.json().catch(() => ({}))).error ?? "save failed" }
+  }
   return r.json()
 }
 
@@ -190,7 +230,10 @@ async function deleteEnvKey(
     method: "DELETE",
     headers: authHeaders(token),
   })
-  if (!r.ok) return { error: (await r.json().catch(() => ({}))).error ?? "delete failed" }
+  if (!r.ok) {
+    handleUnauthorized(r.status)
+    return { error: (await r.json().catch(() => ({}))).error ?? "delete failed" }
+  }
   return r.json()
 }
 
@@ -204,7 +247,10 @@ async function setVisibility(
     headers: { "content-type": "application/json", ...authHeaders(token) },
     body: JSON.stringify({ publicInspect }),
   })
-  if (!r.ok) return { error: (await r.json().catch(() => ({}))).error ?? "visibility update failed" }
+  if (!r.ok) {
+    handleUnauthorized(r.status)
+    return { error: (await r.json().catch(() => ({}))).error ?? "visibility update failed" }
+  }
   return r.json()
 }
 
@@ -227,7 +273,10 @@ async function fetchTableSample(
   const r = await fetch(`/api/deploys/${deployId}/inspect/table/${encodeURIComponent(table)}?limit=${limit}`, {
     headers: authHeaders(token),
   })
-  if (!r.ok) return { error: (await r.json().catch(() => ({}))).error ?? "table sample failed" }
+  if (!r.ok) {
+    handleUnauthorized(r.status)
+    return { error: (await r.json().catch(() => ({}))).error ?? "table sample failed" }
+  }
   return r.json()
 }
 
@@ -258,6 +307,19 @@ export function App() {
   const [token, setToken] = useState<string | null>(() => loadToken())
   const [me, setMe] = useState<Me | null>(null)
   const [authError, setAuthError] = useState<string | null>(null)
+
+  // Any 401/403 from ANY API call (token rotated elsewhere, session expired)
+  // returns the dashboard to the sign-in screen — the old code only handled
+  // the mount-time fetchMe, leaving the UI "signed in" but unable to do
+  // anything.
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      clearToken()
+      setToken(null)
+      setMe(null)
+    })
+    return () => setUnauthorizedHandler(null)
+  }, [])
 
   useEffect(() => {
     if (!token) {
@@ -363,6 +425,20 @@ function Workspace({
   const [err, setErr] = useState<string | null>(null)
   const [reloadKey, setReloadKey] = useState(0)
   const [flash, setFlash] = useState<string | null>(null)
+  const flashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Clear the flash timer on unmount so a pending timeout can't setState on a
+  // component that's gone.
+  useEffect(
+    () => () => {
+      if (flashTimerRef.current) clearTimeout(flashTimerRef.current)
+    },
+    [],
+  )
+  function flashMessage(msg: string, ms = 4000) {
+    setFlash(msg)
+    if (flashTimerRef.current) clearTimeout(flashTimerRef.current)
+    flashTimerRef.current = setTimeout(() => setFlash(null), ms)
+  }
   const [view, setView] = useState<ProjectView>(() => loadView())
   function chooseView(v: ProjectView) {
     setView(v)
@@ -392,9 +468,18 @@ function Workspace({
       setErr(res.error)
       return
     }
-    await navigator.clipboard.writeText(res.claimToken).catch(() => {})
-    setFlash(`New claim token copied to clipboard for ${d.deployId.slice(0, 8)}…`)
-    setTimeout(() => setFlash(null), 4000)
+    // Only claim "copied" when the clipboard write actually succeeded —
+    // otherwise show the token so the user isn't left empty-handed.
+    const copied = await navigator.clipboard.writeText(res.claimToken).then(
+      () => true,
+      () => false,
+    )
+    flashMessage(
+      copied
+        ? `New claim token copied to clipboard for ${d.deployId.slice(0, 8)}…`
+        : `New claim token (copy failed): ${res.claimToken}`,
+      6000,
+    )
   }
 
   async function handleRotateUserToken() {
@@ -404,17 +489,24 @@ function Workspace({
       setErr(res.error)
       return
     }
-    await navigator.clipboard.writeText(res.token).catch(() => {})
-    setFlash("New API token copied. The old one stays valid for 5 minutes.")
+    const copied = await navigator.clipboard.writeText(res.token).then(
+      () => true,
+      () => false,
+    )
+    flashMessage(
+      copied
+        ? "New API token copied. The old one stays valid for 5 minutes."
+        : `New API token (copy failed): ${res.token}`,
+      8000,
+    )
     storeToken(res.token)
-    setTimeout(() => setFlash(null), 6000)
   }
 
   async function handleDelete(d: DeployRow) {
     if (!confirm(`Delete deploy ${d.deployId}? This is irreversible.`)) return
-    const ok = await deleteDeploy(token, d.deployId)
-    if (!ok) {
-      setErr("delete failed")
+    const res = await deleteDeploy(token, d.deployId)
+    if ("error" in res) {
+      setErr(res.error)
       return
     }
     setReloadKey((k) => k + 1)
@@ -1657,8 +1749,9 @@ function EnvEditor({ token, deployId, disabled }: { token: string; deployId: str
     setLoading(true)
     const res = await fetchEnv(token, deployId)
     if ("error" in res) {
+      // Keep the previously loaded entries — one failed fetch shouldn't wipe
+      // the visible env (the old code cleared the list on any transient error).
       setError(res.error)
-      setEntries({})
     } else {
       setEntries(res.entries)
       setError(null)

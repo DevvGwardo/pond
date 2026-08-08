@@ -5,9 +5,14 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -20,8 +25,8 @@ jobs:
           - os: windows-latest
             node: 22
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
           cache: npm
@@ -29,6 +34,13 @@ jobs:
       - run: npm run format:check
       - run: npm run lint
       - run: npx tsc --noEmit
+      # The committed generated artifacts (src/ide/built.ts, src/dashboard/
+      # built.ts, src/ide/tailwind.css, docs/llms-full.txt) must match what the
+      # build produces — a stale committed bundle would ship in every git-based
+      # deploy while tests stay green. `npm test` regenerates them; this step
+      # fails if that left the tree dirty.
+      - name: Verify generated artifacts are current
+        run: npm run build && git diff --exit-code -- src/ide/built.ts src/ide/tailwind.css src/dashboard/built.ts docs/llms-full.txt
       # Some tests scaffold a capsule whose template runs `git init && git commit`.
       # Provide a default identity so the commit step doesn't fail in CI even if
       # the test forgets --no-git. Use bash explicitly so the step is identical

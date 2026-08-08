@@ -1,4 +1,4 @@
-import { h, Fragment } from "preact"
+import { h, Fragment, Component } from "preact"
 import { useEffect, useMemo, useRef, useState } from "preact/hooks"
 import {
   fetchFiles,
@@ -153,7 +153,85 @@ function parseOutline(src: string): Outline {
 
 const REQUIRED_PATHS = new Set(["server/index.ts", "package.json"])
 
+// A render error anywhere in the IDE (malformed log entry, unexpected data
+// shape) must not blank the whole page — surface it with a reset button
+// instead of leaving a dead black screen.
+class ErrorBoundary extends Component<{ children: any }, { error: Error | null }> {
+  constructor(props: { children: any }) {
+    super(props)
+    this.state = { error: null }
+  }
+  static getDerivedStateFromError(error: Error) {
+    return { error }
+  }
+  render() {
+    if (this.state.error) {
+      return h(
+        "div",
+        { class: "flex h-screen items-center justify-center bg-black text-sm text-zinc-400" },
+        h(
+          "div",
+          { class: "max-w-md p-6" },
+          h("p", { class: "mb-2 font-semibold text-red-400" }, "The IDE hit an unexpected error."),
+          h(
+            "pre",
+            {
+              class:
+                "mb-4 max-h-40 overflow-auto rounded border border-zinc-800 bg-zinc-950 p-3 font-mono text-[10px] text-zinc-300",
+            },
+            String(this.state.error?.message ?? this.state.error),
+          ),
+          h(
+            "button",
+            {
+              class: "rounded-md border border-zinc-800 px-3 py-1.5 text-xs hover:border-zinc-600",
+              onClick: () => this.setState({ error: null }),
+            },
+            "Try again",
+          ),
+        ),
+      )
+    }
+    return this.props.children
+  }
+}
+
+// Trap Tab focus inside an open overlay so keyboard users can't tab into the
+// page behind it.
+function useFocusTrap(ref: { current: HTMLElement | null }) {
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Tab") return
+      const focusables = el.querySelectorAll<HTMLElement>(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+      )
+      if (focusables.length === 0) return
+      const first = focusables[0]
+      const last = focusables[focusables.length - 1]
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault()
+        last.focus()
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault()
+        first.focus()
+      }
+    }
+    el.addEventListener("keydown", onKeyDown)
+    return () => el.removeEventListener("keydown", onKeyDown)
+  }, [ref])
+}
+
 export function App() {
+  return (
+    <ErrorBoundary>
+      <AppInner />
+    </ErrorBoundary>
+  )
+}
+
+function AppInner() {
   const bootstrap = useMemo(readBootstrap, [])
   const [token, setToken] = useState<TokenInfo | null>(() => {
     if (!bootstrap.deployId) return null
@@ -674,10 +752,20 @@ function FileTreePane(p: FileTreeProps) {
                     </button>
                     {REQUIRED_PATHS.has(f.path) ? null : (
                       <div class="ml-2 hidden gap-1 text-zinc-500 group-hover:flex">
-                        <button title="Rename" class="hover:text-zinc-200" onClick={() => p.onRename(f.path)}>
+                        <button
+                          title="Rename"
+                          aria-label={`Rename ${f.path}`}
+                          class="hover:text-zinc-200"
+                          onClick={() => p.onRename(f.path)}
+                        >
                           ✎
                         </button>
-                        <button title="Delete" class="hover:text-red-400" onClick={() => p.onDelete(f.path)}>
+                        <button
+                          title="Delete"
+                          aria-label={`Delete ${f.path}`}
+                          class="hover:text-red-400"
+                          onClick={() => p.onDelete(f.path)}
+                        >
                           ×
                         </button>
                       </div>
@@ -719,7 +807,11 @@ function EditorPane(p: EditorPaneProps) {
                   {p.dirty.has(path) ? "● " : ""}
                   {path}
                 </button>
-                <button class="text-zinc-600 hover:text-zinc-200" onClick={() => p.onCloseTab(path)}>
+                <button
+                  class="text-zinc-600 hover:text-zinc-200"
+                  onClick={() => p.onCloseTab(path)}
+                  aria-label={`Close ${path}`}
+                >
                   ×
                 </button>
               </div>
@@ -800,18 +892,21 @@ function LogsSection({
   const [paused, setPaused] = useState(false)
   const [filter, setFilter] = useState<"all" | "info" | "error">("all")
   const [err, setErr] = useState<string | null>(null)
+  const [status, setStatus] = useState<"live" | "reconnecting">("live")
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const queuedRef = useRef<LogEntry[]>([])
   const pausedRef = useRef(paused)
   pausedRef.current = paused
 
   useEffect(() => {
-    if (!deployUrl) return
+    if (!apiOpts.deployId) return
     setEntries([])
     setErr(null)
     queuedRef.current = []
+    // Polls the control-plane logs endpoint (same-origin, owner-authed) and
+    // auto-reconnects, so the panel keeps flowing across redeploys — the old
+    // cross-origin SSE stream was CORS-blocked in production.
     const stop = streamLogs(
-      deployUrl,
       apiOpts,
       (entry) => {
         if (pausedRef.current) {
@@ -821,9 +916,10 @@ function LogsSection({
         setEntries((es) => [...es.slice(-499), entry])
       },
       (e) => setErr(e instanceof Error ? e.message : String(e)),
+      (s) => setStatus(s),
     )
     return stop
-  }, [deployUrl, apiOpts.deployId, apiOpts.token])
+  }, [apiOpts.deployId, apiOpts.token])
 
   useEffect(() => {
     if (!paused && queuedRef.current.length) {
@@ -865,10 +961,11 @@ function LogsSection({
         class="h-72 overflow-y-auto rounded border border-zinc-800 bg-black p-2 font-mono text-[10px]"
       >
         {err ? <div class="text-red-400">{err}</div> : null}
+        {status === "reconnecting" && !err ? <div class="text-amber-400">reconnecting…</div> : null}
         {filtered.length === 0 ? <div class="text-zinc-600">No log entries yet.</div> : null}
         {filtered.map((e, i) => (
           <div key={i} class={e.level === "error" ? "text-red-300" : "text-zinc-300"}>
-            <span class="text-zinc-600">{e.timestamp.slice(11, 19)} </span>
+            <span class="text-zinc-600">{e.timestamp?.slice?.(11, 19) ?? ""} </span>
             {e.message}
             {e.data ? <span class="text-zinc-500"> {JSON.stringify(e.data)}</span> : null}
           </div>
@@ -1155,6 +1252,8 @@ function CommandPalette({
   const [q, setQ] = useState("")
   const [idx, setIdx] = useState(0)
   const inputRef = useRef<HTMLInputElement | null>(null)
+  const overlayRef = useRef<HTMLDivElement | null>(null)
+  useFocusTrap(overlayRef)
 
   useEffect(() => {
     inputRef.current?.focus()
@@ -1189,6 +1288,10 @@ function CommandPalette({
   return (
     <div class="fixed inset-0 z-50 flex items-start justify-center bg-black/60 pt-24" onClick={onClose}>
       <div
+        ref={overlayRef as any}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Command palette"
         class="w-full max-w-xl overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
@@ -1248,6 +1351,8 @@ function GlobalSearch({
   const [q, setQ] = useState("")
   const [results, setResults] = useState<Array<{ path: string; line: number; text: string }>>([])
   const inputRef = useRef<HTMLInputElement | null>(null)
+  const overlayRef = useRef<HTMLDivElement | null>(null)
+  useFocusTrap(overlayRef)
 
   useEffect(() => {
     inputRef.current?.focus()
@@ -1259,32 +1364,44 @@ function GlobalSearch({
       return
     }
     let cancelled = false
-    void (async () => {
-      // Lazily load any files we don't have yet so search covers the whole tree.
-      for (const f of files) {
-        if (!(f.path in contents)) await onPrefetch(f.path)
+    // Debounce the query so fast typing doesn't fire one search per keystroke
+    // (each search can prefetch many files over the network).
+    const timer = setTimeout(() => {
+      void (async () => {
+        // Lazily load any files we don't have yet so search covers the whole
+        // tree — in parallel with a concurrency cap, not N sequential fetches.
+        const missing = files.filter((f) => !(f.path in contents)).map((f) => f.path)
+        const cap = 8
+        for (let i = 0; i < missing.length && !cancelled; i += cap) {
+          await Promise.all(missing.slice(i, i + cap).map((path) => onPrefetch(path).catch(() => {})))
+        }
         if (cancelled) return
-      }
-      const next: Array<{ path: string; line: number; text: string }> = []
-      const ql = q.toLowerCase()
-      for (const [path, v] of Object.entries(contents)) {
-        const lines = v.draft.split("\n")
-        for (let i = 0; i < lines.length && next.length < 200; i++) {
-          if (lines[i].toLowerCase().includes(ql)) {
-            next.push({ path, line: i + 1, text: lines[i].trim().slice(0, 200) })
+        const next: Array<{ path: string; line: number; text: string }> = []
+        const ql = q.toLowerCase()
+        for (const [path, v] of Object.entries(contents)) {
+          const lines = v.draft.split("\n")
+          for (let i = 0; i < lines.length && next.length < 200; i++) {
+            if (lines[i].toLowerCase().includes(ql)) {
+              next.push({ path, line: i + 1, text: lines[i].trim().slice(0, 200) })
+            }
           }
         }
-      }
-      if (!cancelled) setResults(next)
-    })()
+        if (!cancelled) setResults(next)
+      })()
+    }, 200)
     return () => {
       cancelled = true
+      clearTimeout(timer)
     }
   }, [q, files, contents])
 
   return (
     <div class="fixed inset-0 z-50 flex items-start justify-center bg-black/60 pt-16" onClick={onClose}>
       <div
+        ref={overlayRef as any}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Search source files"
         class="w-full max-w-2xl overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
@@ -1326,9 +1443,15 @@ function DeployDiff({
   onCancel: () => void
   onConfirm: () => void
 }) {
+  const overlayRef = useRef<HTMLDivElement | null>(null)
+  useFocusTrap(overlayRef)
   return (
     <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6" onClick={onCancel}>
       <div
+        ref={overlayRef as any}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Review changes before deploying"
         class="flex h-full w-full max-w-5xl flex-col overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >

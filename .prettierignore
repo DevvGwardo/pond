@@ -11,3 +11,5 @@ package-lock.json
 docs/branding
 src/ide/built.ts
 src/dashboard/built.ts
+.zcode
+src/ide/tailwind.css

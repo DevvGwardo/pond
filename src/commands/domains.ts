@@ -1,6 +1,7 @@
 import { defineCommand, renderUsage } from "citty"
 import { loadCredentials } from "../host/credentials.js"
 import { readDeployRecord } from "../host/deploy-record.js"
+import { fail, fetchOrFail } from "./shared.js"
 
 // See dbCommand for why this pattern exists. citty's default behavior on a
 // bare subcommand-group invocation is to print help AND exit 1 with "ERROR
@@ -51,7 +52,7 @@ export const domainsCommand = defineCommand({
       },
       async run({ args }) {
         const apiUrl = resolveApi(args)
-        const res = await fetch(`${apiUrl}/api/domains`, { headers: authHeader(apiUrl) })
+        const res = await fetchOrFail(`${apiUrl}/api/domains`, { headers: authHeader(apiUrl) })
         if (!res.ok) {
           const text = await res.text().catch(() => "")
           console.error(`List failed: ${res.status} ${text}`)
@@ -83,7 +84,7 @@ export const domainsCommand = defineCommand({
           process.exit(1)
         }
         const apiUrl = resolveApi(args)
-        const res = await fetch(`${apiUrl}/api/domains`, {
+        const res = await fetchOrFail(`${apiUrl}/api/domains`, {
           method: "POST",
           headers: { "content-type": "application/json", ...authHeader(apiUrl) },
           body: JSON.stringify({ subdomain, deployId }),
@@ -107,7 +108,7 @@ export const domainsCommand = defineCommand({
       async run({ args }) {
         const subdomain = String(args.subdomain)
         const apiUrl = resolveApi(args)
-        const res = await fetch(`${apiUrl}/api/domains/${encodeURIComponent(subdomain)}`, {
+        const res = await fetchOrFail(`${apiUrl}/api/domains/${encodeURIComponent(subdomain)}`, {
           method: "DELETE",
           headers: authHeader(apiUrl),
         })

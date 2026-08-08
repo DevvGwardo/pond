@@ -1,6 +1,8 @@
 import * as esbuild from "esbuild"
 import * as path from "node:path"
 import { createRequire } from "node:module"
+import { confineImportsTo } from "./build-confinement.js"
+import { containedRealPath } from "./host/fs-safe.js"
 
 // Resolve preact via Node's module resolution so we work regardless of npm's
 // hoisting choice. The old code aliased to `../node_modules/preact/...`
@@ -11,6 +13,14 @@ const moduleRequire = createRequire(import.meta.url)
 const preactDir = path.dirname(moduleRequire.resolve("preact/package.json"))
 
 export async function buildClient(entry: string, options: { liveReload?: boolean } = {}): Promise<string> {
+  // The capsule project root — the client entry is always <root>/client/index.tsx.
+  const projectRoot = path.resolve(path.dirname(entry), "..")
+  // esbuild reads the entry through symlinks: for hosted deploys a planted
+  // symlink at client/index.tsx must not feed host files into the client
+  // bundle (which the tenant serves back to visitors).
+  if (!containedRealPath(projectRoot, entry)) {
+    throw new Error("client entry must resolve inside the project directory")
+  }
   // IIFE format with a globalName wraps the user bundle so its identifiers
   // (preact's `h`, `render`, hooks, the user's `App`) do not leak into the
   // surrounding HTML shell's module scope. The previous setup imported `h`
@@ -57,6 +67,9 @@ export { render, h } from "preact";
     define: {
       "process.env.NODE_ENV": '"development"',
     },
+    // Relative imports must not escape the capsule root (tenant-controlled
+    // source on hosted deploys) — see build-confinement.ts.
+    plugins: [confineImportsTo(projectRoot)],
   })
 
   const js = result.outputFiles[0].text

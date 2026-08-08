@@ -4,52 +4,13 @@ import { spawn } from "node:child_process"
 import { mkdtempSync, rmSync, existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import * as path from "node:path"
-import * as net from "node:net"
 import { randomBytes } from "node:crypto"
 
 import { stopProc } from "./proc-kill.mjs"
+import { pickFreePort, waitForHealth, tinySourceFiles } from "./helpers.mjs"
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "..")
 const CLI_PATH = path.join(REPO_ROOT, "src", "cli.js")
-
-async function pickFreePort() {
-  return await new Promise((resolve, reject) => {
-    const s = net.createServer()
-    s.unref()
-    s.on("error", reject)
-    s.listen(0, "127.0.0.1", () => {
-      const addr = s.address()
-      const p = typeof addr === "object" && addr ? addr.port : 0
-      s.close(() => resolve(p))
-    })
-  })
-}
-
-async function waitForHealth(apiUrl, timeoutMs = 8000) {
-  const start = Date.now()
-  while (Date.now() - start < timeoutMs) {
-    try {
-      const r = await fetch(`${apiUrl}/api/health`)
-      if (r.ok) return
-    } catch {
-      // retry
-    }
-    await new Promise((r) => setTimeout(r, 100))
-  }
-  throw new Error(`host did not become healthy within ${timeoutMs}ms`)
-}
-
-const TINY_SERVER_SRC = `import { capsule, mutation, query, string, table } from "pond/server"
-export default capsule({
-  schema: { items: table({ name: string() }) },
-  queries: { items: query((ctx) => ctx.db.items.all()) },
-  mutations: { add: mutation((ctx, name) => ctx.db.items.insert({ name })) },
-})
-`
-
-function tinySourceFiles(serverSrc = TINY_SERVER_SRC) {
-  return { "server/index.ts": serverSrc, "package.json": '{"name":"test-cap","private":true,"type":"module"}\n' }
-}
 
 let hostProc = null
 let dataDir = null
@@ -370,6 +331,110 @@ test("GET /ide/unknown returns 404", async () => {
     req.end()
   })
   assert.equal(result.status, 404)
+})
+
+test("GET /ide/:deployId ships a strict nonce CSP and a versioned bundle", async () => {
+  const http = await import("node:http")
+  const result = await new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: "127.0.0.1",
+        port,
+        method: "GET",
+        path: `/ide/${ownedDeployId}`,
+        headers: { host: `localhost:${port}` },
+      },
+      (res) => {
+        let data = ""
+        res.on("data", (c) => (data += c))
+        res.on("end", () => resolve({ status: res.statusCode, body: data, headers: res.headers }))
+      },
+    )
+    req.on("error", reject)
+    req.end()
+  })
+  assert.equal(result.status, 200)
+  const csp = result.headers["content-security-policy"]
+  assert.ok(csp, "CSP header present")
+  assert.match(csp, /script-src 'nonce-/, "script-src uses a per-request nonce, not unsafe-inline")
+  assert.ok(!/script-src[^;]*'unsafe-inline'/.test(csp), "no unsafe-inline for scripts")
+  const nonce = csp.match(/'nonce-([A-Za-z0-9_-]+)'/)?.[1]
+  assert.ok(nonce, "nonce extractable")
+  assert.ok(result.body.includes(`nonce="${nonce}"`), "the same nonce lands on the inline scripts")
+  assert.ok(!result.body.includes("cdn.tailwindcss"), "no Tailwind CDN script")
+  assert.match(result.body, /src="\/assets\/ide-[a-f0-9]{16}\.js"/, "bundle referenced as a versioned asset")
+
+  // The versioned bundle is served from memory with immutable caching.
+  const assetPath = result.body.match(/src="(\/assets\/ide-[a-f0-9]{16}\.js)"/)?.[1]
+  const asset = await new Promise((resolve, reject) => {
+    const req = http.request(
+      { host: "127.0.0.1", port, method: "GET", path: assetPath, headers: { host: `localhost:${port}` } },
+      (res) => {
+        let data = ""
+        res.on("data", (c) => (data += c))
+        res.on("end", () => resolve({ status: res.statusCode, body: data, cache: res.headers["cache-control"] }))
+      },
+    )
+    req.on("error", reject)
+    req.end()
+  })
+  assert.equal(asset.status, 200)
+  assert.match(asset.cache, /immutable/)
+  assert.ok(asset.body.length > 100_000, "bundle content actually served (not an empty stub)")
+})
+
+test("GET /dashboard ships a nonce CSP and no third-party scripts", async () => {
+  const http = await import("node:http")
+  const result = await new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: "127.0.0.1",
+        port,
+        method: "GET",
+        path: "/dashboard",
+        headers: { host: `localhost:${port}` },
+      },
+      (res) => {
+        let data = ""
+        res.on("data", (c) => (data += c))
+        res.on("end", () => resolve({ status: res.statusCode, body: data, headers: res.headers }))
+      },
+    )
+    req.on("error", reject)
+    req.end()
+  })
+  assert.equal(result.status, 200)
+  const csp = result.headers["content-security-policy"]
+  assert.ok(csp, "dashboard CSP present")
+  assert.match(csp, /script-src 'nonce-/, "script-src uses a per-request nonce")
+  assert.ok(!result.body.includes("cdn.tailwindcss"), "no Tailwind CDN script")
+  assert.ok(!result.body.includes("__POND_NONCE__"), "nonce placeholder replaced")
+})
+
+test("GET /docs ships a script-free CSP", async () => {
+  const http = await import("node:http")
+  const result = await new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: "127.0.0.1",
+        port,
+        method: "GET",
+        path: "/docs/cli-reference",
+        headers: { host: `localhost:${port}` },
+      },
+      (res) => {
+        let data = ""
+        res.on("data", (c) => (data += c))
+        res.on("end", () => resolve({ status: res.statusCode, headers: res.headers }))
+      },
+    )
+    req.on("error", reject)
+    req.end()
+  })
+  assert.equal(result.status, 200)
+  const csp = result.headers["content-security-policy"]
+  assert.ok(csp, "docs CSP present")
+  assert.match(csp, /script-src 'none'/, "docs pages run no scripts at all")
 })
 
 // ---- agent docs ----

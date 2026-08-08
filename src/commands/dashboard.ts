@@ -29,7 +29,11 @@ function resolveApiUrl(arg: string | undefined): { apiUrl: string; source: strin
   }
 }
 
-function openInBrowser(url: string): boolean {
+// Launch the platform browser. spawn's `error` event fires ASYNCHRONOUSLY for
+// a missing binary (e.g. no xdg-open), so failure can only be reported through
+// a promise — the old synchronous `return true` made the "could not launch"
+// branch dead in exactly the case it exists for.
+function openInBrowser(url: string): Promise<boolean> {
   const platform = process.platform
   let cmd: string
   let args: string[]
@@ -44,16 +48,14 @@ function openInBrowser(url: string): boolean {
     cmd = "xdg-open"
     args = [url]
   }
-  try {
+  return new Promise((resolve) => {
     const child = spawn(cmd, args, { stdio: "ignore", detached: true })
-    child.on("error", () => {
-      // swallow — caller already printed the URL
+    child.once("error", () => resolve(false))
+    child.once("spawn", () => {
+      child.unref()
+      resolve(true)
     })
-    child.unref()
-    return true
-  } catch {
-    return false
-  }
+  })
 }
 
 export const dashboardCommand = defineCommand({
@@ -89,7 +91,7 @@ export const dashboardCommand = defineCommand({
       return
     }
 
-    const opened = openInBrowser(url)
+    const opened = await openInBrowser(url)
     if (!opened) {
       console.error(`Could not launch a browser. Open the URL above manually.`)
     }

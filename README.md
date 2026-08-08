@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <img alt="Node 18+" src="https://img.shields.io/badge/node-%3E%3D18-16351f?style=flat-square" />
+  <img alt="Node 20.19+" src="https://img.shields.io/badge/node-%3E%3D20.19-16351f?style=flat-square" />
   <img alt="TypeScript" src="https://img.shields.io/badge/typescript-first-0f172a?style=flat-square" />
   <img alt="Runtime" src="https://img.shields.io/badge/runtime-hono%20%2B%20sqlite-10243f?style=flat-square" />
   <img alt="Client" src="https://img.shields.io/badge/client-preact-2a163c?style=flat-square" />
@@ -281,7 +281,13 @@ Pond ships a self-hostable control plane that fronts multiple capsule deploys be
 
 ### Threat model
 
-The hosted control plane is intended for **trusted deployers** (you and your team). Isolation between deploys is V8-level (one Node child process per deploy) — not OS-level. Sibling deploys run under the same UID and can read each other's files. Do **not** host untrusted third-party code on a single pond host yet.
+The hosted control plane is intended for **trusted deployers** (you and your team), with defense-in-depth layers for the anonymous-deploy path:
+
+1. **One Node child process per deploy**, launched under the `--permission` model with read/write confined to its own deploy dir (`--allow-fs-read/write=<deployDir>`, read-only pond runtime) — Node 22+; the host logs a warning and degrades to shims only on older runtimes.
+2. **JS network shims** for restricted capsules: `globalThis.fetch`, best-effort `undici.fetch`, `net.Socket.prototype.connect` (which closes `node:http`, `node:https` and `tls.connect`), plus `dns.lookup`/`dns.promises.resolve`/`dns.Resolver` and `node:dgram` — all throw `Outbound network access disabled for anonymous deploys`. This is defense-in-depth, not an airtight sandbox: a native addon could bypass the JS layer.
+3. **OS-level confinement (optional, recommended for hostile tenants)**: `--capsule-fs-isolation=bwrap` puts each worker in a bubblewrap mount namespace exposing only its own deploy dir (rw) + the pond runtime (ro) — sibling deploys and control.db are physically unreachable; `--capsule-cgroup-root` gives each capsule its own cgroup v2 cpu/memory/pids limits; the nft egress firewall (`deploy/capsule-egress.nft`) is the real network boundary. Without cgroups the nft rules match nothing — the host warns loudly about this.
+
+The host's own file operations on deploy dirs are symlink-safe (tenant-planted symlinks can't redirect reads/writes out of the deploy dir), deploy records are corruption-tolerant, and session secrets are generated per deploy — one tenant cannot forge another tenant's sessions. Sibling deploys still share the same UID; run the OS-level layers before hosting untrusted third-party code.
 
 ### Bootstrap quickstart
 
@@ -343,7 +349,7 @@ The sweeper runs every 60s and at host startup.
 - `--allow-fs-write=<deploy dir>`
 - `--allow-addons` (required so better-sqlite3 can load — Node warns about this)
 
-In addition, three things are patched at boot to block outbound network: `globalThis.fetch`, best-effort `undici.fetch`, and `net.Socket.prototype.connect` (which closes `node:http`, `node:https`, and `tls.connect`, all of which go through `net.Socket`). All four throw `Outbound network access disabled for anonymous deploys`. This is **defense-in-depth, not an airtight sandbox** — a capsule that ships a native module could bypass the JS-layer patch entirely, and `dns.lookup` still resolves names. The point is to make the common case (an anonymous deploy that calls out to the internet) fail loudly. For real network isolation, run the host behind an outbound-blocking firewall (iptables/pf). Authenticated deploys are NOT subject to the permission model or the network shims. On Node < 22, the permission model is disabled (host logs a warning at startup) but the network shims still apply.
+In addition, the network layer is patched at boot to block outbound traffic for restricted capsules: `globalThis.fetch`, best-effort `undici.fetch`, and `net.Socket.prototype.connect` (which closes `node:http`, `node:https`, and `tls.connect`, all of which go through `net.Socket`), plus `dns.lookup`, `dns.promises.resolve`, `dns.Resolver`, and `node:dgram` — all throw `Outbound network access disabled for anonymous deploys`. This is **defense-in-depth, not an airtight sandbox** — a capsule that ships a native module could bypass the JS-layer patch entirely. The point is to make the common case (an anonymous deploy that calls out to the internet) fail loudly. For real network isolation, run the OS egress firewall (`deploy/capsule-egress.nft`) with `--capsule-cgroup-root`, or block outbound at the host firewall (iptables/pf). Authenticated deploys are NOT subject to the permission model or the network shims. On Node < 22, the permission model is disabled (host logs a warning at startup) but the network shims still apply.
 
 **What anonymous deploys cannot do:**
 

@@ -45,6 +45,41 @@ async function findAvailablePort(start: number, maxAttempts = 20): Promise<numbe
   throw new Error(`No free port in range ${start}–${start + maxAttempts - 1}`)
 }
 
+// Probe-then-bind has a TOCTOU window (another process can grab the port
+// between the probe and serve()), and serve() would otherwise emit an
+// unhandled `error` event. Retry the next free port a few times before giving
+// up; post-listen errors get a friendly message instead of a raw crash.
+async function serveWithFallback(fetchFn: Parameters<typeof serve>[0]["fetch"], startPort: number, hostname: string) {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const tryPort = await findAvailablePort(startPort + attempt)
+    const server = serve({ fetch: fetchFn, port: tryPort, hostname })
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const onError = (err: NodeJS.ErrnoException) => {
+          server.removeListener("listening", onListening)
+          reject(err)
+        }
+        const onListening = () => {
+          server.removeListener("error", onError)
+          resolve()
+        }
+        server.once("error", onError)
+        server.once("listening", onListening)
+      })
+      server.on("error", (err) => {
+        console.error(`[pond] dev server error: ${err?.message ?? err}`)
+        process.exit(1)
+      })
+      return server
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code
+      if (code !== "EADDRINUSE" && code !== "EACCES") throw err
+      console.log(`  port ${tryPort} in use — using ${tryPort + 1} instead`)
+    }
+  }
+  throw new Error(`No free port in range ${startPort}–${startPort + 4}`)
+}
+
 export async function startDevServer(requestedPort: number): Promise<void> {
   const port = await findAvailablePort(requestedPort)
   if (port !== requestedPort) {
@@ -59,13 +94,19 @@ export async function startDevServer(requestedPort: number): Promise<void> {
     console.error("No server/index.ts found. Run `npx pond new <name>` first.")
     process.exit(1)
   }
+  if (!fs.existsSync(clientFile)) {
+    console.error("No client/index.tsx found. Run `npx pond new <name>` first.")
+    process.exit(1)
+  }
 
   let guestName = "guest"
   let currentApp = new Hono()
   let currentRuntime: {
     def: { sockets?: Record<string, { _kind: "socket"; handler: SocketHandler }> }
     buildContext: (cookieHeader: string | null | undefined) => Promise<CapsuleContext>
+    close: () => void
   } | null = null
+  let currentClose: (() => void) | null = null
   let clientHtml = ""
   const reloadClients = new Set<ReadableStreamDefaultController<Uint8Array>>()
   const logClients = new Set<ReadableStreamDefaultController<Uint8Array>>()
@@ -112,8 +153,12 @@ export async function startDevServer(requestedPort: number): Promise<void> {
       await next()
     })
 
-    clientHtml = await buildClient(clientFile, { liveReload: true })
-    nextApp.get("/", (c) => c.html(clientHtml))
+    // Build into locals and commit only after BOTH builds succeeded — a
+    // partial failure must never pair the new client HTML with the old
+    // runtime (the previous code assigned clientHtml first, so a server
+    // build error left the new client talking to the old API).
+    const nextClientHtml = await buildClient(clientFile, { liveReload: true })
+    nextApp.get("/", (c) => c.html(nextClientHtml))
     nextApp.get("/assets/*", (c) => c.text("", 404))
 
     const runtime = await createRuntime(serverFile, cwd, {
@@ -155,7 +200,12 @@ export async function startDevServer(requestedPort: number): Promise<void> {
             streamController = controller
             logClients.add(controller)
             for (const entry of recentLogs) {
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify(entry)}\n\n`))
+              try {
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify(entry)}\n\n`))
+              } catch {
+                // client disconnected mid-replay
+                return
+              }
             }
           },
           cancel() {
@@ -207,18 +257,36 @@ export async function startDevServer(requestedPort: number): Promise<void> {
       })
     })
 
+    // Commit atomically: swap the app + runtime + client HTML together, then
+    // release the previous runtime's SQLite handle. The old app keeps serving
+    // for the whole (async) build, so a failed rebuild leaves it untouched.
+    const prevClose = currentClose
     currentApp = nextApp
     currentRuntime = runtime
+    currentClose = runtime.close
+    clientHtml = nextClientHtml
+    prevClose?.()
   }
 
+  // Rebuilds must be serialized: buildApp is async (esbuild + runtime boot),
+  // so without a chain two rapid rebuilds race on the same .pond/server.mjs
+  // and data.db, and last-writer-wins on currentApp/currentRuntime. Chaining
+  // makes each rebuild wait for the previous to settle.
+  let rebuildChain: Promise<void> = Promise.resolve()
   const rebuild = async (reason: "server" | "client" | "env") => {
-    try {
-      await buildApp()
-      broadcast(reloadClients, { reason })
-      console.log(`[pond] rebuilt ${reason}`)
-    } catch (error) {
-      console.error(`[pond] failed to rebuild ${reason}`, error)
+    const run = async () => {
+      try {
+        await buildApp()
+        broadcast(reloadClients, { reason })
+        console.log(`[pond] rebuilt ${reason}`)
+      } catch (error) {
+        console.error(`[pond] failed to rebuild ${reason}`, error)
+      }
     }
+    // Run even if the previous link failed, so one broken build can't wedge
+    // the chain; run() never throws, so the chain stays healthy.
+    rebuildChain = rebuildChain.then(run, run)
+    await rebuildChain
   }
 
   await buildApp()
@@ -277,25 +345,42 @@ export async function startDevServer(requestedPort: number): Promise<void> {
     }, DEBOUNCE_MS)
   }
 
+  // Watch the WHOLE project, not just the two entries: shared/* is bundled
+  // into both the server and client builds, so watching only server/index.ts
+  // + client/index.tsx silently ignored shared edits (stale app, no reload).
+  // node_modules/.pond/.git are excluded — they change constantly and never
+  // affect the bundle. Both `change` AND `add` are handled: a brand-new
+  // shared/ file (or a new imported helper) is just as build-relevant as an
+  // edit to an existing one.
+  const onProjectChange = (changedPath: string) => {
+    if (changedPath === clientFile) {
+      scheduleRebuild("client")
+      return
+    }
+    if (changedPath === envFile) {
+      scheduleRebuild("env")
+      return
+    }
+    // server/*, shared/*, package.json, or anything else that could be
+    // imported — a full rebuild covers all of them.
+    scheduleRebuild("server")
+  }
   chokidar
-    .watch([serverFile, clientFile, envFile], {
+    .watch(cwd, {
       ignoreInitial: true,
+      ignored: (p: string) => {
+        if (p === cwd) return false
+        const rel = path.relative(cwd, p)
+        if (!rel || rel.startsWith("..")) return true
+        return /(^|\/)(node_modules|\.pond|\.git)(\/|$)/.test(rel)
+      },
     })
-    .on("change", (changedPath) => {
-      if (changedPath === clientFile) {
-        scheduleRebuild("client")
-        return
-      }
-      if (changedPath === envFile) {
-        scheduleRebuild("env")
-        return
-      }
-      scheduleRebuild("server")
-    })
+    .on("change", onProjectChange)
+    .on("add", onProjectChange)
 
   console.log(`\n  pond dev server running at http://localhost:${port}\n`)
 
-  const httpServer = serve({ fetch: app.fetch, port, hostname: "127.0.0.1" })
+  const httpServer = await serveWithFallback(app.fetch, port, "127.0.0.1")
 
   // Same /api/socket/<name> upgrade flow as start-server.ts, except hot-reload
   // aware — each connection looks up the live capsule definition rather than

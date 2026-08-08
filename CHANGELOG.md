@@ -5,6 +5,42 @@ Versioning: [Semver](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security (host)
+
+- **Symlink-safe host file operations.** Capsules have read/write access to their own deploy dir, so the host now treats it as attacker-controlled: every host-side read verifies the realpath stays inside the deploy dir, and every write goes through temp-file + rename (which replaces a planted symlink instead of following it). Previously a capsule could plant a symlink and exfiltrate `host-token` or a sibling's `.env.pond.server`, or redirect a host write onto `deploy-worker.js` (RCE as the host user). Bundler entries and imports are also confined to the capsule root (a `../../host-token` import can no longer be bundled into the deploy).
+- **Deploy records are corruption-tolerant.** `deploy.json` lives in the tenant-writable dir; a corrupted/truncated file previously crashed the whole control plane through the websocket-upgrade, crash-respawn and boot paths. Reads now return null and degrade to 404s.
+- **Per-deploy session secrets.** The auto-injected `POND_SESSION_SECRET` is now generated per deploy (reused across updates), not host-wide — a shared secret in the tenant-readable env file would have let any tenant forge sessions for every other capsule.
+- **Serialized per-deploy boots.** Concurrent redeploys (IDE autobuild + env update, two tabs) previously forked two workers and orphaned the first — invisible to the idle reaper and disk watchdog. Boots are now chained per deploy, and deletes/terminates wait for in-flight boots.
+- **Quota checks before writes.** Redeploys build into a staging dir and env updates check projected size BEFORE persisting, so a 413 can no longer leave an oversized bundle/env on disk.
+- **Flag validation fails closed.** `--capsule-fs-isolation=bwarp` (typo) previously booted capsules unconfined; non-numeric `--anonymous-rate-per-hour` silently disabled rate limiting. Both now refuse to start / heal to the default.
+- **Proxy + websocket hardening.** Per-deploy in-flight proxy cap, 15s connect timeout on websocket upgrades (with a catch-all so a failure can't take down the process), and the (staged) egress proxy no longer forwards the per-deploy credential upstream and only allows web ports.
+- **Strict CSP on host pages.** IDE/dashboard run a nonce-based `script-src` (no `unsafe-inline`, no third-party scripts); docs pages ship `script-src 'none'`. Tailwind is compiled to a static stylesheet at build time — the `cdn.tailwindcss.com` script (a third-party script with full page privileges and no integrity) is gone. Frontend bundles are served as versioned hashed assets with immutable caching instead of re-sending ~600 KB inline per page load.
+
+### Added
+
+- `pond --version` works (was an error before).
+- IDE log panel now streams via the control plane's owner-authed logs endpoint (the old cross-origin SSE stream was CORS-blocked in production) with auto-reconnect + a reconnecting indicator.
+- Dashboard returns to sign-in on any 401/403 (token rotated elsewhere no longer leaves a half-broken UI); clipboard failures are reported instead of claiming success.
+- CI: generated-artifact freshness check, dependabot, a release workflow (`npm publish --provenance` from a `v*` tag), workflow action bumps, concurrency group + job timeouts.
+- `.editorconfig`; `bin/pondsh.js` / `bin/pond-mcp.js` are executable.
+
+### Fixed
+
+- **`new --generate` validates the prompt before scaffolding** — a missing prompt no longer strands a half-created project dir.
+- **Dev-server rebuilds are serialized and watch the whole project** — `shared/*` edits now hot-reload (previously only `server/index.ts`, `client/index.tsx` and the env file were watched), and a failed rebuild can no longer pair the new client HTML with the old runtime or leak a SQLite handle per rebuild.
+- **Scaffolded session secret is actually loaded** — the template's `POND_SESSION_SECRET` line was commented out (`#`), so the generated secret never took effect and dev sessions died on every restart.
+- **MCP server speaks valid JSON-RPC** — notifications are never answered, missing params return `-32602` (not `-32603`), `env_set`/`write_file` match the host API (they were sending the wrong shapes and writing JSON-encoded content to files), paths are URL-encoded, and control-plane calls have a 30s timeout.
+- **Client library** — mutations can no longer report failure after a server-side success (refetch pass is settled), server error bodies are included in thrown errors, requests have timeouts + abort-on-unmount, and the whole surface is documented.
+- **Runtime** — `insert({})`/`update(id, {})` produce valid SQL, rate-limit buckets are swept (unbounded memory leak), `retry-after` matches the limit window, forwarded headers are only trusted with `TRUST_PROXY=1`, endpoint methods are validated, blob-prefix `LIKE` wildcards are escaped, and AI/Shopify/Resend/OAuth calls have 30s timeouts.
+- **CLI** — expected failures print one-line errors instead of raw stack dumps (shared `fail()`/`httpError()` helpers), bare `pond auth|token|user|admin` print help and exit 0, ports are validated loudly, `detectClaude` no longer spawns a directory, `db restore`/`db migrate` check status before parsing JSON, log streams flush the final event, and browser launch failures are detected.
+- **Orphaned artifacts removed** — the compiled `edit`/`agent-run` leftovers (a deleted feature) no longer ship in the npm package.
+- **Tests** — three always-pass assertions now assert something real, and the duplicated host fixtures live in `test/helpers.mjs`.
+
+### Changed
+
+- `engines` is now `node >=20.19` (the code uses `import.meta.dirname`; Node 18 never worked), README badge + CONTRIBUTING updated, and the README sandbox/threat-model sections now describe what the code actually does (dns/dgram sealed, bwrap + cgroup + nft layers, symlink-safe host ops, per-deploy secrets).
+- Unused dependencies removed (`preact-render-to-string`, `codemirror`, direct `@codemirror/language`); `tailwindcss` added as a devDependency for the compiled stylesheet.
+
 ## [0.5.2] - 2026-06-07
 
 ### Security
@@ -19,7 +55,7 @@ Versioning: [Semver](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **Gitleaks secret-scan in CI** (`/.github/workflows/secret-scan.yml`) and a **no-deps pre-commit hook** that runs gitleaks on staged files. Catches accidental credential commits before they land on `main`.
+- **Gitleaks secret-scan in CI** (`/.github/workflows/secret-scan.yml`) and a **no-deps pre-commit hook** (`scripts/secret-scan.sh`, a pattern scanner over staged files). Catches accidental credential commits before they land on `main`; gitleaks runs in CI on full history.
 
 ## [0.5.1] - 2026-05-31
 

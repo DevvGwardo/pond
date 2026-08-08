@@ -3,6 +3,7 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { saveCredentials } from "../host/credentials.js"
 import { deployRecordPath, readDeployRecord } from "../host/deploy-record.js"
+import { fetchOrFail } from "./shared.js"
 
 // Friendly first-account flow: `pond signup <name>` creates an account on the
 // control plane and claims the local anonymous deploy under it. Equivalent to
@@ -73,7 +74,7 @@ export const signupCommand = defineCommand({
       body.envText = fs.readFileSync(envFile, "utf-8")
     }
 
-    const response = await fetch(`${apiUrl}/api/deploys/${deploy.deployId}/claim`, {
+    const response = await fetchOrFail(`${apiUrl}/api/deploys/${deploy.deployId}/claim`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),

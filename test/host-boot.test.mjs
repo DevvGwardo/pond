@@ -17,10 +17,10 @@ import { spawn } from "node:child_process"
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import * as path from "node:path"
-import * as net from "node:net"
 import { randomBytes } from "node:crypto"
 
 import { stopProc } from "./proc-kill.mjs"
+import { pickFreePort } from "./helpers.mjs"
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "..")
 const CLI_PATH = path.join(REPO_ROOT, "src", "cli.js")
@@ -38,19 +38,6 @@ after(async () => {
     if (existsSync(d)) rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })
-
-async function pickFreePort() {
-  return await new Promise((resolve, reject) => {
-    const s = net.createServer()
-    s.unref()
-    s.on("error", reject)
-    s.listen(0, "127.0.0.1", () => {
-      const addr = s.address()
-      const port = typeof addr === "object" && addr ? addr.port : 0
-      s.close(() => resolve(port))
-    })
-  })
-}
 
 test("pond host boots with an existing deploy on disk (TDZ-on-publicListingCache regression)", async () => {
   const dataDir = mkdtempSync(path.join(tmpdir(), "pond-host-boot-"))
@@ -138,10 +125,10 @@ test("pond host boots with an existing deploy on disk (TDZ-on-publicListingCache
     )
   }
   assert.equal(result, "healthy", `host never became healthy: stderr=\n${stderrBuf}`)
-  assert.match(
-    stderrBuf + "\n",
-    /(^[\s\S]*$)/, // catch-all so we still record stderr in test output via the assertion message above
-  )
+  // Record stderr in the assertion message so failures are debuggable. The
+  // old catch-all regex matched every string and could never fail — replace
+  // it with a real (always-true) assertion that carries the stderr.
+  assert.ok(true, `host stderr on boot:\n${stderrBuf}`)
 })
 
 // P0 item 1: the gated/soft security posture must FAIL LOUD at boot, not silently

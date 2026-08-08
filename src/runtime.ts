@@ -6,6 +6,8 @@ import * as path from "node:path"
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto"
 import { pathToFileURL } from "node:url"
 import { SignJWT, jwtVerify } from "jose"
+import { confineImportsTo } from "./build-confinement.js"
+import { containedRealPath } from "./host/fs-safe.js"
 import {
   CapsuleAi,
   CapsuleAuth,
@@ -38,6 +40,15 @@ const OAUTH_STATE_COOKIE = "pond_google_oauth_state"
 const OAUTH_VERIFIER_COOKIE = "pond_google_oauth_verifier"
 const GITHUB_STATE_COOKIE = "pond_github_oauth_state"
 
+// Outbound calls from capsule code (AI providers, Shopify, Resend, OAuth
+// userinfo) must not hang a request forever on a stalled upstream. 30s covers
+// every one of these APIs' worst legitimate latency; anything slower is a
+// failure worth surfacing, not waiting on.
+const UPSTREAM_TIMEOUT_MS = 30_000
+function upstreamFetch(url: string, init?: RequestInit): Promise<Response> {
+  return fetch(url, { ...init, signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS) })
+}
+
 export async function createRuntime(
   serverFile: string,
   cwd: string,
@@ -48,6 +59,7 @@ export async function createRuntime(
   def: CapsuleDefinition
   env: Record<string, string>
   buildContext: (cookieHeader: string | null | undefined) => Promise<CapsuleContext>
+  close: () => void
 }> {
   // Build-time only. Dynamic so the hosted capsule worker (which imports this
   // module via createRuntimeFromDeployBundle and never builds) doesn't carry
@@ -86,6 +98,7 @@ export async function createRuntimeFromDeployBundle(
   def: CapsuleDefinition
   env: Record<string, string>
   buildContext: (cookieHeader: string | null | undefined) => Promise<CapsuleContext>
+  close: () => void
 }> {
   const mod: ServerModule = await import(`${pathToFileURL(bundleFile).href}?t=${Date.now()}`)
   return createRuntimeFromDefinition(mod.default, cwd, options)
@@ -230,7 +243,7 @@ function createAi(env: Record<string, string>): CapsuleAi {
     maxTokens?: number
     temperature?: number
   }) {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
+    const res = await upstreamFetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
         "x-api-key": anthropicKey,
@@ -257,7 +270,7 @@ function createAi(env: Record<string, string>): CapsuleAi {
     maxTokens?: number
     temperature?: number
   }) {
-    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    const res = await upstreamFetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: { authorization: `Bearer ${openaiKey}`, "content-type": "application/json" },
       body: JSON.stringify({
@@ -279,7 +292,7 @@ function createAi(env: Record<string, string>): CapsuleAi {
     maxTokens?: number
     temperature?: number
   }) {
-    const res = await fetch(`${hermesUrl.replace(/\/$/, "")}/v1/chat/completions`, {
+    const res = await upstreamFetch(`${hermesUrl.replace(/\/$/, "")}/v1/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -318,7 +331,9 @@ function createBlob(cwd: string, db: Database.Database): CapsuleBlob {
   )
   const getMeta = db.prepare("SELECT key, contentType, size FROM _pond_blobs WHERE key = ?")
   const del = db.prepare("DELETE FROM _pond_blobs WHERE key = ?")
-  const list = db.prepare("SELECT key, contentType, size FROM _pond_blobs WHERE key LIKE ? ORDER BY key ASC")
+  const list = db.prepare(
+    "SELECT key, contentType, size FROM _pond_blobs WHERE key LIKE ? ESCAPE '\\' ORDER BY key ASC",
+  )
 
   function keyToPath(key: string): string {
     if (!/^[A-Za-z0-9._/-]+$/.test(key)) throw new Error(`invalid blob key: ${key}`)
@@ -357,7 +372,10 @@ function createBlob(cwd: string, db: Database.Database): CapsuleBlob {
       del.run(key)
     },
     async list(prefix) {
-      const rows = list.all(`${prefix ?? ""}%`) as Array<{ key: string; contentType: string; size: number }>
+      // Escape LIKE wildcards in the prefix so a key containing `%` or `_`
+      // lists only itself, not every key sharing the wildcard characters.
+      const escaped = (prefix ?? "").replace(/[\\%_]/g, (c) => `\\${c}`)
+      const rows = list.all(`${escaped}%`) as Array<{ key: string; contentType: string; size: number }>
       return rows
     },
   }
@@ -382,7 +400,7 @@ export function createShopify(env: Record<string, string>): CapsuleShopify {
       const apiVersion = env.SHOPIFY_API_VERSION || "2025-01"
       const url = `https://${domain}/admin/api/${apiVersion}/graphql.json`
 
-      const res = await fetch(url, {
+      const res = await upstreamFetch(url, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -417,6 +435,7 @@ function createRuntimeFromDefinition(
   def: CapsuleDefinition
   env: Record<string, string>
   buildContext: (cookieHeader: string | null | undefined) => Promise<CapsuleContext>
+  close: () => void
 } {
   const dbPath = path.join(cwd, ".pond", "data.db")
   fs.mkdirSync(path.dirname(dbPath), { recursive: true })
@@ -470,9 +489,25 @@ function createRuntimeFromDefinition(
   const metrics = new Map<string, RouteMetric>()
   const rateBuckets = new Map<string, RateBucket>()
 
-  function rateAllow(route: string, key: string, perMinute: number | undefined, perHour: number | undefined): boolean {
+  // Expired buckets are otherwise only replaced when their key returns —
+  // every distinct visitor (or spoofed forwarded-header value) permanently
+  // adds entries. Sweep them so a long-lived worker's map stays bounded.
+  const rateSweepTimer = setInterval(() => {
     const now = Date.now()
-    let ok = true
+    for (const [bk, b] of rateBuckets) {
+      if (now - b.windowStart > 3_600_000) rateBuckets.delete(bk)
+    }
+  }, 5 * 60_000)
+  rateSweepTimer.unref()
+
+  function rateAllow(
+    route: string,
+    key: string,
+    perMinute: number | undefined,
+    perHour: number | undefined,
+  ): { ok: boolean; retryAfterSeconds: number } {
+    const now = Date.now()
+    let retryAfterSeconds = 0
     if (typeof perMinute === "number") {
       const bk = `m:${route}:${key}`
       const cur = rateBuckets.get(bk)
@@ -480,20 +515,24 @@ function createRuntimeFromDefinition(
         rateBuckets.set(bk, { windowStart: now, count: 1 })
       } else {
         cur.count += 1
-        if (cur.count > perMinute) ok = false
+        if (cur.count > perMinute) {
+          retryAfterSeconds = Math.max(1, Math.ceil((cur.windowStart + 60_000 - now) / 1000))
+        }
       }
     }
-    if (ok && typeof perHour === "number") {
+    if (retryAfterSeconds === 0 && typeof perHour === "number") {
       const bk = `h:${route}:${key}`
       const cur = rateBuckets.get(bk)
       if (!cur || now - cur.windowStart > 3_600_000) {
         rateBuckets.set(bk, { windowStart: now, count: 1 })
       } else {
         cur.count += 1
-        if (cur.count > perHour) ok = false
+        if (cur.count > perHour) {
+          retryAfterSeconds = Math.max(1, Math.ceil((cur.windowStart + 3_600_000 - now) / 1000))
+        }
       }
     }
-    return ok
+    return { ok: retryAfterSeconds === 0, retryAfterSeconds }
   }
 
   async function resolveAuth(cookies: string | null | undefined): Promise<CapsuleAuth> {
@@ -618,7 +657,7 @@ function createRuntimeFromDefinition(
         return c.text("Invalid OAuth callback", 400)
       }
       const tokens = await google.validateAuthorizationCode(code, codeVerifier)
-      const userInfoRes = await fetch("https://openidconnect.googleapis.com/v1/userinfo", {
+      const userInfoRes = await upstreamFetch("https://openidconnect.googleapis.com/v1/userinfo", {
         headers: { authorization: `Bearer ${tokens.accessToken()}` },
       })
       if (!userInfoRes.ok) return c.text("Failed to fetch Google user info", 500)
@@ -663,7 +702,7 @@ function createRuntimeFromDefinition(
         return c.text("Invalid OAuth callback", 400)
       }
       const tokens = await github.validateAuthorizationCode(code)
-      const userRes = await fetch("https://api.github.com/user", {
+      const userRes = await upstreamFetch("https://api.github.com/user", {
         headers: { authorization: `Bearer ${tokens.accessToken()}`, accept: "application/vnd.github+json" },
       })
       if (!userRes.ok) return c.text("Failed to fetch GitHub user info", 500)
@@ -677,7 +716,7 @@ function createRuntimeFromDefinition(
       // Email may be private; fetch it explicitly if missing.
       let email = gh.email
       if (!email) {
-        const emailRes = await fetch("https://api.github.com/user/emails", {
+        const emailRes = await upstreamFetch("https://api.github.com/user/emails", {
           headers: { authorization: `Bearer ${tokens.accessToken()}`, accept: "application/vnd.github+json" },
         })
         if (emailRes.ok) {
@@ -720,7 +759,7 @@ function createRuntimeFromDefinition(
       // via the EMAIL_FROM + RESEND_API_KEY (or similar) envs and replace this
       // log-only fallback.
       if (env.RESEND_API_KEY && env.EMAIL_FROM) {
-        await fetch("https://api.resend.com/emails", {
+        await upstreamFetch("https://api.resend.com/emails", {
           method: "POST",
           headers: { authorization: `Bearer ${env.RESEND_API_KEY}`, "content-type": "application/json" },
           body: JSON.stringify({
@@ -788,17 +827,24 @@ function createRuntimeFromDefinition(
         const token = readCookieValue(cookie, SESSION_COOKIE) ?? "anon"
         return token.slice(0, 32)
       }
-      return c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ?? c.req.header("x-real-ip") ?? "unknown"
+      // Only trust forwarded headers when the capsule opts in via TRUST_PROXY=1
+      // in .env.pond.server — a client can spoof X-Forwarded-For and rotate
+      // past the limit otherwise.
+      if (env.TRUST_PROXY === "1") {
+        return c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ?? c.req.header("x-real-ip") ?? "unknown"
+      }
+      return "unknown"
     }
 
     function enforceRateLimit(c: any, routeName: string): Response | null {
       const limit = def.rateLimit?.[routeName]
       if (!limit) return null
       const key = rateKey(c, limit.by)
-      if (!rateAllow(routeName, key, limit.perMinute, limit.perHour)) {
+      const verdict = rateAllow(routeName, key, limit.perMinute, limit.perHour)
+      if (!verdict.ok) {
         return new Response(JSON.stringify({ error: "Rate limited" }), {
           status: 429,
-          headers: { "content-type": "application/json", "retry-after": "60" },
+          headers: { "content-type": "application/json", "retry-after": String(verdict.retryAfterSeconds) },
         })
       }
       return null
@@ -844,6 +890,14 @@ function createRuntimeFromDefinition(
     for (const [name, handler] of Object.entries(def.endpoints ?? {})) {
       const ep = handler as any
       const method = ep._method?.toLowerCase() ?? "get"
+      // A bad method would otherwise crash mount with `app[method] is not a
+      // function` and no clue which endpoint declared it.
+      const ENDPOINT_METHODS = new Set(["get", "post", "put", "delete", "patch", "head", "options"])
+      if (!ENDPOINT_METHODS.has(method)) {
+        throw new Error(
+          `endpoint "${name}" declares unsupported method "${ep._method}" (allowed: get|post|put|delete|patch|head|options)`,
+        )
+      }
       const epPath = ep._path ?? `/api/${name}`
 
       app[method as "get" | "post"](epPath, async (c) => {
@@ -880,7 +934,24 @@ function createRuntimeFromDefinition(
     })
   }
 
-  return { mount, db, def, env, buildContext }
+  return {
+    mount,
+    db,
+    def,
+    env,
+    buildContext,
+    // Release the runtime's resources (SQLite handle, sweep timer). The dev
+    // server calls this on every rebuild so a hot-reload loop doesn't leak a
+    // file descriptor per iteration.
+    close: () => {
+      clearInterval(rateSweepTimer)
+      try {
+        db.close()
+      } catch {
+        // already closed
+      }
+    },
+  }
 }
 
 export async function buildForDeploy(
@@ -892,6 +963,13 @@ export async function buildForDeploy(
   fs.mkdirSync(path.dirname(outfile), { recursive: true })
 
   const esbuild = await import("esbuild")
+  // confineImportsTo: for hosted deploys the source tree is tenant-controlled,
+  // so relative imports must not escape the project root (see the plugin docs).
+  // The entry itself is realpath-checked because esbuild reads it through
+  // symlinks — a planted symlink must not feed host files into the bundle.
+  if (!containedRealPath(cwd, serverFile)) {
+    throw new Error("server entry must resolve inside the project directory")
+  }
   await esbuild.build({
     entryPoints: [serverFile],
     bundle: true,
@@ -906,6 +984,7 @@ export async function buildForDeploy(
     alias: {
       "pond/server": path.resolve(import.meta.dirname, "../src/server/index.ts"),
     },
+    plugins: [confineImportsTo(cwd)],
   })
 
   const hash = createHash("sha256").update(fs.readFileSync(outfile)).digest("hex")
@@ -1081,14 +1160,20 @@ function buildDbProxy(db: Database.Database, schema: Record<string, Record<strin
           const keys = Object.keys(data)
           const cols = keys.map(quoteIdent)
           const values = keys.map((key) => coerceBinding(data[key]))
-          db.prepare(
-            `INSERT INTO ${quoteIdent(tableName)} (id, ${cols.join(", ")}) VALUES (?, ${keys.map(() => "?").join(", ")})`,
-          ).run(id, ...values)
+          // Empty data must still produce valid SQL (`(id, ) VALUES (?, )` is
+          // a syntax error) — insert just the row id + timestamps.
+          const colSql = keys.length > 0 ? `, ${cols.join(", ")}` : ""
+          const valSql = keys.length > 0 ? `, ${keys.map(() => "?").join(", ")}` : ""
+          db.prepare(`INSERT INTO ${quoteIdent(tableName)} (id${colSql}) VALUES (?${valSql})`).run(id, ...values)
           return db.prepare(`SELECT * FROM ${quoteIdent(tableName)} WHERE id = ?`).get(id)
         },
         update(id: string, data: Record<string, any>) {
           validateColumns(tableName, data)
           const keys = Object.keys(data)
+          if (keys.length === 0) {
+            // Empty set — a no-op that succeeds (nothing to change).
+            return db.prepare(`SELECT * FROM ${quoteIdent(tableName)} WHERE id = ?`).get(id)
+          }
           const sets = keys.map((key) => `${quoteIdent(key)} = ?`).join(", ")
           db.prepare(`UPDATE ${quoteIdent(tableName)} SET ${sets}, updatedAt = datetime('now') WHERE id = ?`).run(
             ...keys.map((key) => coerceBinding(data[key])),

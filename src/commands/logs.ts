@@ -1,49 +1,5 @@
 import { defineCommand } from "citty"
-import { readDeployRecord } from "../host/deploy-record.js"
-import { hasErrorCode } from "./inspect.js"
-
-interface ResolvedTarget {
-  baseUrl: string
-  headers: Record<string, string>
-  source: "explicit" | "auto-remote" | "local"
-}
-
-// Decide whether to hit the local dev server or the deploy in .pond/
-// deploy.json.
-//
-//   --local true              → localhost:<port> (force)
-//   target is http(s) URL     → that URL
-//   target matches deploy.id  → deploy.url + claim-token header
-//   target is unset, deploy
-//     has remote url+token   → auto-remote (the common case from a deployed
-//                              project — was previously a silent localhost
-//                              call that confused users)
-//   otherwise                 → localhost:<port>
-function resolveTarget(target: string | undefined, port: string, local: boolean): ResolvedTarget {
-  const localhostUrl = `http://localhost:${port}`
-  if (local) {
-    return { baseUrl: localhostUrl, headers: {}, source: "local" }
-  }
-  const deploy = readDeployRecord(process.cwd())
-  if (target) {
-    if (target.startsWith("http://") || target.startsWith("https://")) {
-      return { baseUrl: target.replace(/\/$/, ""), headers: {}, source: "explicit" }
-    }
-    if (deploy?.deployId === target && deploy?.url) {
-      const headers: Record<string, string> = deploy.claimToken ? { "x-pond-claim-token": deploy.claimToken } : {}
-      return { baseUrl: deploy.url, headers, source: "explicit" }
-    }
-    throw new Error(`Unknown deploy target: ${target}`)
-  }
-  if (deploy?.url && deploy?.claimToken) {
-    return {
-      baseUrl: deploy.url,
-      headers: { "x-pond-claim-token": deploy.claimToken },
-      source: "auto-remote",
-    }
-  }
-  return { baseUrl: localhostUrl, headers: {}, source: "local" }
-}
+import { fail, hasErrorCode, resolveTarget } from "./shared.js"
 
 export const logsCommand = defineCommand({
   meta: {
@@ -86,24 +42,36 @@ export const logsCommand = defineCommand({
       throw err
     }
     if (!res.ok || !res.body) {
-      throw new Error(`Request failed: ${res.status}`)
+      fail(`Request failed: HTTP ${res.status} ${res.url}`)
     }
 
     const reader = res.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ""
 
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      const events = buffer.split("\n\n")
-      buffer = events.pop() ?? ""
-      for (const event of events) {
-        const dataLine = event.split("\n").find((line) => line.startsWith("data: "))
-        if (!dataLine) continue
-        console.log(dataLine.slice(6))
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const events = buffer.split("\n\n")
+        buffer = events.pop() ?? ""
+        for (const event of events) {
+          const dataLine = event.split("\n").find((line) => line.startsWith("data: "))
+          if (!dataLine) continue
+          console.log(dataLine.slice(6))
+        }
       }
+      // Flush a trailing event that never got its \n\n terminator (the
+      // capsule died mid-line, or the stream ended between events).
+      const dataLine = buffer.split("\n").find((line) => line.startsWith("data: "))
+      if (dataLine) console.log(dataLine.slice(6))
+    } catch (err) {
+      if (hasErrorCode(err, "ECONNRESET")) {
+        console.error("Log stream ended (the capsule restarted or shut down).")
+        process.exit(0)
+      }
+      throw err
     }
   },
 })

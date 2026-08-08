@@ -34,6 +34,12 @@ const deps = {
 }
 const basic = (id, secret) => "Basic " + Buffer.from(`${id}:${secret}`).toString("base64")
 
+// Tests use ephemeral target ports; the production default policy is web ports
+// only (80/443), so each test widens the set explicitly.
+function proxyWith(deps, extraPorts = []) {
+  return startEgressProxy({ port: 0, allowedPorts: new Set([80, 443, ...extraPorts]) }, deps)
+}
+
 async function startTargetServer() {
   const server = http.createServer((_req, res) => {
     res.writeHead(200, { "content-type": "text/plain" })
@@ -67,7 +73,7 @@ function proxiedHttpGet(proxyPort, absoluteUrl, authHeader) {
 
 test("egress proxy forwards an allowlisted HTTP target with valid credentials", async () => {
   const targetPort = await startTargetServer()
-  const proxy = await startEgressProxy({ port: 0 }, deps)
+  const proxy = await proxyWith(deps, [targetPort])
   cleanup.push(proxy.close)
   const res = await proxiedHttpGet(proxy.port, `http://127.0.0.1:${targetPort}/`, basic("deploy-a", "secret-a"))
   assert.equal(res.status, 200)
@@ -75,7 +81,7 @@ test("egress proxy forwards an allowlisted HTTP target with valid credentials", 
 })
 
 test("egress proxy rejects a host NOT in the deploy's allowlist (403)", async () => {
-  const proxy = await startEgressProxy({ port: 0 }, deps)
+  const proxy = await proxyWith(deps)
   cleanup.push(proxy.close)
   // 127.0.0.1 is allowed for deploy-a, but example.com is not.
   const res = await proxiedHttpGet(proxy.port, "http://example.com/", basic("deploy-a", "secret-a"))
@@ -84,7 +90,7 @@ test("egress proxy rejects a host NOT in the deploy's allowlist (403)", async ()
 
 test("egress proxy rejects an invalid/absent credential (403)", async () => {
   const targetPort = await startTargetServer()
-  const proxy = await startEgressProxy({ port: 0 }, deps)
+  const proxy = await proxyWith(deps)
   cleanup.push(proxy.close)
   const bad = await proxiedHttpGet(proxy.port, `http://127.0.0.1:${targetPort}/`, basic("deploy-a", "wrong-secret"))
   assert.equal(bad.status, 403, "wrong secret denied")
@@ -99,7 +105,7 @@ test("egress proxy CONNECT tunnels to an allowlisted host (happy path)", async (
   cleanup.push(() => new Promise((r) => echo.close(() => r())))
   const targetPort = echo.address().port
 
-  const proxy = await startEgressProxy({ port: 0 }, deps)
+  const proxy = await proxyWith(deps, [targetPort])
   cleanup.push(proxy.close)
 
   const echoed = await new Promise((resolve, reject) => {
@@ -129,14 +135,14 @@ test("egress proxy CONNECT tunnels to an allowlisted host (happy path)", async (
 })
 
 test("egress proxy rejects a non-http(s) scheme on the forward path (400)", async () => {
-  const proxy = await startEgressProxy({ port: 0 }, deps)
+  const proxy = await proxyWith(deps)
   cleanup.push(proxy.close)
   const res = await proxiedHttpGet(proxy.port, "ftp://127.0.0.1/x", basic("deploy-a", "secret-a"))
   assert.equal(res.status, 400, "only absolute http URIs are forward-proxied; https uses CONNECT")
 })
 
 test("egress proxy rejects a malformed Proxy-Authorization header (403)", async () => {
-  const proxy = await startEgressProxy({ port: 0 }, deps)
+  const proxy = await proxyWith(deps)
   cleanup.push(proxy.close)
   const notBasic = await proxiedHttpGet(proxy.port, "http://127.0.0.1/", "Bearer abc")
   assert.equal(notBasic.status, 403, "non-Basic scheme denied")
@@ -145,7 +151,7 @@ test("egress proxy rejects a malformed Proxy-Authorization header (403)", async 
 })
 
 test("egress proxy CONNECT denies a disallowed host before tunneling", async () => {
-  const proxy = await startEgressProxy({ port: 0 }, deps)
+  const proxy = await proxyWith(deps)
   cleanup.push(proxy.close)
   const statusLine = await new Promise((resolve, reject) => {
     const sock = net.connect(proxy.port, "127.0.0.1", () => {
@@ -164,4 +170,56 @@ test("egress proxy CONNECT denies a disallowed host before tunneling", async () 
     sock.on("error", reject)
   })
   assert.match(statusLine, /403/, "CONNECT to non-allowlisted host must be refused")
+})
+
+test("egress proxy does NOT forward the Proxy-Authorization credential upstream", async () => {
+  // The per-deploy credential authorizes the request; it must never reach the
+  // allowlisted upstream (that would leak the deploy's egress secret to every
+  // host the operator allowlists).
+  let seenHeaders = null
+  const server = http.createServer((req, res) => {
+    seenHeaders = req.headers
+    res.writeHead(200, { "content-type": "text/plain" })
+    res.end("ok")
+  })
+  await new Promise((r) => server.listen(0, "127.0.0.1", r))
+  cleanup.push(() => new Promise((r) => server.close(() => r())))
+  const targetPort = server.address().port
+
+  const proxy = await proxyWith(deps, [targetPort])
+  cleanup.push(proxy.close)
+  const res = await proxiedHttpGet(proxy.port, `http://127.0.0.1:${targetPort}/`, basic("deploy-a", "secret-a"))
+  assert.equal(res.status, 200)
+  assert.equal(seenHeaders["proxy-authorization"], undefined, "credential must be stripped before the upstream hop")
+})
+
+test("egress proxy denies an allowlisted host on a non-web port", async () => {
+  const echo = net.createServer((sock) => sock.pipe(sock))
+  await new Promise((r) => echo.listen(0, "127.0.0.1", r))
+  cleanup.push(() => new Promise((r) => echo.close(() => r())))
+  const targetPort = echo.address().port
+
+  // 127.0.0.1 is allowlisted, but the ephemeral port is NOT in the proxy's
+  // allowed set — an allowlisted host must not become a free port-forward
+  // (e.g. api.stripe.com:22).
+  const proxy = await startEgressProxy({ port: 0 }, deps)
+  cleanup.push(proxy.close)
+
+  const statusLine = await new Promise((resolve, reject) => {
+    const sock = net.connect(proxy.port, "127.0.0.1", () => {
+      sock.write(
+        `CONNECT 127.0.0.1:${targetPort} HTTP/1.1\r\nHost: 127.0.0.1:${targetPort}\r\nProxy-Authorization: ${basic("deploy-a", "secret-a")}\r\n\r\n`,
+      )
+    })
+    let data = ""
+    sock.on("data", (c) => {
+      data += c
+      if (data.includes("\r\n")) {
+        resolve(data.split("\r\n")[0])
+        sock.end()
+      }
+    })
+    sock.on("error", reject)
+  })
+  assert.match(statusLine, /403/, "CONNECT to an allowlisted host on a disallowed port must be refused")
 })

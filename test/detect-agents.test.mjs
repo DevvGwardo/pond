@@ -109,15 +109,23 @@ test("detectHermes finds Unix pipx fallback when not on PATH", async () => {
   assert.equal(result?.detail, target)
 })
 
-test("detectClaude finds ~/.claude when present", async () => {
+test("detectClaude requires a claude binary on PATH (config dir alone is not invocable)", async () => {
   const home = tmp("home-claude-")
   try {
     mkdirSync(path.join(home, ".claude"), { recursive: true })
-    const result = await detectClaude({
+    // Config dir without a binary: must NOT be reported — invokeClaude would
+    // spawn the directory and die with ENOENT.
+    const noBinary = await detectClaude({
       homedir: () => home,
       which: () => null,
     })
-    assert.equal(result?.name, "claude")
+    assert.equal(noBinary, null)
+    const withBinary = await detectClaude({
+      homedir: () => home,
+      which: (cmd) => (cmd === "claude" ? "/usr/local/bin/claude" : null),
+    })
+    assert.equal(withBinary?.name, "claude")
+    assert.equal(withBinary?.detail, "/usr/local/bin/claude")
   } finally {
     rmSync(home, { recursive: true, force: true })
   }
@@ -153,7 +161,7 @@ test("detectAgents returns hermes first when multiple present", async () => {
     writeFileSync(path.join(home, ".codex", "auth.json"), "{}")
     const result = await detectAgents({
       homedir: () => home,
-      which: (cmd) => (cmd === "hermes" ? "/usr/local/bin/hermes" : null),
+      which: (cmd) => (cmd === "hermes" ? "/usr/local/bin/hermes" : cmd === "claude" ? "/usr/local/bin/claude" : null),
     })
     assert.deepEqual(
       result.map((r) => r.name),

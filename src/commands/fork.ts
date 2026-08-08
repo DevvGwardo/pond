@@ -204,8 +204,6 @@ export const forkCommand = defineCommand({
     if (!body.files[".env.pond.server"]) {
       fs.writeFileSync(envFile, `POND_SESSION_SECRET=${randomBytes(32).toString("hex")}\n`, { mode: 0o600 })
     }
-    fs.writeFileSync(path.join(dest, ".gitignore"), "node_modules\n.pond\n")
-
     for (const [rel, content] of Object.entries(body.files)) {
       const abs = path.join(dest, rel)
       // belt-and-suspenders: refuse anything that would escape the dest dir
@@ -213,6 +211,11 @@ export const forkCommand = defineCommand({
       fs.mkdirSync(path.dirname(abs), { recursive: true })
       fs.writeFileSync(abs, content)
     }
+
+    // Written AFTER the file loop: the upstream may ship its own .gitignore,
+    // and this must win — otherwise `git add -A` below can stage node_modules/
+    // and .pond/ for a lax upstream.
+    fs.writeFileSync(path.join(dest, ".gitignore"), "node_modules\n.pond\n")
 
     if (args.git) {
       // argv form (no shell) so the deploy id in the commit message is never

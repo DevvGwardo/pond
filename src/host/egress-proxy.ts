@@ -49,6 +49,12 @@ export function hostAllowed(targetHost: string, allowlist: readonly string[]): b
   return false
 }
 
+// Ports a capsule may reach through the proxy. An allowlisted host must not
+// become a free port-forward (CONNECT api.stripe.com:22), so only the web
+// ports are reachable. Operators with a real need for non-web ports can widen
+// the set at startup.
+export const DEFAULT_ALLOWED_PROXY_PORTS = new Set([80, 443])
+
 // Parse a "Basic base64(deployId:secret)" Proxy-Authorization header into its
 // parts. Returns null on any malformed input.
 function parseProxyAuth(header: string | undefined): { deployId: string; secret: string } | null {
@@ -95,12 +101,15 @@ export interface EgressProxyHandle {
 
 // Start the egress proxy. Binds to loopback by default so only same-host
 // capsules (routed by the nft rule) can reach it. Returns the bound port (handy
-// when port 0 is requested in tests).
+// when port 0 is requested in tests). `allowedPorts` defaults to web ports
+// only — see DEFAULT_ALLOWED_PROXY_PORTS.
 export function startEgressProxy(
-  opts: { port: number; hostname?: string },
+  opts: { port: number; hostname?: string; allowedPorts?: ReadonlySet<number> },
   deps: EgressProxyDeps,
 ): Promise<EgressProxyHandle> {
   const hostname = opts.hostname ?? "127.0.0.1"
+  const allowedPorts = opts.allowedPorts ?? DEFAULT_ALLOWED_PROXY_PORTS
+  const portAllowed = (port: number) => allowedPorts.has(port)
 
   const authorize = (req: { headers: http.IncomingHttpHeaders }, targetHost: string): boolean => {
     const creds = parseProxyAuth(req.headers["proxy-authorization"])
@@ -108,6 +117,19 @@ export function startEgressProxy(
     const allowlist = deps.resolve(creds.deployId, creds.secret)
     if (!allowlist) return false
     return hostAllowed(targetHost, allowlist)
+  }
+
+  // The per-deploy Proxy-Authorization credential authorizes the REQUEST; it
+  // must never travel upstream to the allowlisted host (it would leak the
+  // deploy's egress secret to every host the operator allowlists).
+  const stripProxyAuth = (headers: http.IncomingHttpHeaders): http.OutgoingHttpHeaders => {
+    const out: http.OutgoingHttpHeaders = {}
+    for (const [k, v] of Object.entries(headers)) {
+      const lk = k.toLowerCase()
+      if (lk === "proxy-authorization" || lk === "proxy-connection" || lk === "connection") continue
+      out[k] = v
+    }
+    return out
   }
 
   const server = http.createServer((req, res) => {
@@ -127,13 +149,18 @@ export function startEgressProxy(
       res.writeHead(403).end("egress to this host is not allowed")
       return
     }
+    const port = parsed.port ? Number(parsed.port) : 80
+    if (!portAllowed(port)) {
+      res.writeHead(403).end(`egress to port ${port} is not allowed`)
+      return
+    }
     const upstream = http.request(
       {
         host: parsed.hostname,
-        port: parsed.port ? Number(parsed.port) : 80,
+        port,
         method: req.method,
         path: parsed.pathname + parsed.search,
-        headers: { ...req.headers, host: parsed.host },
+        headers: { ...stripProxyAuth(req.headers), host: parsed.host },
       },
       (upRes) => {
         res.writeHead(upRes.statusCode ?? 502, upRes.headers)
@@ -158,12 +185,20 @@ export function startEgressProxy(
     }
     if (!target) return denyAndClose("HTTP/1.1 400 Bad Request\r\n\r\n")
     if (!authorize(req, target.host)) return denyAndClose("HTTP/1.1 403 Forbidden\r\n\r\n")
+    if (!portAllowed(target.port)) return denyAndClose("HTTP/1.1 403 Forbidden\r\n\r\n")
 
-    const upstream = net.connect(target.port, target.host, () => {
+    // `timeout` bounds the connect phase (a wedged upstream must not hang the
+    // tunnel); it is disarmed once the tunnel is spliced.
+    const upstream = net.connect({ port: target.port, host: target.host, timeout: 10_000 }, () => {
+      upstream.setTimeout(0)
       clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n")
       if (head && head.length) upstream.write(head)
       upstream.pipe(clientSocket)
       clientSocket.pipe(upstream)
+    })
+    upstream.on("timeout", () => {
+      upstream.destroy()
+      denyAndClose("HTTP/1.1 504 Gateway Timeout\r\n\r\n")
     })
     upstream.on("error", () => denyAndClose("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
     clientSocket.on("error", () => upstream.destroy())

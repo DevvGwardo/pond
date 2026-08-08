@@ -20,6 +20,7 @@ export default tseslint.config(
       "src/dashboard/built.ts",
       "src/ide/built.ts",
       "templates/",
+      "professional-modern-landing-page-project/",
     ],
   },
   ...tseslint.configs.recommended,

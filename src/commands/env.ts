@@ -1,6 +1,7 @@
 import { defineCommand, renderUsage } from "citty"
 import { loadCredentials } from "../host/credentials.js"
 import { readDeployRecord } from "../host/deploy-record.js"
+import { fail, fetchOrFail } from "./shared.js"
 
 // See dbCommand for why this pattern exists. citty's default behavior on a
 // bare subcommand-group invocation is to print help AND exit 1 with "ERROR
@@ -54,7 +55,7 @@ export const envCommand = defineCommand({
       },
       async run({ args }) {
         const { deployId, apiUrl } = resolveTarget(args)
-        const res = await fetch(`${apiUrl}/api/deploys/${deployId}/env`, { headers: authHeader(apiUrl) })
+        const res = await fetchOrFail(`${apiUrl}/api/deploys/${deployId}/env`, { headers: authHeader(apiUrl) })
         if (!res.ok) {
           const text = await res.text().catch(() => "")
           console.error(`List failed: ${res.status} ${text}`)
@@ -93,7 +94,7 @@ export const envCommand = defineCommand({
         }
         const entries: Record<string, string> = {}
         for (const [k, v] of pairs) entries[k] = v
-        const res = await fetch(`${apiUrl}/api/deploys/${deployIdStr}/env`, {
+        const res = await fetchOrFail(`${apiUrl}/api/deploys/${deployIdStr}/env`, {
           method: "PUT",
           headers: { "content-type": "application/json", ...authHeader(apiUrl) },
           body: JSON.stringify({ entries }),
@@ -118,7 +119,7 @@ export const envCommand = defineCommand({
         const deployIdStr = String(args.deployId)
         const keyStr = String(args.key)
         const { apiUrl } = resolveTarget({ deployId: deployIdStr, api: args.api })
-        const res = await fetch(`${apiUrl}/api/deploys/${deployIdStr}/env/${encodeURIComponent(keyStr)}`, {
+        const res = await fetchOrFail(`${apiUrl}/api/deploys/${deployIdStr}/env/${encodeURIComponent(keyStr)}`, {
           method: "DELETE",
           headers: authHeader(apiUrl),
         })

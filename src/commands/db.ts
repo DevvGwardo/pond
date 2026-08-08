@@ -1,64 +1,13 @@
-import { defineCommand, renderUsage } from "citty"
+import { defineCommand } from "citty"
 import * as fs from "node:fs"
-import { readDeployRecord } from "../host/deploy-record.js"
-
-// citty throws E_NO_COMMAND on bare subcommand-group invocations (e.g. plain
-// `pond db`), which renders help AND exits 1 with "ERROR No command
-// specified". To match git/npm behavior — print help cleanly, exit 0 — every
-// subcommand group sets this as its `run`. It also runs after a subcommand
-// fires, so we no-op when args._ already has a positional.
-async function showGroupUsageIfBare({ args, cmd }: { args: Record<string, unknown>; cmd: unknown }) {
-  const positionals = (args._ as string[] | undefined) ?? []
-  if (positionals.length > 0) return
-  console.log(await renderUsage(cmd as Parameters<typeof renderUsage>[0]))
-}
-
-interface ResolvedTarget {
-  baseUrl: string
-  headers: Record<string, string>
-  source: "explicit" | "auto-remote" | "local"
-}
-
-// See logs.ts:resolveTarget for the resolution matrix.
-function resolveTarget(target: string | undefined, port: string, local: boolean): ResolvedTarget {
-  const localhostUrl = `http://localhost:${port}`
-  if (local) {
-    return { baseUrl: localhostUrl, headers: {}, source: "local" }
-  }
-  const deploy = readDeployRecord(process.cwd())
-  if (target) {
-    if (target.startsWith("http://") || target.startsWith("https://")) {
-      return { baseUrl: target.replace(/\/$/, ""), headers: {}, source: "explicit" }
-    }
-    if (deploy?.deployId === target && deploy?.url) {
-      const headers: Record<string, string> = deploy.claimToken ? { "x-pond-claim-token": deploy.claimToken } : {}
-      return { baseUrl: deploy.url, headers, source: "explicit" }
-    }
-    throw new Error(`Unknown deploy target: ${target}`)
-  }
-  if (deploy?.url && deploy?.claimToken) {
-    return {
-      baseUrl: deploy.url,
-      headers: { "x-pond-claim-token": deploy.claimToken },
-      source: "auto-remote",
-    }
-  }
-  return { baseUrl: localhostUrl, headers: {}, source: "local" }
-}
-
-let autoRemoteNoticeShown = false
-function noticeAutoRemoteOnce(resolved: ResolvedTarget) {
-  if (resolved.source !== "auto-remote" || autoRemoteNoticeShown) return
-  autoRemoteNoticeShown = true
-  console.error(`→ Targeting ${resolved.baseUrl}  (pass --local for the dev server)`)
-}
+import { fail, httpError, resolveTarget, noticeAutoRemoteOnce, LOCAL_FLAG, showGroupUsageIfBare } from "./shared.js"
 
 async function request(pathname: string, port: string, target: string | undefined, local: boolean) {
   const resolved = resolveTarget(target, port, local)
   noticeAutoRemoteOnce(resolved)
   const res = await fetch(`${resolved.baseUrl}${pathname}`, { headers: resolved.headers })
   if (!res.ok) {
-    throw new Error(`Request failed: ${res.status}`)
+    await httpError(res, "Request")
   }
   return res.json()
 }
@@ -76,12 +25,6 @@ async function rawFetch(
   for (const [k, v] of Object.entries(resolved.headers)) headers.set(k, v)
   const res = await fetch(`${resolved.baseUrl}${pathname}`, { ...init, headers })
   return res
-}
-
-const LOCAL_FLAG = {
-  type: "boolean" as const,
-  default: false,
-  description: "Force localhost:<port> even if .pond/deploy.json points at a remote deploy",
 }
 
 export const dbCommand = defineCommand({
@@ -125,7 +68,7 @@ export const dbCommand = defineCommand({
         const res = await rawFetch("/__pond/db/backup", port, target, Boolean(args.local))
         if (!res.ok) {
           const body = await res.text().catch(() => "")
-          throw new Error(`backup failed: ${res.status} ${body}`)
+          fail(`backup failed: ${res.status} ${body}`)
         }
         const buf = Buffer.from(await res.arrayBuffer())
         fs.writeFileSync(out, buf)
@@ -154,9 +97,16 @@ export const dbCommand = defineCommand({
           body: body as unknown as BodyInit,
           headers: { "content-type": "application/x-sqlite3" },
         })
+        // Check res.ok BEFORE parsing: a 4xx/5xx body (proxy error page, HTML)
+        // is not JSON, and the old order surfaced a SyntaxError stack instead
+        // of the failure itself.
+        if (!res.ok) {
+          const text = await res.text().catch(() => "")
+          fail(`restore failed: HTTP ${res.status} — ${text.slice(0, 200)}`)
+        }
         const json = (await res.json()) as { ok?: boolean; message?: string; error?: string }
-        if (!res.ok || !json.ok) {
-          throw new Error(`restore failed: ${json.error ?? res.status}`)
+        if (!json.ok) {
+          fail(`restore failed: ${json.error ?? "unknown error"}`)
         }
         console.log(json.message)
       },
@@ -187,15 +137,15 @@ export const dbCommand = defineCommand({
         let payload: { op: string; table: string; column: string; to?: string }
         if (typeof args.drop === "string" && args.drop) {
           const [table, column] = args.drop.split(".")
-          if (!table || !column) throw new Error("--drop expects <table>.<column>")
+          if (!table || !column) fail("--drop expects <table>.<column>")
           payload = { op: "drop", table, column }
         } else if (typeof args.rename === "string" && args.rename) {
           const [table, column] = args.rename.split(".")
-          if (!table || !column) throw new Error("--rename expects <table>.<oldColumn> together with --to <newColumn>")
-          if (typeof args.to !== "string" || !args.to) throw new Error("--rename requires --to <newColumn>")
+          if (!table || !column) fail("--rename expects <table>.<oldColumn> together with --to <newColumn>")
+          if (typeof args.to !== "string" || !args.to) fail("--rename requires --to <newColumn>")
           payload = { op: "rename", table, column, to: args.to }
         } else {
-          throw new Error("specify --drop <table>.<column> or --rename <table>.<oldColumn> --to <newColumn>")
+          fail("specify --drop <table>.<column> or --rename <table>.<oldColumn> --to <newColumn>")
         }
 
         const res = await rawFetch("/__pond/db/migrate", port, target, local, {
@@ -203,9 +153,13 @@ export const dbCommand = defineCommand({
           body: JSON.stringify(payload),
           headers: { "content-type": "application/json" },
         })
+        if (!res.ok) {
+          const text = await res.text().catch(() => "")
+          fail(`migrate failed: HTTP ${res.status} — ${text.slice(0, 200)}`)
+        }
         const json = (await res.json()) as { ok?: boolean; message?: string; error?: string }
-        if (!res.ok || !json.ok) {
-          throw new Error(`migrate failed: ${json.error ?? res.status}`)
+        if (!json.ok) {
+          fail(`migrate failed: ${json.error ?? "unknown error"}`)
         }
         console.log(json.message)
       },

@@ -1,10 +1,12 @@
 import { defineCommand } from "citty"
+import { fail, fetchOrFail, showGroupUsageIfBare } from "./shared.js"
 
 export const authCommand = defineCommand({
   meta: {
     name: "auth",
     description: "Manage dev auth state",
   },
+  run: showGroupUsageIfBare,
   subCommands: {
     as: defineCommand({
       meta: {
@@ -22,14 +24,14 @@ export const authCommand = defineCommand({
         },
       },
       async run({ args }) {
-        const res = await fetch(`http://localhost:${args.port}/__pond/auth/guest`, {
+        const res = await fetchOrFail(`http://localhost:${args.port}/__pond/auth/guest`, {
           method: "POST",
           headers: {
             "content-type": "application/json",
           },
           body: JSON.stringify({ name: args.name }),
         })
-        if (!res.ok) throw new Error(`Request failed: ${res.status}`)
+        if (!res.ok) fail(`Request failed: HTTP ${res.status}`)
         console.log(JSON.stringify(await res.json(), null, 2))
       },
     }),

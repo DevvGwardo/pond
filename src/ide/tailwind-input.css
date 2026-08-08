@@ -1,0 +1,3 @@
+/* Tailwind v4 entry for the pond frontends. Compiled to a static stylesheet
+   by scripts/build-ide.mjs — the pages never load cdn.tailwindcss.com. */
+@import "tailwindcss";

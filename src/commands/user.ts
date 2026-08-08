@@ -1,4 +1,5 @@
 import { defineCommand } from "citty"
+import { fetchOrFail, showGroupUsageIfBare } from "./shared.js"
 import { loadCredentials } from "../host/credentials.js"
 
 export const userCommand = defineCommand({
@@ -6,6 +7,7 @@ export const userCommand = defineCommand({
     name: "user",
     description: "Manage pond control-plane users",
   },
+  run: showGroupUsageIfBare,
   subCommands: {
     create: defineCommand({
       meta: {
@@ -24,7 +26,7 @@ export const userCommand = defineCommand({
           console.error(`No saved credentials for ${apiUrl}. Run \`pond login\` first.`)
           process.exit(1)
         }
-        const res = await fetch(`${apiUrl}/api/users`, {
+        const res = await fetchOrFail(`${apiUrl}/api/users`, {
           method: "POST",
           headers: {
             "content-type": "application/json",

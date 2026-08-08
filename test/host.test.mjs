@@ -4,55 +4,13 @@ import { spawn } from "node:child_process"
 import { mkdtempSync, rmSync, existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import * as path from "node:path"
-import * as net from "node:net"
 import { randomBytes } from "node:crypto"
 
 import { stopProc } from "./proc-kill.mjs"
+import { pickFreePort, waitForHealth, tinySourceFiles } from "./helpers.mjs"
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "..")
 const CLI_PATH = path.join(REPO_ROOT, "src", "cli.js")
-
-async function pickFreePort() {
-  return await new Promise((resolve, reject) => {
-    const s = net.createServer()
-    s.unref()
-    s.on("error", reject)
-    s.listen(0, "127.0.0.1", () => {
-      const addr = s.address()
-      const port = typeof addr === "object" && addr ? addr.port : 0
-      s.close(() => resolve(port))
-    })
-  })
-}
-
-async function waitForHealth(apiUrl, timeoutMs = 8000) {
-  const start = Date.now()
-  while (Date.now() - start < timeoutMs) {
-    try {
-      const r = await fetch(`${apiUrl}/api/health`)
-      if (r.ok) return
-    } catch {
-      // retry
-    }
-    await new Promise((r) => setTimeout(r, 100))
-  }
-  throw new Error(`host did not become healthy at ${apiUrl} within ${timeoutMs}ms`)
-}
-
-const TINY_SERVER_SRC = `import { capsule, mutation, query, string, table } from "pond/server"
-export default capsule({
-  schema: { items: table({ name: string() }) },
-  queries: { items: query((ctx) => ctx.db.items.all()) },
-  mutations: { add: mutation((ctx, name) => ctx.db.items.insert({ name })) },
-})
-`
-
-function tinySourceFiles(serverSrc = TINY_SERVER_SRC, pkgJson) {
-  return {
-    "server/index.ts": serverSrc,
-    "package.json": pkgJson ?? '{"name":"test-cap","private":true,"type":"module"}\n',
-  }
-}
 
 let hostProc = null
 let dataDir = null
@@ -2568,6 +2526,18 @@ test("--capsule-egress with an invalid mode fails fast", async () => {
   assert.match(output, /invalid --capsule-egress/)
 })
 
+test("--capsule-fs-isolation with an invalid mode fails fast (no silent fail-open)", async () => {
+  // A typo like `bwarp` used to silently boot every capsule unconfined.
+  const { code, output } = await runHostExpectingExit(["--capsule-fs-isolation", "bwarp"])
+  assert.equal(code, 1)
+  assert.match(output, /invalid --capsule-fs-isolation/)
+  // Case-insensitive BWRAP is a VALID value — and still fails closed on a
+  // platform without bubblewrap rather than running unconfined.
+  const { code: code2, output: output2 } = await runHostExpectingExit(["--capsule-fs-isolation", "BWRAP"])
+  assert.equal(code2, 1)
+  assert.match(output2, /requires Linux|bubblewrap.*not available/)
+})
+
 test("--capsule-egress=proxy is gated until the proxy is wired end-to-end", async () => {
   const { code, output } = await runHostExpectingExit(["--capsule-egress", "proxy"])
   assert.equal(code, 1, "proxy mode must refuse to start rather than silently seal capsules")
@@ -2578,6 +2548,21 @@ test("SIGINT host leaves no orphan deploy-worker processes", async () => {
   await stopHost()
   // After stop, no deploy-worker.js child of the host should remain.
   const { execSync } = await import("node:child_process")
+  if (process.platform === "win32") {
+    // POSIX `ps` doesn't exist on Windows; tasklist has no command column, so
+    // match the worker by its unique marker in the image name. The old test
+    // silently passed on Windows because execSync threw and psOut stayed "" —
+    // the exact platform where orphaned workers are the documented problem.
+    let psOut = ""
+    try {
+      psOut = execSync("tasklist /V /FO CSV", { encoding: "utf-8" })
+    } catch {
+      assert.fail("tasklist unavailable — cannot verify no orphan workers on Windows")
+    }
+    const orphans = psOut.split("\n").filter((l) => l.toLowerCase().includes("deploy-worker"))
+    assert.equal(orphans.length, 0, `orphan workers: ${orphans.join("\n")}`)
+    return
+  }
   let psOut = ""
   try {
     psOut = execSync("ps -A -o command", { encoding: "utf-8" })
