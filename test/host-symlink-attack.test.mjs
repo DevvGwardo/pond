@@ -236,7 +236,7 @@ test("corrupt deploy.json cannot crash the host (listing, WS upgrade, new deploy
           host: `${deployId}.localhost:${port}`,
           connection: "Upgrade",
           upgrade: "websocket",
-          "sec-websocket-key": "x3JJHMbDL1EzLkh9GBhXDw==",
+          "sec-websocket-key": Buffer.from("pond-ws-upgrade-test-key").toString("base64"),
           "sec-websocket-version": "13",
         },
       },
