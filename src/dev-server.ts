@@ -368,6 +368,11 @@ export async function startDevServer(requestedPort: number): Promise<void> {
   chokidar
     .watch(cwd, {
       ignoreInitial: true,
+      // Node's native recursive fs.watch on Windows does not reliably report
+      // files created inside NEW subdirectories (chokidar v4 relies on it),
+      // which silently kills hot-reload for a freshly added shared/ dir.
+      // Polling is the dependable fallback for the dev server on win32.
+      usePolling: process.platform === "win32",
       ignored: (p: string) => {
         if (p === cwd) return false
         const rel = path.relative(cwd, p)

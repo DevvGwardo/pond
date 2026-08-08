@@ -24,7 +24,12 @@ export function confineImportsTo(rootDir: string): Plugin {
       build.onResolve({ filter: /.*/ }, (args) => {
         if (args.kind === "entry-point") return undefined
         const p = args.path
-        if (!p.startsWith(".") && !p.startsWith("/")) return undefined
+        // Path-like specifiers: relative, POSIX/Windows absolute, or a
+        // drive-letter absolute path (C:/... on Windows — which starts with
+        // neither "." nor "/"). Bare specifiers (packages, node: builtins,
+        // https:// URLs) contain no path separator and are never touched.
+        const looksLikePath = p.startsWith(".") || p.startsWith("/") || p.startsWith("\\") || /^[A-Za-z]:[\\/]/.test(p)
+        if (!looksLikePath) return undefined
         // esbuild reports resolveDir with forward slashes even on Windows;
         // path.relative normalizes both sides, so the containment check is
         // portable (a raw startsWith(root + path.sep) silently disables the
