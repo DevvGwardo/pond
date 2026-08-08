@@ -372,7 +372,7 @@ export async function startDevServer(requestedPort: number): Promise<void> {
         if (p === cwd) return false
         const rel = path.relative(cwd, p)
         if (!rel || rel.startsWith("..")) return true
-        return /(^|\/)(node_modules|\.pond|\.git)(\/|$)/.test(rel)
+        return /(^|[\\/])(node_modules|\.pond|\.git)([\\/]|$)/.test(rel)
       },
     })
     .on("change", onProjectChange)

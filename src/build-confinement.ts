@@ -25,7 +25,13 @@ export function confineImportsTo(rootDir: string): Plugin {
         if (args.kind === "entry-point") return undefined
         const p = args.path
         if (!p.startsWith(".") && !p.startsWith("/")) return undefined
-        if (!args.resolveDir || !(args.resolveDir.startsWith(root + path.sep) || args.resolveDir === root)) {
+        // esbuild reports resolveDir with forward slashes even on Windows;
+        // path.relative normalizes both sides, so the containment check is
+        // portable (a raw startsWith(root + path.sep) silently disables the
+        // guard on Windows).
+        const relToRoot = args.resolveDir ? path.relative(root, args.resolveDir) : ""
+        const inRoot = relToRoot === "" || (!relToRoot.startsWith("..") && !path.isAbsolute(relToRoot))
+        if (!args.resolveDir || !inRoot) {
           // Trusted code (pond runtime, node_modules) resolving its own imports.
           return undefined
         }

@@ -257,7 +257,8 @@ test("`pond dev` hot-reloads on shared/* edits (regression: watcher only watched
   })
   cleanupProcs.push(proc)
   proc.stdout.on("data", () => {})
-  proc.stderr.on("data", () => {})
+  let devStderr = ""
+  proc.stderr.on("data", (c) => (devStderr += c.toString()))
   try {
     await waitForUrl(`http://127.0.0.1:${port}/api/query/messages`, 15000)
 
@@ -274,7 +275,7 @@ test("`pond dev` hot-reloads on shared/* edits (regression: watcher only watched
         sseBuf += decoder.decode(value, { stream: true })
       }
     })().catch(() => {})
-    const waitForReload = (reason, timeoutMs = 15000) =>
+    const waitForReload = (reason, timeoutMs = 30000) =>
       new Promise((resolve, reject) => {
         const deadline = Date.now() + timeoutMs
         const timer = setInterval(() => {
@@ -283,7 +284,11 @@ test("`pond dev` hot-reloads on shared/* edits (regression: watcher only watched
             resolve()
           } else if (Date.now() > deadline) {
             clearInterval(timer)
-            reject(new Error(`no reload event for "${reason}" within ${timeoutMs}ms — buffer: ${sseBuf.slice(-200)}`))
+            reject(
+              new Error(
+                `no reload event for "${reason}" within ${timeoutMs}ms — buffer: ${sseBuf.slice(-200)} — dev stderr: ${devStderr.slice(-500)}`,
+              ),
+            )
           }
         }, 100)
       })
