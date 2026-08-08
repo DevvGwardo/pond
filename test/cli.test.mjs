@@ -256,9 +256,12 @@ test("`pond dev` hot-reloads on shared/* edits (regression: watcher only watched
     stdio: ["ignore", "pipe", "pipe"],
   })
   cleanupProcs.push(proc)
-  proc.stdout.on("data", () => {})
-  let devStderr = ""
-  proc.stderr.on("data", (c) => (devStderr += c.toString()))
+  let devOut = ""
+  let devErr = ""
+  let procState = "running"
+  proc.stdout.on("data", (c) => (devOut += c.toString()))
+  proc.stderr.on("data", (c) => (devErr += c.toString()))
+  proc.on("exit", (code, signal) => (procState = `exited(${code}/${signal})`))
   try {
     await waitForUrl(`http://127.0.0.1:${port}/api/query/messages`, 15000)
 
@@ -286,7 +289,7 @@ test("`pond dev` hot-reloads on shared/* edits (regression: watcher only watched
             clearInterval(timer)
             reject(
               new Error(
-                `no reload event for "${reason}" within ${timeoutMs}ms — buffer: ${sseBuf.slice(-200)} — dev stderr: ${devStderr.slice(-500)}`,
+                `no reload event for "${reason}" within ${timeoutMs}ms — buffer: ${sseBuf.slice(-200)} — proc: ${procState} — dev out: ${devOut.slice(-400)} — dev err: ${devErr.slice(-400)}`,
               ),
             )
           }
