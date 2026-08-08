@@ -8,7 +8,7 @@ import { test, before, after } from "node:test"
 import assert from "node:assert/strict"
 import { spawn } from "node:child_process"
 import { execSync } from "node:child_process"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, rmSync, readlinkSync } from "node:fs"
 import { tmpdir } from "node:os"
 import * as path from "node:path"
 import { randomBytes } from "node:crypto"
@@ -75,12 +75,30 @@ async function stopHost() {
   hostProc = null
 }
 
-// Count live deploy-worker processes for THIS host's data dir. The worker
-// cmdline carries --allow-fs-read=<real deploy dir>, which contains dataDir.
+// Count live deploy-worker processes for THIS host's data dir. Sandboxed
+// workers (Node 22+) carry --allow-fs-read=<real deploy dir> in the cmdline,
+// which contains dataDir. Un-sandboxed workers (Node < 22, permission model
+// unavailable) have a bare cmdline — match their cwd instead (the host forks
+// with cwd = real deploy dir, and /proc/<pid>/cwd exposes it on Linux).
 // POSIX-only (ps); the suite's Windows leg skips the process-count assertion.
 function workerCount() {
-  const psOut = execSync("ps -A -o command", { encoding: "utf-8" })
-  return psOut.split("\n").filter((l) => l.includes("deploy-worker.js") && l.includes(dataDir)).length
+  const psOut = execSync("ps -A -o pid=,command=", { encoding: "utf-8" })
+  let count = 0
+  for (const line of psOut.split("\n")) {
+    if (!line.includes("deploy-worker.js")) continue
+    if (line.includes(dataDir)) {
+      count++
+      continue
+    }
+    const pid = parseInt(line.trim().split(/\s+/)[0] ?? "", 10)
+    if (!Number.isFinite(pid)) continue
+    try {
+      if (readlinkSync(`/proc/${pid}/cwd`).includes(dataDir)) count++
+    } catch {
+      // pid already gone, or not Linux
+    }
+  }
+  return count
 }
 
 test("concurrent redeploys settle with exactly one worker and a live capsule", async (t) => {
