@@ -296,6 +296,11 @@ test("`pond dev` hot-reloads on shared/* edits (regression: watcher only watched
     // A brand-new shared/ file is bundled into the server build; the watcher
     // must pick it up (it used to watch only server/index.ts, client/index.tsx
     // and the env file, so shared edits produced zero reload).
+    // chokidar's initial scan is async and ignoreInitial swallows events for
+    // files created while it is still scanning; on slow runners (Windows CI)
+    // the scan can outlast the server's first HTTP response. Give it a beat
+    // to settle before creating the file so the `add` event is actually seen.
+    await new Promise((r) => setTimeout(r, 2000))
     mkdirSync(path.join(projDir, "shared"), { recursive: true })
     writeFileSync(path.join(projDir, "shared", "types.ts"), "export type Reloaded = true\n")
     await waitForReload("server")

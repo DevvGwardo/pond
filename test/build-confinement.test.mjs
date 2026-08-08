@@ -52,17 +52,16 @@ async function tryBuild(clientDir, entryContents) {
 
 test("lexical ../ import escape is rejected", async () => {
   const clientDir = fixture()
-  const rel = path.relative(clientDir, path.join(OUTSIDE, "escape-target.ts"))
+  // Import specifiers must use forward slashes even on Windows.
+  const rel = path.relative(clientDir, path.join(OUTSIDE, "escape-target.ts")).split(path.sep).join("/")
   const r = await tryBuild(clientDir, `import { SECRET } from "${rel}"\nexport const App = () => SECRET\n`)
   assert.ok(r.blocked, "import escaping the root via ../ must be rejected")
 })
 
 test("absolute import escape is rejected", async () => {
   const clientDir = fixture()
-  const r = await tryBuild(
-    clientDir,
-    `import { SECRET } from "${path.join(OUTSIDE, "escape-target.ts")}"\nexport const App = () => SECRET\n`,
-  )
+  const abs = path.join(OUTSIDE, "escape-target.ts").split(path.sep).join("/")
+  const r = await tryBuild(clientDir, `import { SECRET } from "${abs}"\nexport const App = () => SECRET\n`)
   assert.ok(r.blocked, "absolute import outside the root must be rejected")
 })
 
@@ -83,7 +82,7 @@ test("in-tree symlink pointing outside is rejected (esbuild reads through symlin
 
 test("guard does not fail open when the project root path traverses a symlink", async () => {
   const clientDir = fixture()
-  const rel = path.relative(clientDir, path.join(OUTSIDE, "escape-target.ts"))
+  const rel = path.relative(clientDir, path.join(OUTSIDE, "escape-target.ts")).split(path.sep).join("/")
   writeFileSync(path.join(clientDir, "index.tsx"), `import { SECRET } from "${rel}"\nexport const App = () => SECRET\n`)
   try {
     await esbuild({

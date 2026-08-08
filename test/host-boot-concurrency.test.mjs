@@ -114,9 +114,16 @@ test("concurrent redeploys settle with exactly one worker and a live capsule", a
     assert.equal(r.status, 200, await r.text())
   }
 
-  // Give any straggling exit handler a moment, then count workers.
-  await new Promise((r) => setTimeout(r, 500))
-  assert.equal(workerCount(), 1, "exactly one worker must survive N concurrent redeploys")
+  // Capsule workers boot lazily on first request; give the (possibly slow)
+  // runner time for the single worker to appear, then assert EXACTLY one.
+  let count = 0
+  const countDeadline = Date.now() + 10000
+  while (Date.now() < countDeadline) {
+    count = workerCount()
+    if (count >= 1) break
+    await new Promise((r) => setTimeout(r, 250))
+  }
+  assert.equal(count, 1, "exactly one worker must survive N concurrent redeploys")
 
   // The capsule still serves its latest code (the i-th variant's query name).
   const http = await import("node:http")
