@@ -1108,7 +1108,7 @@ test("sweeper terminates anonymous deploy after grace (via host bounce)", async 
 })
 
 test("anonymous-deploys=false → anonymous POST returns 401", async () => {
-  const h = await startExtraHost({ extraArgs: ["--anonymous-deploys", "false"] })
+  const h = await startExtraHost({ extraArgs: ["--anonymous-deploys=false"] })
   try {
     const fs = await import("node:fs")
     const sourceFiles = tinySourceFiles()
