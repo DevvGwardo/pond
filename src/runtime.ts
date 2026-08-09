@@ -179,8 +179,7 @@ function applyMigrations(db: Database.Database, schema: Record<string, Record<st
   for (const [tableName, columns] of Object.entries(schema)) {
     assertIdent(tableName)
     const existsRow = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(tableName) as
-      | { name?: string }
-      | undefined
+      { name?: string } | undefined
 
     if (!existsRow) {
       const colDefs = Object.entries(columns).map(([col, type]) => {
@@ -779,8 +778,7 @@ function createRuntimeFromDefinition(
       const token = c.req.query("token") ?? ""
       if (!token) return c.text("missing token", 400)
       const row = db.prepare("SELECT email, expiresAt, usedAt FROM _pond_magic_links WHERE token = ?").get(token) as
-        | { email: string; expiresAt: string; usedAt: string | null }
-        | undefined
+        { email: string; expiresAt: string; usedAt: string | null } | undefined
       if (!row) return c.text("invalid token", 400)
       if (row.usedAt) return c.text("token already used", 400)
       if (Date.parse(row.expiresAt) < Date.now()) return c.text("token expired", 400)

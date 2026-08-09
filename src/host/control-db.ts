@@ -433,8 +433,7 @@ export function openControlDb(dataDir: string): ControlDb {
       const current = selectByCurrentHash.get(tokenHash) as UserRow | undefined
       if (current) return current
       const prev = selectByPreviousHash.get(tokenHash) as
-        | (UserRow & { previousTokenExpiresAt: string | null })
-        | undefined
+        (UserRow & { previousTokenExpiresAt: string | null }) | undefined
       if (!prev) return null
       if (!prev.previousTokenExpiresAt) return null
       if (Date.parse(prev.previousTokenExpiresAt) < Date.now()) return null
@@ -570,8 +569,7 @@ export function openControlDb(dataDir: string): ControlDb {
     },
     getEgress(deployId) {
       const row = db.prepare("SELECT secretHash, allowlist FROM deploy_egress WHERE deployId = ?").get(deployId) as
-        | { secretHash: string; allowlist: string }
-        | undefined
+        { secretHash: string; allowlist: string } | undefined
       if (!row) return null
       let allowlist: string[] = []
       try {

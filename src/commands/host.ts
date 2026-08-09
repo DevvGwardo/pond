@@ -2762,8 +2762,7 @@ export const hostCommand = defineCommand({
       try {
         db = new Database(dbPath, { readonly: true, fileMustExist: true })
         const exists = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) as
-          | { name: string }
-          | undefined
+          { name: string } | undefined
         if (!exists) return c.json({ error: `unknown table: ${name}` }, 404)
 
         const cols = db.prepare(`PRAGMA table_info("${name}")`).all() as Array<{ name: string; type: string }>
@@ -2776,8 +2775,7 @@ export const hostCommand = defineCommand({
         const createSql =
           (
             db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) as
-              | { sql: string }
-              | undefined
+              { sql: string } | undefined
           )?.sql ?? ""
         const isWithoutRowid = /without\s+rowid/i.test(createSql)
 
