@@ -5,6 +5,8 @@ Versioning: [Semver](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-08-09
+
 ### Security (host)
 
 - **Symlink-safe host file operations.** Capsules have read/write access to their own deploy dir, so the host now treats it as attacker-controlled: every host-side read verifies the realpath stays inside the deploy dir, and every write goes through temp-file + rename (which replaces a planted symlink instead of following it). Previously a capsule could plant a symlink and exfiltrate `host-token` or a sibling's `.env.pond.server`, or redirect a host write onto `deploy-worker.js` (RCE as the host user). Bundler entries and imports are also confined to the capsule root (a `../../host-token` import can no longer be bundled into the deploy).

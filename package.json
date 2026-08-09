@@ -1,6 +1,6 @@
 {
   "name": "pondsh",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "Agent-native CLI and runtime for building small full-stack TypeScript apps. Hosted Lakebed-style anonymous deploys included.",
   "license": "MIT",
   "author": "DevvGwardo (https://github.com/DevvGwardo)",
@@ -69,7 +69,7 @@
     "@types/better-sqlite3": "^7.6.0",
     "@types/cross-spawn": "^6.0.6",
     "@types/ws": "^8.18.1",
-    "eslint": "^10.8.0",
+    "eslint": "^10.8.1",
     "eslint-plugin-react-hooks": "^7.1.1",
     "husky": "^9.1.7",
     "lint-staged": "^17.3.0",
