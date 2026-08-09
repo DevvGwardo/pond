@@ -9,11 +9,16 @@ updates:
       interval: "weekly"
     groups:
       # Runtime deps are the risky ones (native modules, esbuild); update them
-      # as a group so a release can validate the whole set at once.
+      # as a group so a release can validate the whole set at once. Major
+      # bumps (typescript 7, eslint 10, better-sqlite3 13, chokidar 5, ...)
+      # need code changes and CI rework, so exclude them from the groups —
+      # they arrive as individual PRs for deliberate triage.
       runtime-deps:
         dependency-type: "production"
+        update-types: ["patch", "minor"]
       dev-deps:
         dependency-type: "development"
+        update-types: ["patch", "minor"]
     open-pull-requests-limit: 10
     versioning-strategy: "auto"
 

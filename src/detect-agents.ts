@@ -137,9 +137,7 @@ export async function detectAgents(deps: DetectionDeps = {}): Promise<DetectedAg
 // "thinking…" spinner. Agents that don't support JSON streaming simply won't
 // emit these; the caller falls back to onChunk for raw text.
 export type AgentEvent =
-  | { kind: "tool"; tool: string; target?: string }
-  | { kind: "text"; text: string }
-  | { kind: "info"; message: string }
+  { kind: "tool"; tool: string; target?: string } | { kind: "text"; text: string } | { kind: "info"; message: string }
 
 export interface InvokeOptions {
   cwd: string
