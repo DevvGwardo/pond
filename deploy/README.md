@@ -52,6 +52,13 @@ railway up
 # 2. Set config as Railway environment variables (Railway dashboard or CLI):
 #    POND_PUBLIC_HOST, POND_PUBLIC_BASE_URL, POND_ABUSE_EMAIL,
 #    POND_HOST_TOKEN, POND_TRUST_PROXY_HEADERS=1, POND_MAX_ACTIVE_CAPSULES, …
+
+# 3. Workspace spend backstop (billing, not env). Limits are workspace-wide —
+#    they cover every project in the Railway workspace, not pond alone.
+#    Soft = email warning; hard = Railway pauses services when the cap is hit.
+railway usage limit set --target workspace --soft 12 --hard 20
+railway usage limit status   # verify Soft/Hard populated
+# Dashboard equivalent: https://railway.com/account/usage
 ```
 
 **Per-deploy serving needs a wildcard domain.** A created capsule's URL is
