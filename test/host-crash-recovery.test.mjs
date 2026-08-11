@@ -3,10 +3,13 @@
 // re-boot). Before this change, a crashed worker stayed dead until the entire
 // host was restarted — one bad deploy's exit was a permanent outage for it.
 //
-// The seeded capsule crashes exactly once: on first boot it schedules
-// process.exit(1) after a short delay and drops a marker file so the second
-// boot serves normally. The test asserts (a) the crash actually happened
-// (marker present) and (b) the capsule serves again afterwards.
+// The seeded capsule crashes exactly once: the first successful ping arms a
+// short process.exit(1) timer and writes a marker so the second boot serves
+// normally. Arming on first serve (not at module eval) avoids racing Windows
+// CI boot latency — a module-level setTimeout can fire before the pre-crash
+// ping if import→listen→IPC→deploy-response takes longer than the delay.
+// The test asserts (a) it served before crashing, (b) the crash happened
+// (marker present), and (c) the capsule serves again afterwards.
 
 import { test, after } from "node:test"
 import assert from "node:assert/strict"
@@ -39,23 +42,31 @@ after(async () => {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
-// Capsule that kills its own worker once, then serves normally on respawn.
+// Capsule that kills its own worker once after first serve, then serves
+// normally on respawn. Crash is armed from the ping handler (not module
+// eval) so the timer cannot fire during host boot / deploy-create round-trip.
 const CRASHING_SERVER_SRC = `import { capsule, query, string, table } from "pond/server"
 import { existsSync, writeFileSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
 const marker = join(process.cwd(), ".pond", "crashed-once")
-if (!existsSync(marker)) {
-  setTimeout(() => {
-    try {
-      mkdirSync(join(process.cwd(), ".pond"), { recursive: true })
-      writeFileSync(marker, "1")
-    } catch {}
-    process.exit(1)
-  }, 600)
-}
+let crashArmed = false
 export default capsule({
   schema: { items: table({ name: string() }) },
-  queries: { ping: query(() => "pong") },
+  queries: {
+    ping: query(() => {
+      if (!crashArmed && !existsSync(marker)) {
+        crashArmed = true
+        setTimeout(() => {
+          try {
+            mkdirSync(join(process.cwd(), ".pond"), { recursive: true })
+            writeFileSync(marker, "1")
+          } catch {}
+          process.exit(1)
+        }, 400)
+      }
+      return "pong"
+    }),
+  },
   mutations: {},
 })
 `
@@ -143,13 +154,14 @@ test("a capsule that crashes after boot is brought back up (auto-respawn + lazy 
       req.end()
     })
 
-  // Boot 1 is live immediately after deploy create returns.
+  // First ping proves the worker is live and arms the one-shot crash timer.
   const first = await ping()
   assert.equal(first.status, 200, "capsule should serve before its scheduled crash")
+  assert.ok(first.body.includes("pong"), "pre-crash ping should return pong")
 
   const marker = path.join(dataDir, "deploys", deployId, ".pond", "crashed-once")
 
-  // Wait past the scheduled crash (600ms) + first backoff (500ms) with margin.
+  // Wait past the armed crash (400ms) + first backoff (500ms) with margin.
   let recovered = false
   const start = Date.now()
   while (Date.now() - start < 8000) {
