@@ -112,6 +112,18 @@ npx pondsh new "a dashboard for hermes-agent"
 
 Pass `--dir my-app` to override the auto-slugged directory name. Pond itself doesn't call any remote LLM — `--generate` only invokes whatever local agent CLI is on your `$PATH`. After the agent finishes, `npm run dev` and `pond deploy --api …` work normally; the IDE URL lets you keep iterating in the browser.
 
+### Keep building: `pond edit`
+
+`pond new --generate` builds the first version; `pond edit` iterates on it. Run it from inside a capsule with a plain-English change request, and the same local agent cascade (`hermes` → `claude` → `codex`) reads your existing `server/index.ts`, `client/index.tsx`, and the capsule contract, then makes the change in place:
+
+```bash
+pond edit "add a dark mode toggle and persist the choice"
+pond edit "show a streak count next to each habit and sort by longest streak"
+pond edit "add a search box that filters the list" --agent claude
+```
+
+It edits the files you already have (preserving working features), so `pond dev` hot-reloads the result and `pond deploy` ships it. Like `--generate`, it only drives a local agent CLI on your `$PATH` — Pond never calls a remote LLM itself.
+
 ### Anonymous hosted deploy (Lakebed-style)
 
 If a public Pond host is running (e.g. `pond.example.com`), you can ship anonymously without an account:
@@ -164,28 +176,29 @@ Pond will:
 
 ## CLI
 
-| Command                                    | Purpose                                                                  |
-| ------------------------------------------ | ------------------------------------------------------------------------ |
-| `pond new <name>`                          | Scaffold a new capsule from a template                                   |
-| `pond new <free-form description...>`      | Scaffold + write `AGENTS.md` so an agent can build the described capsule |
-| `pond dev --port 3000`                     | Run the local dev server                                                 |
-| `pond deploy`                              | Anonymous deploy to https://pond.run — prints a live URL + claim token   |
-| `pond deploy --api <url>`                  | Upload to a different control plane (e.g. self-hosted)                   |
-| `pond deploy --local`                      | Build a standalone server bundle for `pond start` instead of uploading   |
-| `pond claim`                               | Cross-machine claim using a deploy's claim token                         |
-| `pond start`                               | Start the bundled deploy artifact locally                                |
-| `pond host`                                | Start the self-hosted Pond control plane                                 |
-| `pond inspect`                             | Inspect local capsule metadata                                           |
-| `pond logs`                                | Stream structured local logs                                             |
-| `pond db list`                             | List SQLite tables from a running capsule                                |
-| `pond db dump [table]`                     | Dump one table or the full local database                                |
-| `pond auth as <name>`                      | Set the current dev guest identity                                       |
-| `pond login --api <url> --username <name>` | Bootstrap first admin (needs `POND_HOST_TOKEN`) or attach with `--token` |
-| `pond dashboard`                           | Open the project dashboard for the current control plane in a browser    |
-| `pond user create <name> [--admin]`        | Create a new control-plane user (admin only)                             |
-| `pond env list/set/unset <deployId>`       | Manage hosted-deploy server env vars                                     |
-| `pond domains list/add/remove <subdomain>` | Manage custom subdomain aliases for a deploy                             |
-| `pond token rotate --api <url>`            | Rotate the saved user API token                                          |
+| Command                                    | Purpose                                                                         |
+| ------------------------------------------ | ------------------------------------------------------------------------------- |
+| `pond new <name>`                          | Scaffold a new capsule from a template                                          |
+| `pond new <free-form description...>`      | Scaffold + write `AGENTS.md` so an agent can build the described capsule        |
+| `pond edit "<change...>"`                  | Hand a change/feature request to a local agent to build out the current capsule |
+| `pond dev --port 3000`                     | Run the local dev server                                                        |
+| `pond deploy`                              | Anonymous deploy to https://pond.run — prints a live URL + claim token          |
+| `pond deploy --api <url>`                  | Upload to a different control plane (e.g. self-hosted)                          |
+| `pond deploy --local`                      | Build a standalone server bundle for `pond start` instead of uploading          |
+| `pond claim`                               | Cross-machine claim using a deploy's claim token                                |
+| `pond start`                               | Start the bundled deploy artifact locally                                       |
+| `pond host`                                | Start the self-hosted Pond control plane                                        |
+| `pond inspect`                             | Inspect local capsule metadata                                                  |
+| `pond logs`                                | Stream structured local logs                                                    |
+| `pond db list`                             | List SQLite tables from a running capsule                                       |
+| `pond db dump [table]`                     | Dump one table or the full local database                                       |
+| `pond auth as <name>`                      | Set the current dev guest identity                                              |
+| `pond login --api <url> --username <name>` | Bootstrap first admin (needs `POND_HOST_TOKEN`) or attach with `--token`        |
+| `pond dashboard`                           | Open the project dashboard for the current control plane in a browser           |
+| `pond user create <name> [--admin]`        | Create a new control-plane user (admin only)                                    |
+| `pond env list/set/unset <deployId>`       | Manage hosted-deploy server env vars                                            |
+| `pond domains list/add/remove <subdomain>` | Manage custom subdomain aliases for a deploy                                    |
+| `pond token rotate --api <url>`            | Rotate the saved user API token                                                 |
 
 ## Runtime Model
 
