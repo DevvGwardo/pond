@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url"
 import * as path from "node:path"
 import * as fs from "node:fs"
 import { newCommand } from "./commands/new.js"
+import { editCommand } from "./commands/edit.js"
 import { devCommand } from "./commands/dev.js"
 import { deployCommand } from "./commands/deploy.js"
 import { claimCommand } from "./commands/claim.js"
@@ -36,6 +37,7 @@ const main = defineCommand({
   },
   subCommands: {
     new: newCommand,
+    edit: editCommand,
     dev: devCommand,
     deploy: deployCommand,
     claim: claimCommand,

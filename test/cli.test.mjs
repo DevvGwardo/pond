@@ -453,3 +453,46 @@ test("login --api rejects a value that is not a valid URL", async () => {
   assert.ok(err, "expected a non-zero exit")
   assert.match(String(err.stderr ?? ""), /valid http\(s\) URL/)
 })
+
+// `pond edit` guard paths. These hit validation that runs BEFORE any agent is
+// detected or spawned, so they're fast and don't depend on a local agent.
+test("`pond edit` errors when not run inside a capsule", async () => {
+  const parent = tmp("pond-cli-edit-nocap-")
+  let err
+  try {
+    await execFileP(process.execPath, [CLI_PATH, "edit", "add a thing"], { cwd: parent, timeout: 15000 })
+  } catch (e) {
+    err = e
+  }
+  assert.ok(err, "expected a non-zero exit")
+  assert.match(String(err.stderr ?? ""), /No server\/index\.ts/)
+})
+
+test("`pond edit` requires a change description", async () => {
+  const parent = tmp("pond-cli-edit-noarg-")
+  await execFileP(process.execPath, [CLI_PATH, "new", "cap", "--no-git"], { cwd: parent, timeout: 30000 })
+  let err
+  try {
+    await execFileP(process.execPath, [CLI_PATH, "edit"], { cwd: path.join(parent, "cap"), timeout: 15000 })
+  } catch (e) {
+    err = e
+  }
+  assert.ok(err, "expected a non-zero exit")
+  assert.match(String(err.stderr ?? ""), /requires a description/)
+})
+
+test("`pond edit --agent bogus` rejects an unknown agent", async () => {
+  const parent = tmp("pond-cli-edit-badagent-")
+  await execFileP(process.execPath, [CLI_PATH, "new", "cap", "--no-git"], { cwd: parent, timeout: 30000 })
+  let err
+  try {
+    await execFileP(process.execPath, [CLI_PATH, "edit", "add x", "--agent", "bogus"], {
+      cwd: path.join(parent, "cap"),
+      timeout: 15000,
+    })
+  } catch (e) {
+    err = e
+  }
+  assert.ok(err, "expected a non-zero exit")
+  assert.match(String(err.stderr ?? ""), /Unknown agent/)
+})
