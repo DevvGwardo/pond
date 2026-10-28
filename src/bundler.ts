@@ -12,6 +12,20 @@ import { containedRealPath } from "./host/fs-safe.js"
 const moduleRequire = createRequire(import.meta.url)
 const preactDir = path.dirname(moduleRequire.resolve("preact/package.json"))
 
+// preact 11 renamed its dist builds (preact.module.js -> preact.mjs) and moved hooks/ and
+// jsx-runtime/ under their own folders. Resolve each ESM entry from preact's own package
+// exports so this alias map survives a major bump instead of pointing at files that no
+// longer exist (preact 11 broke every client build until this was fixed).
+function preactEntry(subpath: string): string {
+  const pkg = moduleRequire("preact/package.json") as {
+    exports?: Record<string, string | { default?: string; import?: string; module?: string }>
+  }
+  const entry = pkg.exports?.[subpath]
+  const rel = typeof entry === "string" ? entry : (entry?.default ?? entry?.import ?? entry?.module)
+  if (!rel) throw new Error(`preact has no ESM entry for "${subpath}"; check its package.json exports`)
+  return path.join(preactDir, rel)
+}
+
 export async function buildClient(entry: string, options: { liveReload?: boolean } = {}): Promise<string> {
   // The capsule project root — the client entry is always <root>/client/index.tsx.
   const projectRoot = path.resolve(path.dirname(entry), "..")
@@ -59,10 +73,10 @@ export { render, h } from "preact";
     jsxImportSource: "preact",
     alias: {
       "pond/client": path.resolve(import.meta.dirname, "../client/index.ts"),
-      "preact/jsx-runtime": path.join(preactDir, "jsx-runtime/dist/jsxRuntime.module.js"),
-      "preact/jsx-dev-runtime": path.join(preactDir, "jsx-runtime/dist/jsxRuntime.module.js"),
-      "preact/hooks": path.join(preactDir, "hooks/dist/hooks.module.js"),
-      preact: path.join(preactDir, "dist/preact.module.js"),
+      "preact/jsx-runtime": preactEntry("./jsx-runtime"),
+      "preact/jsx-dev-runtime": preactEntry("./jsx-runtime"),
+      "preact/hooks": preactEntry("./hooks"),
+      preact: preactEntry("."),
     },
     define: {
       "process.env.NODE_ENV": '"development"',
