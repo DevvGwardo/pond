@@ -22,10 +22,23 @@ import { spawnSync } from "node:child_process"
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(__dirname, "..")
 
+// Resolve preact's ESM entries from its own package exports instead of hardcoding dist paths.
+// preact 11 renamed preact.module.js -> preact.mjs and moved hooks/jsx-runtime builds, so a
+// hardcoded map silently rots the moment the major bumps. Reading `exports` keeps the intent
+// (an explicit ESM entry, never the CJS/compat build) across 10.x and 11.x alike.
+function preactEntry(subpath) {
+  const pkgPath = path.resolve(ROOT, "node_modules/preact/package.json")
+  const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"))
+  const entry = pkg.exports?.[subpath === "" ? "." : subpath]
+  const rel = typeof entry === "string" ? entry : (entry?.default ?? entry?.import ?? entry?.module)
+  if (!rel) throw new Error(`preact has no ESM entry for "${subpath || "."}"; check its package.json exports`)
+  return path.resolve(path.dirname(pkgPath), rel)
+}
+
 const aliasConfig = {
-  "preact/jsx-runtime": path.resolve(ROOT, "node_modules/preact/jsx-runtime/dist/jsxRuntime.module.js"),
-  "preact/hooks": path.resolve(ROOT, "node_modules/preact/hooks/dist/hooks.module.js"),
-  preact: path.resolve(ROOT, "node_modules/preact/dist/preact.module.js"),
+  "preact/jsx-runtime": preactEntry("./jsx-runtime"),
+  "preact/hooks": preactEntry("./hooks"),
+  preact: preactEntry(""),
 }
 
 async function bundle(entry) {
