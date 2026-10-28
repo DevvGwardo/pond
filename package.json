@@ -53,7 +53,7 @@
     "hono": "^4.13.1",
     "jose": "^6.2.8",
     "marked": "^18.0.9",
-    "preact": "^10.29.8",
+    "preact": "^11.0.2",
     "ws": "^8.21.3"
   },
   "devDependencies": {
