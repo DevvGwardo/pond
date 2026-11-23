@@ -1,6 +1,6 @@
 import { test, before, after } from "node:test"
 import assert from "node:assert/strict"
-import { spawn } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import { mkdtempSync, rmSync, existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import * as path from "node:path"
@@ -2520,6 +2520,67 @@ function runHostExpectingExit(extraArgs) {
   })
 }
 
+// True when this machine can actually run bubblewrap (Linux + bwrap on PATH).
+// Current ubuntu-latest runner images ship bubblewrap, so a valid
+// --capsule-fs-isolation=bwrap request must BOOT CONFINED there, not fail
+// closed; platforms without the binary (Windows, macOS, slim images) must
+// keep refusing to start rather than running unconfined.
+function bwrapInstalled() {
+  if (process.platform !== "linux") return false
+  try {
+    const r = spawnSync("bwrap", ["--version"], { stdio: "ignore", timeout: 5000 })
+    return r.status === 0
+  } catch {
+    return false
+  }
+}
+
+// Spawn `pond host`, resolve as soon as the boot banner prints the expected
+// line (validation passed, the host reached startup), then kill it — the
+// "boots correctly" counterpart to runHostExpectingExit.
+function runHostExpectingBanner(extraArgs, bannerPattern) {
+  return new Promise(async (resolve, reject) => {
+    const xPort = await pickFreePort()
+    const xData = mkdtempSync(path.join(tmpdir(), "pond-host-test-banner-"))
+    const proc = spawn(
+      process.execPath,
+      [
+        CLI_PATH,
+        "host",
+        "--port",
+        String(xPort),
+        "--host",
+        "127.0.0.1",
+        "--public-host",
+        publicHost,
+        "--data-dir",
+        xData,
+        ...extraArgs,
+      ],
+      { env: { ...process.env, POND_HOST_TOKEN: "x".repeat(32) }, stdio: ["ignore", "pipe", "pipe"] },
+    )
+    let output = ""
+    const onData = (c) => {
+      output += c
+      if (bannerPattern.test(output)) {
+        clearTimeout(timer)
+        proc.kill("SIGKILL")
+        resolve({ output })
+      }
+    }
+    proc.stdout.on("data", onData)
+    proc.stderr.on("data", onData)
+    const timer = setTimeout(() => {
+      proc.kill("SIGKILL")
+      reject(new Error(`host never printed the expected boot banner. output: ${output}`))
+    }, 15000)
+    proc.once("exit", () => {
+      clearTimeout(timer)
+      rmSync(xData, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+    })
+  })
+}
+
 test("--capsule-egress with an invalid mode fails fast", async () => {
   const { code, output } = await runHostExpectingExit(["--capsule-egress", "bogus"])
   assert.equal(code, 1)
@@ -2531,11 +2592,21 @@ test("--capsule-fs-isolation with an invalid mode fails fast (no silent fail-ope
   const { code, output } = await runHostExpectingExit(["--capsule-fs-isolation", "bwarp"])
   assert.equal(code, 1)
   assert.match(output, /invalid --capsule-fs-isolation/)
-  // Case-insensitive BWRAP is a VALID value — and still fails closed on a
-  // platform without bubblewrap rather than running unconfined.
-  const { code: code2, output: output2 } = await runHostExpectingExit(["--capsule-fs-isolation", "BWRAP"])
-  assert.equal(code2, 1)
-  assert.match(output2, /requires Linux|bubblewrap.*not available/)
+  // Case-insensitive BWRAP is a VALID value. What "correct" means depends on
+  // the machine: with bubblewrap installed (current ubuntu-latest images) the
+  // host must boot and say so — confined, never unconfined; without bubblewrap
+  // (or off Linux) it must fail closed rather than run unconfined.
+  if (bwrapInstalled()) {
+    const { output } = await runHostExpectingBanner(
+      ["--capsule-fs-isolation", "BWRAP"],
+      /capsule fs isolation: bubblewrap enabled/,
+    )
+    assert.match(output, /capsule fs isolation: bubblewrap enabled/)
+  } else {
+    const { code: code2, output: output2 } = await runHostExpectingExit(["--capsule-fs-isolation", "BWRAP"])
+    assert.equal(code2, 1)
+    assert.match(output2, /requires Linux|bubblewrap.*not available/)
+  }
 })
 
 test("--capsule-egress=proxy is gated until the proxy is wired end-to-end", async () => {
